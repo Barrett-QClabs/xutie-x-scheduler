@@ -166,7 +166,7 @@ export function ImportScreen() {
         </Button>
         {notice ? <span className="text-sm">{notice}</span> : null}
         {notice && !error ? (
-          <Button variant="outline" render={<Link href="/" />}>
+          <Button nativeButton={false} variant="outline" render={<Link href="/" />}>
             {t("openQueue")}
           </Button>
         ) : null}

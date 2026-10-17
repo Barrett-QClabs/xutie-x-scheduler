@@ -187,7 +187,9 @@ export function QueueScreen() {
           <CardContent className="space-y-3 py-8">
             <h2 className="font-heading text-2xl">{t("emptyTitle")}</h2>
             <p className="max-w-md text-sm leading-6 text-muted-foreground">{t("emptyBody")}</p>
-            <Button render={<Link href="/import" />}>{t("goImport")}</Button>
+            <Button nativeButton={false} render={<Link href="/import" />}>
+              {t("goImport")}
+            </Button>
           </CardContent>
         </Card>
       ) : (
@@ -274,6 +276,7 @@ export function QueueScreen() {
                       ) : null}
                       {tweet.tweetUrl ? (
                         <Button
+                          nativeButton={false}
                           size="sm"
                           variant="outline"
                           render={<a href={tweet.tweetUrl} target="_blank" rel="noreferrer" />}
