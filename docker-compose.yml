@@ -1,0 +1,16 @@
+services:
+  xuti:
+    build: .
+    ports:
+      - "3847:3847"
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/xqueue.sqlite
+      PORT: "3847"
+    volumes:
+      - xuti-data:/data
+    restart: unless-stopped
+
+volumes:
+  xuti-data:

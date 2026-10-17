@@ -1,0 +1,208 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useAppState } from "@/components/app-state";
+import { useI18n } from "@/components/i18n-provider";
+import { LengthMeter } from "@/components/length-meter";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { api } from "@/lib/api";
+import { toDatetimeLocal } from "@/lib/datetime";
+import { explainError } from "@/lib/explain-error";
+import type { MessageKey } from "@/lib/messages";
+import { parseImport } from "@/lib/parse-import";
+import type { ImportMode, InvalidTweet } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import { inspectTweet } from "@/lib/weighted-length";
+
+const MODE_KEYS: Record<ImportMode, MessageKey> = {
+  lines: "modeLines",
+  paragraphs: "modeParagraphs",
+  separator: "modeSeparator",
+  csv: "modeCsv",
+};
+
+export function ImportScreen() {
+  const { t, locale } = useI18n();
+  const { state, refresh } = useAppState();
+  const [source, setSource] = useState("");
+  const [format, setFormat] = useState<"text" | "csv">("text");
+  const [startAt, setStartAt] = useState("");
+  const [intervalMinutes, setIntervalMinutes] = useState(String(state?.queue.intervalMinutes ?? 15));
+  const [jitterMinutes, setJitterMinutes] = useState(String(state?.queue.jitterMinutes ?? 0));
+  const [scheduleSynced, setScheduleSynced] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!state || scheduleSynced) return;
+    const pending = state.tweets.filter((tweet) => tweet.status === "pending");
+    if (pending.length > 0) {
+      const last = pending[pending.length - 1];
+      setStartAt(
+        toDatetimeLocal(new Date(new Date(last.scheduledAt).getTime() + state.queue.intervalMinutes * 60_000)),
+      );
+    } else {
+      setStartAt(toDatetimeLocal(new Date(Date.now() + 2 * 60_000)));
+    }
+    setIntervalMinutes(String(state.queue.intervalMinutes));
+    setJitterMinutes(String(state.queue.jitterMinutes));
+    setScheduleSynced(true);
+  }, [state, scheduleSynced]);
+
+  const preview = useMemo(() => {
+    const parsed = parseImport(source, format);
+    const items = parsed.tweets.map((text, index) => ({ index, ...inspectTweet(text), raw: text }));
+    return { mode: parsed.mode, items };
+  }, [source, format]);
+
+  const validCount = preview.items.filter((item) => item.valid).length;
+  const invalidCount = preview.items.length - validCount;
+
+  async function onUpload(file: File | undefined) {
+    if (!file) return;
+    const text = await file.text();
+    setSource(text);
+    setFormat(file.name.toLowerCase().endsWith(".csv") ? "csv" : "text");
+    setNotice(null);
+  }
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api<{ queuedCount: number; invalid: InvalidTweet[] }>("/api/tweets/import", {
+        method: "POST",
+        body: JSON.stringify({
+          source,
+          format,
+          startAt: new Date(startAt).toISOString(),
+          intervalMinutes: Number(intervalMinutes),
+          jitterMinutes: Number(jitterMinutes),
+        }),
+      });
+      setNotice(
+        result.invalid.length
+          ? t("importPartial", { count: result.queuedCount, skipped: result.invalid.length })
+          : t("importDone", { count: result.queuedCount }),
+      );
+      if (result.invalid.length === 0) setSource("");
+      await refresh();
+    } catch (caught) {
+      setError(explainError(caught, locale, t));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <header>
+        <h1 className="font-heading text-3xl tracking-wide">{t("importTitle")}</h1>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">{t("importSubtitle")}</p>
+      </header>
+
+      <p className="max-w-2xl text-sm leading-6 text-muted-foreground">{t("importHint")}</p>
+      <p className="text-xs text-muted-foreground">{t("lengthHint")}</p>
+
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant={format === "text" ? "default" : "outline"} onClick={() => setFormat("text")}>
+          {t("formatText")}
+        </Button>
+        <Button type="button" variant={format === "csv" ? "default" : "outline"} onClick={() => setFormat("csv")}>
+          {t("formatCsv")}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={() => {
+            setFormat("text");
+            setSource(t("sample"));
+          }}
+        >
+          {t("fillSample")}
+        </Button>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="posts">{t("pasteLabel")}</Label>
+        <Textarea id="posts" value={source} onChange={(event) => setSource(event.target.value)} rows={12} className="min-h-64" />
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="file">{t("uploadLabel")}</Label>
+        <Input
+          id="file"
+          type="file"
+          accept=".txt,.csv,text/plain,text/csv"
+          onChange={(event) => void onUpload(event.target.files?.[0])}
+        />
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="start">{t("startAt")}</Label>
+          <Input id="start" type="datetime-local" value={startAt} onChange={(event) => setStartAt(event.target.value)} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="interval">{t("intervalLabel")}</Label>
+          <Input id="interval" inputMode="numeric" value={intervalMinutes} onChange={(event) => setIntervalMinutes(event.target.value)} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="jitter">{t("jitterLabel")}</Label>
+          <Input id="jitter" inputMode="numeric" value={jitterMinutes} onChange={(event) => setJitterMinutes(event.target.value)} />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Button type="button" disabled={busy || validCount === 0 || !startAt} onClick={() => void submit()}>
+          {busy ? t("working") : t("addToQueue", { count: validCount })}
+        </Button>
+        {notice ? <span className="text-sm">{notice}</span> : null}
+        {notice && !error ? (
+          <Button variant="outline" render={<Link href="/" />}>
+            {t("openQueue")}
+          </Button>
+        ) : null}
+      </div>
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="font-heading text-xl">{t("preview")}</h2>
+          <p className="text-xs text-muted-foreground">
+            {preview.items.length === 0
+              ? t("nothingParsed")
+              : `${t(MODE_KEYS[preview.mode])} · ${t("summary", {
+                  total: preview.items.length,
+                  valid: validCount,
+                  invalid: invalidCount,
+                })}`}
+          </p>
+        </div>
+        {preview.items.length > 0 ? (
+          <ul className="max-h-[28rem] space-y-2 overflow-auto pr-1">
+            {preview.items.map((item) => (
+              <li key={`${item.index}-${item.raw.slice(0, 24)}`} className="rounded-lg bg-card px-3 py-2 ring-1 ring-foreground/10">
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground tabular-nums">{item.index + 1}</span>
+                  <Badge variant={item.valid ? "outline" : "destructive"} className={cn(item.valid && "bg-emerald-100 text-emerald-950")}>
+                    {item.valid ? t("valid") : item.reason === "too_long" ? t("reasonTooLong") : t("reasonEmpty")}
+                  </Badge>
+                  <LengthMeter text={item.raw} className="ml-auto" />
+                </div>
+                <p className="whitespace-pre-wrap text-sm leading-6 break-words">{item.raw}</p>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
+    </div>
+  );
+}
