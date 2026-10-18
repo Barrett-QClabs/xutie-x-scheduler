@@ -12,8 +12,8 @@ describe("punctual posting (5 s tick simulation)", () => {
     saveCredentials({ apiKey: "abc12345", apiSecret: "s3cret-value", accessToken: "tok-value", accessTokenSecret: "toksecret" });
     updateAccount({ username: user.username, displayName: user.name, userId: user.id });
     const start = new Date(Date.now() + 60_000);
-    importTweets({ source: "一\n二\n三\n四\n五", format: "text", startAt: start.toISOString(), intervalMinutes: 16 });
-    updateScheduleSettings({ intervalMinutes: 16, randomMinSeconds: 0, randomMaxSeconds: 120, reschedule: true, startAt: start.toISOString() });
+    importTweets({ source: "一\n二\n三\n四\n五", format: "text", startAt: start.toISOString(), intervalMinutes: 17 });
+    updateScheduleSettings({ intervalMinutes: 17, randomMinSeconds: 0, randomMaxSeconds: 180, reschedule: true, startAt: start.toISOString() });
 
     const timeline: { id: string; at: number }[] = [];
     let seq = 0;
@@ -50,23 +50,23 @@ describe("punctual posting (5 s tick simulation)", () => {
     // The manual post moved the queue exactly once to a single stable target.
     expect(shiftedTargets.size).toBe(1);
     const [target] = [...shiftedTargets].map((s) => new Date(s).getTime());
-    expect(target - manualAt).toBeGreaterThanOrEqual(16 * 60_000);
-    expect(target - manualAt).toBeLessThanOrEqual(18 * 60_000);
+    expect(target - manualAt).toBeGreaterThanOrEqual(17 * 60_000);
+    expect(target - manualAt).toBeLessThanOrEqual(20 * 60_000);
     const sorted = [...timeline].sort((a, b) => a.at - b.at);
     // Every post the scheduler makes is at least one interval after the previous post (ours or manual).
     for (let i = 1; i < sorted.length; i += 1) {
-      if (sorted[i].id !== "manual") expect(sorted[i].at - sorted[i - 1].at).toBeGreaterThanOrEqual(16 * 60_000);
+      if (sorted[i].id !== "manual") expect(sorted[i].at - sorted[i - 1].at).toBeGreaterThanOrEqual(17 * 60_000);
     }
   });
 });
 
 describe("dynamic re-anchoring to manual posts", () => {
-  it("re-anchors the queue once per manual post and cascades 16–18 min gaps", async () => {
+  it("re-anchors the queue once per manual post and cascades 17–20 min gaps", async () => {
     saveCredentials({ apiKey: "abc12345", apiSecret: "s3cret-value", accessToken: "tok-value", accessTokenSecret: "toksecret" });
     updateAccount({ username: user.username, displayName: user.name, userId: user.id });
     const start = new Date(Date.now() + 60_000);
-    importTweets({ source: "一\n二\n三\n四\n五\n六", format: "text", startAt: start.toISOString(), intervalMinutes: 16 });
-    updateScheduleSettings({ intervalMinutes: 16, randomMinSeconds: 0, randomMaxSeconds: 120, reschedule: true, startAt: start.toISOString() });
+    importTweets({ source: "一\n二\n三\n四\n五\n六", format: "text", startAt: start.toISOString(), intervalMinutes: 17 });
+    updateScheduleSettings({ intervalMinutes: 17, randomMinSeconds: 0, randomMaxSeconds: 180, reschedule: true, startAt: start.toISOString() });
 
     const timeline: { id: string; at: number }[] = [];
     let seq = 0;
@@ -115,13 +115,13 @@ describe("dynamic re-anchoring to manual posts", () => {
     for (let i = 1; i < sorted.length; i += 1) {
       const gap = sorted[i].at - sorted[i - 1].at;
       if (sorted[i].id.startsWith("m")) continue;
-      expect(gap).toBeGreaterThanOrEqual(16 * 60_000); // never early, incl. after manual posts
-      expect(gap).toBeLessThanOrEqual(18 * 60_000 + 5_000); // never more than ~18 min (tick 5 s)
+      expect(gap).toBeGreaterThanOrEqual(17 * 60_000); // never early, incl. after manual posts
+      expect(gap).toBeLessThanOrEqual(20 * 60_000 + 5_000); // never more than ~20 min (tick 5 s)
     }
     for (const m of manuals) {
       const ourNext = sorted.find((t) => t.id.startsWith("p") && t.at > m.at)!;
-      expect(ourNext.at - m.at).toBeGreaterThanOrEqual(16 * 60_000);
-      expect(ourNext.at - m.at).toBeLessThanOrEqual(18 * 60_000 + 5_000);
+      expect(ourNext.at - m.at).toBeGreaterThanOrEqual(17 * 60_000);
+      expect(ourNext.at - m.at).toBeLessThanOrEqual(20 * 60_000 + 5_000);
     }
     // After the manual post was detected the next post's time changed once and then stayed put.
     expect(firstScheduleAfter.m1.length).toBeLessThanOrEqual(2);

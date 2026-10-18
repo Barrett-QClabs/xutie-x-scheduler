@@ -209,8 +209,8 @@ describe("recent posts on X", () => {
     expect(next?.delayReason).toBeNull();
     expect(new Date(next!.scheduledAt).toISOString()).toBe(slot(postedAt, 90).toISOString());
 
-    patchTweet(pending.id, { scheduledAt: new Date(now.getTime() + 30_000).toISOString() });
-    const again = await tick({ now: new Date(now.getTime() + 30_000), client });
+    patchTweet(pending.id, { scheduledAt: new Date(now.getTime() + 5_000).toISOString() });
+    const again = await tick({ now: new Date(now.getTime() + 5_000), client });
     expect(again.action).toBe("deferred");
     expect(reads).toBe(1);
   });

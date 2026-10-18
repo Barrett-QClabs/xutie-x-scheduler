@@ -104,7 +104,8 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
       client = createXClient(credentials);
     }
 
-    const gap = await recentPostGap(now, client, fresh.intervalMinutes * 60_000);
+    // Right before posting, always read X fresh so a manual post from seconds ago is seen.
+    const gap = await recentPostGap(now, client, fresh.intervalMinutes * 60_000, Boolean(nextDueTweet(now)));
     // A new manual post on X re-anchors the queue once (random extra rolled once and stored).
     if (gap?.manual && gap.id && gap.id !== getAnchoredManualId()) {
       setAnchoredManualId(gap.id);
@@ -183,15 +184,18 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
 /** Watch the X timeline (cached for TIMELINE_CACHE_TTL_MS) while the next post is this close. */
 const WATCH_AHEAD_MS = 20 * 60_000;
 
+const DUE_CACHE_TTL_MS = 10_000;
+
 const TIMELINE_LOG = "[序帖] 读取最近帖子失败，改用本工具自己的上次发送时间。";
 
 async function recentPostGap(
   now: Date,
   client: XClient,
   intervalMs: number,
+  forceFresh = false,
 ): Promise<{ at: Date; manual: boolean; id: string } | null> {
   if (!client.latestTweet) return null;
-  const remote = await readRemoteLatest(now, client, intervalMs);
+  const remote = await readRemoteLatest(now, client, intervalMs, forceFresh);
   const local = latestLocalPost();
   const winner = laterPost(remote, local);
   if (!winner) return null;
@@ -208,7 +212,12 @@ function laterPost(
   return remote.at.getTime() >= local.at.getTime() ? remote : local;
 }
 
-async function readRemoteLatest(now: Date, client: XClient, intervalMs: number): Promise<{ id: string; at: Date } | null> {
+async function readRemoteLatest(
+  now: Date,
+  client: XClient,
+  intervalMs: number,
+  forceFresh: boolean,
+): Promise<{ id: string; at: Date } | null> {
   if (!client.latestTweet) return null;
   const cache = getTimelineCache();
   const reusable = shouldReuseTimelineCache({
@@ -217,7 +226,8 @@ async function readRemoteLatest(now: Date, client: XClient, intervalMs: number):
     ok: cache.ok,
     now,
     intervalMs,
-    ttlMs: TIMELINE_CACHE_TTL_MS,
+    // When a post is due, only trust a read from the last few seconds.
+    ttlMs: forceFresh ? DUE_CACHE_TTL_MS : TIMELINE_CACHE_TTL_MS,
   });
   if (reusable) {
     if (!cache.ok) return null;
