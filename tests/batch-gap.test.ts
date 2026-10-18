@@ -239,12 +239,22 @@ describe("live timeline read", () => {
       expect(url).toContain("max_results=5");
       expect(url).toContain("exclude=retweets");
       expect(decodeURIComponent(url)).toContain("exclude=retweets,replies");
-      expect(url).toContain("tweet.fields=created_at");
+      expect(decodeURIComponent(url)).toContain("tweet.fields=created_at,referenced_tweets");
       return new Response(
         JSON.stringify({
           data: [
             { id: "older", created_at: "2026-06-01T10:00:00.000Z" },
             { id: "newer", created_at: "2026-06-01T11:00:00.000Z" },
+            {
+              id: "self-reply",
+              created_at: "2026-06-01T12:00:00.000Z",
+              referenced_tweets: [{ type: "replied_to", id: "newer" }],
+            },
+            {
+              id: "quote",
+              created_at: "2026-06-01T10:30:00.000Z",
+              referenced_tweets: [{ type: "quoted", id: "x" }],
+            },
             { id: "missing-time" },
           ],
         }),

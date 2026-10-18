@@ -122,10 +122,18 @@ async function verifyCredentials(credentials: Credentials): Promise<XUser> {
   };
 }
 
+function isReply(record: Record<string, unknown>): boolean {
+  const refs = record.referenced_tweets;
+  if (!Array.isArray(refs)) return false;
+  return refs.some(
+    (ref) => !!ref && typeof ref === "object" && (ref as { type?: unknown }).type === "replied_to",
+  );
+}
+
 async function latestTweet(credentials: Credentials, userId: string): Promise<XTimelineTweet | null> {
   const payload = await xRequest(credentials, "GET", `/2/users/${encodeURIComponent(userId)}/tweets`, {
     max_results: "5",
-    "tweet.fields": "created_at",
+    "tweet.fields": "created_at,referenced_tweets",
     exclude: "retweets,replies",
   });
   if (!Array.isArray(payload.data)) return null;
@@ -134,6 +142,8 @@ async function latestTweet(credentials: Credentials, userId: string): Promise<XT
     if (!item || typeof item !== "object") continue;
     const record = item as Record<string, unknown>;
     if (typeof record.id !== "string" || typeof record.created_at !== "string") continue;
+    // X still returns replies to your own posts (thread replies) even with exclude=replies.
+    if (isReply(record)) continue;
     const time = new Date(record.created_at).getTime();
     if (Number.isNaN(time)) continue;
     if (!best || time > best.time) best = { id: record.id, createdAt: record.created_at, time };
