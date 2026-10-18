@@ -1,182 +1,179 @@
-# 序帖
+# 序帖 (Xutie)
 
-自托管的 X（Twitter）定时发帖工具。你使用自己的 X 开发者应用凭据发帖，序帖不会带任何共享密钥。
+[English](./README.md) · [简体中文](./README.zh-CN.md)
 
-适合已经有 X 开发者账号、想把几十条帖子按固定间隔发出去的人。文本导入后进入本地队列，后台调度器到点调用 X API v2 的 `POST /2/tweets`。
+Self-hosted scheduler for X (Twitter). You bring your own developer-app credentials. 序帖 does not ship a shared API key.
 
-## 功能
+Paste or upload a batch of posts, queue them on an interval, and let a local process call `POST /2/tweets` when each one is due. The interface defaults to Simplified Chinese and can be switched to English.
 
-- 在设置页填入 OAuth 1.0a 用户上下文的四项凭据，并用 `GET /2/users/me` 测试，成功后显示已连接的 @handle。
-- 凭据只存在服务器上，用环境变量里的密钥做 AES-256-GCM 加密。接口不会把密钥回传给浏览器。
-- 批量导入：一行一条、空行分段，或用单独一行的 `---` 分隔；也可以上传 `.txt` / `.csv`。一次最多入队 50 条（代码里的 `MAX_IMPORT_BATCH`）。超出时只接受前 50 条合格帖子，并提示把剩下的拆成下一批；字数不合格的不占这 50 个名额。
-- 按 X 的加权长度检查 280 上限：英文计 1，汉字计 2，每个 http(s) 链接计 23。超限的不会入队。
-- 队列可设开始时间、间隔（默认 15 分钟）和可选抖动（例如 ±2 分钟）。每条都能改、删、上移下移；可以暂停或继续全部，也可以重试失败项。
-- 每条待发帖在真正 `POST` 之前，会先看这个账号在 X 上的最近一条帖子（包括你在序帖之外手发的）。若距上次发帖还不到一个间隔，这条和后面还没发的帖子会一起顺延，彼此间隔保持不变。若最近一条不是序帖发出的，队列里会标明因此顺延。
-- 调度状态写在 SQLite 里，重启后未发的帖子会继续。遇到 429 会按 `x-rate-limit-reset` 等待；重复内容记为失败并继续后面的帖子；鉴权失败会暂停队列并显示原因。发出去之后保存帖子 id，并链到 `https://x.com/{handle}/status/{id}`。
+## Features
 
-界面默认简体中文，侧栏可以切到英文。
+- Settings page for the four OAuth 1.0a user-context credentials, with a connection test (`GET /2/users/me`) that shows the connected @handle.
+- Credentials stay on the server. They are encrypted at rest with AES-256-GCM using a key from the environment, and API responses never send them back to the browser.
+- Bulk import: one post per line, blank lines between posts, a line that is exactly `---`, or a `.txt` / `.csv` upload. One batch accepts at most 50 valid posts (`MAX_IMPORT_BATCH`). Extra valid posts are reported so you can split them; lines that fail the length check do not use a slot.
+- Length check follows X's weighted limit of 280: Latin characters count as 1, CJK as 2, and each `http(s)` URL as 23.
+- Queue controls: start time, interval (default 15 minutes), optional jitter, edit, delete, reorder, pause, resume, and retry.
+- Before each send, the scheduler reads the account's latest post on X, including posts made outside this app. If that post is newer than one interval, the due tweet and the pending tweets after it move forward together so the gap is preserved. A delay caused by a post this app did not send is labeled in the queue.
+- State lives in SQLite, so a restart keeps unsent posts. HTTP 429 waits for `x-rate-limit-reset`. Duplicate content is marked failed and the queue continues. An auth failure pauses the queue and shows the reason. A successful post stores the tweet id and a link to `https://x.com/{handle}/status/{id}`.
 
-## 创建自己的 X 开发者应用
+## Screenshots
 
-序帖使用 **OAuth 1.0a 用户上下文**。发帖必须是「代表某个账号」的 Access Token，不能用应用级 Bearer Token。
+Screenshots of the queue, import, and settings screens can be added here.
 
-1. 打开 [X 开发者控制台](https://console.x.com)（有的账号仍从 [developer.x.com 门户](https://developer.x.com/en/portal/dashboard) 进入），用要发帖的账号登录并开通开发者权限。
-2. 创建一个 **Project**。v2 接口要求应用属于某个 Project，单独建在 Project 外面的旧应用经常会调用失败。
-3. 在这个 Project 里创建一个 **App**。
-4. 打开该 App 的 **User authentication settings**：
-   - App permissions 选 **Read and Write**。不需要 Direct Messages。
-   - 应用类型选带机密客户端的 Web App 或 Automated App / Bot。
-   - 回调地址和网站地址是控制台的必填项。序帖用的是控制台里生成的 Access Token，不会走三方登录跳转，这两项可以先填 `http://127.0.0.1:3847`。
-5. 保存权限后，打开 **Keys and tokens**，复制这四项：
+## Quick start
 
-   | 在序帖里的名称 | 在 X 控制台里的名称 |
-   | --- | --- |
-   | API Key | API Key / Consumer Key |
-   | API Key Secret | API Key Secret / Consumer Secret |
-   | Access Token | Access Token |
-   | Access Token Secret | Access Token Secret |
-
-6. **先把权限改成 Read and Write，再生成 Access Token 和 Access Token Secret。** 如果先生成了令牌再改权限，旧令牌往往仍是只读，发帖会 403。改完权限后点 Regenerate，用新的 Access Token 和 Secret。
-7. 不要把 Bearer Token 填进序帖。Bearer Token 只能代表应用，不能代表你的账号发帖。
-8. 回到序帖的「设置」页，填入四项，点「保存并测试」。成功时会显示你的 @handle。
-
-密钥只在这一次输入时经过浏览器，随后加密写进服务器数据库。刷新页面不会再看到它们。
-
-## 本地运行
-
-需要 Node.js 22 或更新版本。
+Node.js 22 or newer.
 
 ```bash
 cp .env.example .env.local
 ```
 
-编辑 `.env.local`，把 `CREDENTIALS_ENCRYPTION_KEY` 换成至少 16 位的随机字符串。例如：
+Set `CREDENTIALS_ENCRYPTION_KEY` to a random string of at least 16 characters:
 
 ```bash
 openssl rand -base64 32
 ```
-
-然后：
 
 ```bash
 npm install
 npm run dev
 ```
 
-浏览器打开 [http://127.0.0.1:3847](http://127.0.0.1:3847)。
+Open [http://127.0.0.1:3847](http://127.0.0.1:3847).
 
-生产模式：
+Production:
 
 ```bash
 npm run build
 npm start
 ```
 
-同样监听 `3847`。数据库默认在 `./data/xqueue.sqlite`，第一次启动会自己创建。
+The server listens on port `3847`. The database is created at `./data/xqueue.sqlite` on first start.
 
-### 模拟模式
+### Mock mode
 
-还没有可用的 X 额度、只想先看队列时，在 `.env.local` 里写：
+To try the queue without calling X, set this in `.env.local`:
 
 ```bash
 X_API_MODE=mock
 ```
 
-测试连接和发帖都在本地完成，不会请求 X。帖子正文里如果包含 `[[duplicate]]`、`[[rate-limit]]`、`[[auth]]` 或 `[[fail]]`，模拟客户端会分别返回重复内容、429、鉴权失败和临时错误，方便看队列怎么处理。正式发帖前改回 `X_API_MODE=live`。
+Connection tests and posts stay local. Tweet text containing `[[duplicate]]`, `[[rate-limit]]`, `[[auth]]`, or `[[fail]]` makes the mock client return a duplicate, a 429, an auth error, or a transient error. Switch back to `X_API_MODE=live` before posting for real.
 
-## 怎么用
-
-1. 设置页保存并测试凭据，确认 @handle。
-2. 导入页贴上文本或上传文件。预览里会标出超限的条目，以及超过每批 50 条的部分。一次只会把前 50 条合格帖子加入队列。
-3. 设定开始时间、间隔和抖动，把通过检查的帖子加入队列。抖动在入队时就算好，队列里看到的是最终时间。超过 50 条时，删掉已经入队的那一段，再导入剩下的。
-4. 队列页可以改字、删除、上移下移未发送的帖子，也可以暂停全部、继续，或重试失败项。若因为你在 X 上手发了新帖而整体顺延，队列顶部和对应条目会写明原因。
-5. 调度器大约每 5 秒看一次。只有到点的下一条会发出。如果服务停过，积压的多条不会瞬间打出去，而是按当前间隔重新排开。发出前还会核对账号最近一条帖子，避免和手发的帖子挤在同一个间隔里。
-
-间隔和抖动也可以在队列页修改。勾选「按这个节奏重排」会从现在起重算还没发的时间。
-
-## 字符计数
-
-计数接近 twitter-text 配置 v3：
-
-- 英文字母、数字和常见符号计 1。
-- 汉字和其他默认权重的字符计 2。140 个汉字就是 280，第 141 个会被拒绝。
-- 每个 `http://` 或 `https://` 链接计 23，不管原来多长。链接末尾的句号、逗号不算进链接。
-- 不带协议的 `www.example.com` 按普通字符计。
-- 单个 emoji 大多计 2。带肤色、连字或国旗的组合有时会差 1 到 2，预览里的数字以序帖的计数为准。
-
-## 测试
-
-测试使用模拟的 X 客户端，不会访问 X。
+### Tests
 
 ```bash
 npm test
+npm run lint
 ```
 
-覆盖字数、导入拆分、每批 50 条上限、OAuth 1.0a 签名、加密，以及「导入 → 入队 → 到点发送」整条路径，包括 429、重复内容、鉴权失败，以及发帖前读取最近帖子：手发帖会顺延队列，读取失败时改用本工具自己的上次发送时间。
+Tests use a mocked X client and do not call X. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-## 部署
+## Create your own X developer app
 
-只运行 **一个** 进程。两个进程共用一个 SQLite 文件时，调度锁能降低重复发送的概率，但这个工具按单实例设计。
+序帖 uses **OAuth 1.0a user context**. Posting requires an access token for the account. An app-only bearer token cannot post as you.
 
-序帖没有登录。不要把端口直接暴露到公网。放在本机，或放在已经有认证的反向代理后面。
+1. Open the [X developer console](https://console.x.com). Some accounts still enter through the [developer portal](https://developer.x.com/en/portal/dashboard). Sign in as the account that will post and enable developer access.
+2. Create a **Project**. v2 endpoints expect the app to belong to a project.
+3. Create an **App** inside that project.
+4. Open **User authentication settings**:
+   - App permissions: **Read and Write**. Direct messages are not required.
+   - App type: a confidential web app or automated app / bot.
+   - Callback URL and website are required by the console. 序帖 uses the access token generated in the console and does not run a three-legged login, so `http://127.0.0.1:3847` is enough for both.
+5. After saving permissions, open **Keys and tokens** and copy these four values:
+
+   | In 序帖 | In the X console |
+   | --- | --- |
+   | API Key | API Key / Consumer Key |
+   | API Key Secret | API Key Secret / Consumer Secret |
+   | Access Token | Access Token |
+   | Access Token Secret | Access Token Secret |
+
+6. Set permissions to Read and Write **before** you generate the access token and access token secret. A token created earlier often stays read-only, and posting then returns 403. After changing permissions, regenerate both and use the new pair.
+7. Do not paste the bearer token into 序帖. A bearer token represents the app, not your account.
+8. On the settings page, save the four values and run the connection test. A success message shows your @handle.
+
+The secrets pass through the browser only on that save. After that they are stored encrypted. Reloading the page does not show them again.
+
+## Pricing
+
+X's prices change. The figures below are from public 2026 information. **Your developer console is the source of truth.**
+
+- New developers no longer get the old free tier. The default is pay-per-use: after you buy credits, creating a post without a link is about $0.015, and a post that contains a link is about $0.20. Reads such as `GET /2/users/me` also spend a small amount of credit.
+- Before each post, 序帖 makes one extra read: `GET /2/users/:id/tweets` with `max_results=5`, `tweet.fields=created_at`, and `exclude=retweets`, so it can see the time of the account's latest post, including posts you wrote by hand. That read is billed. One response contains up to 5 posts. Public figures put a single read around $0.005; confirm the unit price on your bill. A successful result is cached for 60 seconds, and kept until the interval ends when the latest post is still inside that interval, so the wait does not re-read every 5 seconds. If the read fails, the queue is not paused: the app uses its own last send time and logs the failure.
+- A sent post therefore costs about one timeline read plus one create. If nobody posts by hand during the wait, the app reads once more when the interval is over, to confirm the gap is clear.
+- The older Basic plan (about $200 per month) and Pro remain only for accounts that already subscribe. New accounts generally cannot start them.
+- Posting too fast returns HTTP 429. 序帖 waits until `x-rate-limit-reset`, or 15 minutes if that header is missing. The tweet stays pending.
+- Public docs often cite about 100 creates per user per 15 minutes and 10,000 per app per 24 hours. Plans differ. The default of one post every 15 minutes is meant to look less like a burst and sits far under those numbers.
+- X rejects duplicate content. That item is marked failed and the queue continues. Edit the text and retry.
+- A 401, or a 403 that is about the token or permissions, pauses the whole queue. A common cause is a still-read-only access token, or a mistyped value. Fix the credentials, pass the connection test, then resume.
+
+## Deploy
+
+Run **one** process. A lock in SQLite reduces double-sends if two processes share a file, but the app is designed as a single instance.
+
+There is no login. Do not expose the port on the public internet. Keep it on your machine, or put it behind a reverse proxy that already authenticates users.
 
 ### Docker
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入 CREDENTIALS_ENCRYPTION_KEY，并确认 X_API_MODE=live
+# Edit .env: set CREDENTIALS_ENCRYPTION_KEY and keep X_API_MODE=live
 docker compose up -d --build
 ```
 
-数据在名为 `xuti-data` 的卷里，容器内路径是 `/data/xqueue.sqlite`。
+Data is in the `xuti-data` volume, at `/data/xqueue.sqlite` inside the container.
 
-不用 Compose 时：
+Without Compose:
 
 ```bash
 docker build -t xuti .
 docker run -d --name xuti \
   -p 3847:3847 \
-  -e CREDENTIALS_ENCRYPTION_KEY='你的长随机字符串' \
+  -e CREDENTIALS_ENCRYPTION_KEY='a-long-random-string' \
   -e X_API_MODE=live \
   -e DATABASE_PATH=/data/xqueue.sqlite \
   -v xuti-data:/data \
   xuti
 ```
 
-### 直接用 Node
+### Node on a server
 
-在服务器上安装 Node.js 22，配置 `.env.local` 或导出同样的环境变量，然后 `npm ci`、`npm run build`、`npm start`。用 systemd 或进程管理器保住这一个进程即可。把 `./data` 放进备份。
+Install Node.js 22, set the same environment variables, then `npm ci`, `npm run build`, and `npm start`. Keep that one process running with systemd or another supervisor, and back up `./data`.
 
-更换 `CREDENTIALS_ENCRYPTION_KEY` 之后，旧凭据无法解密，队列会暂停。到设置页重新填写四项并测试，再点继续发送。
+Changing `CREDENTIALS_ENCRYPTION_KEY` makes old credentials undecryptable and pauses the queue. Enter the four values again, test the connection, and resume.
 
-## 费用和频率
+## Data
 
-X 的价格经常变，以下是 2026 年公开资料里的情况，**以你自己的开发者控制台为准**。
-
-- 新开发者已经没有原来的免费额度。默认是按量计费：购买 credits 之后，创建一条不含链接的帖子大约 0.015 美元，正文里带链接的帖子大约 0.20 美元。`GET /2/users/me` 这类读取也会扣少量额度。
-- 每发出一条之前，序帖会多一次读取：`GET /2/users/:id/tweets`，参数是 `max_results=5`、`tweet.fields=created_at`、`exclude=retweets`，用来拿到这个账号最近一条帖子的时间（包括你在序帖之外发的）。按量计费时这次读取也要付钱。一次响应最多含 5 条帖子，公开资料里单次读取大约在 0.005 美元这一档，实际以你控制台里的单价和账单为准。成功读到的结果会缓存：60 秒内直接复用；若最近一条仍落在当前间隔之内，会一直复用到这个间隔结束，等待期间不会每 5 秒再打一次读取。读取失败时不暂停队列，改用序帖自己记下的上次发送时间来判断要不要等，并在服务日志里写明「读取最近帖子失败」。
-- 因此一条帖子的花费大约是「一次时间线读取 + 一次发帖」。间隔内如果没有新手发帖，等待结束后才会再读一次，确认间隔已经空出来。
-- 旧的 Basic（大约每月 200 美元）和 Pro 只对已经订阅的账号继续有效，新账号一般不能再开通。
-- 发得太快会收到 HTTP 429。序帖会读取 `x-rate-limit-reset`（没有这个头则等待 15 分钟），到点再发，这条帖子仍保持待发送。
-- 公开资料里，`POST /2/tweets` 常见上限大约是每用户每 15 分钟 100 条、每应用每 24 小时 10000 条。不同套餐不一样。默认 15 分钟一条，是为了看起来不那么像机器连发，也远低于这个量级。
-- 重复内容会被 X 拒绝。序帖把这一条标为失败，队列继续。改掉文字后可以重试。
-- 401，或 403 且属于令牌、权限问题，会暂停整个队列。常见原因是 Access Token 仍是只读，或四项抄错。改完凭据、测试通过后，再点继续发送。
-
-## 数据
-
-| 位置 | 内容 |
+| Table | What it holds |
 | --- | --- |
-| `queue_settings` | 间隔、抖动、是否暂停、限流等到什么时候，以及最近一次时间线读取的时间和结果 |
-| `tweets` | 正文、计划时间、状态、帖子 id、错误信息、是否因站外新帖而顺延 |
-| `credentials` | 加密后的四项凭据，以及测试成功后的 @handle |
+| `queue_settings` | Interval, jitter, pause, rate-limit deadline, and the last timeline read |
+| `tweets` | Text, schedule, status, tweet id, error, and whether a post made outside this app delayed it |
+| `credentials` | The four credentials, encrypted, plus the @handle from a successful test |
 
-加密方式是 scrypt 派生密钥加 AES-256-GCM，盐和随机量跟密文存在一起。没有加密密钥就无法从数据库里读出凭据。
+The cipher is scrypt plus AES-256-GCM. The salt and IV are stored with the ciphertext. Without the encryption key, the credentials cannot be read back.
 
-## 限制
+## Limitations
 
-- 只发纯文本，不上传图片、视频或投票。
-- 只保存一套凭据，也就是一个 X 账号。
-- 按单实例设计。
-- 没有内置登录，请不要裸露在公网上。
-- 使用 OAuth 1.0a 用户上下文，不支持 OAuth 2.0 PKCE。
-- 字数是 twitter-text v3 的近似，复杂 emoji 可能差一两个字。
+- Text only. No images, video, or polls.
+- One saved credential set, so one X account.
+- Designed for a single process.
+- No built-in login. Do not expose it on the public internet.
+- OAuth 1.0a user context only. No OAuth 2.0 PKCE.
+- The character count approximates twitter-text v3. Complex emoji can be off by one or two.
+
+## Roadmap
+
+These are not implemented. They are the directions that would make 序帖 usable for more than one person on one machine:
+
+- **Multi-user login.** Accounts on the app itself, so a shared install is not an open queue.
+- **Multiple X accounts.** More than one credential set, with a queue per account.
+- **Images and other media.** Attachments on a post, not only text.
+- **Threads.** A sequence posted as replies to the previous tweet in the thread.
+- **Cloud deploy.** A documented path for a hosted single-tenant install, still without leaving the port open to the world.
+
+## License
+
+[MIT](./LICENSE). Copyright 2026 Barrett-QClabs.
+
+Issues, feature ideas, and pull requests: [CONTRIBUTING.md](./CONTRIBUTING.md). Community expectations: [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).

@@ -34,8 +34,14 @@ yarn-error.log*
 .env*
 !.env.example
 
-# local queue database
+# local queue database — never commit SQLite or its sidecars
 /data
+data/*.sqlite
+data/*.sqlite-*
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 
 # vercel
 .vercel

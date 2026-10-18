@@ -85,6 +85,8 @@ describe("schedule", () => {
 
 describe("oauth 1.0a", () => {
   it("matches the documented Twitter signature example", () => {
+    // Public values from Twitter's published OAuth 1.0a signature example.
+    // They are documentation fixtures, not live credentials.
     const { signature, header } = buildAuthorizationHeader({
       method: "POST",
       url: "https://api.twitter.com/1.1/statuses/update.json",

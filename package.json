@@ -2,6 +2,12 @@
   "name": "xuti",
   "version": "0.1.0",
   "private": true,
+  "description": "Self-hosted scheduler that posts a queue of text to X with your own API credentials.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Barrett-QClabs/xutie-x-scheduler"
+  },
   "scripts": {
     "dev": "next dev --turbopack -H 0.0.0.0 -p 3847",
     "build": "next build",
