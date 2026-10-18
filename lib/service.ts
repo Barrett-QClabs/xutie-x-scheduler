@@ -308,7 +308,7 @@ export function retryAllFailed(now = new Date(), random = Math.random): { ok: tr
   return { ok: true, count: failed.length };
 }
 
-function pendingInOrder(): Tweet[] {
+export function pendingInOrder(): Tweet[] {
   return listTweets()
     .filter((tweet) => tweet.status === "pending")
     .sort(compareTweets);
@@ -418,6 +418,27 @@ export function delayPendingForRecentPost(lastPostAt: Date, manual: boolean, ran
   const target = new Date(lastPostAt.getTime() + nextGapMs(pace, random));
   applyChain(pending, target, random, manual ? { delayReason: "manual" } : undefined);
   return new Date(pendingInOrder()[0].scheduledAt);
+}
+
+/**
+ * A new manual post appeared at `manualAt`: re-anchor the whole pending queue so the
+ * next post is manualAt + interval + one random extra (rolled once, stored as the
+ * scheduledAt), and every later post follows with interval + random extra gaps.
+ */
+export function reanchorPendingToManual(manualAt: Date, random: () => number = Math.random): Date | null {
+  const pending = pendingInOrder();
+  if (pending.length === 0) return null;
+  const pace = currentPace();
+  const times = computeSchedule({
+    count: pending.length,
+    startAt: new Date(Math.ceil((manualAt.getTime() + nextGapMs(pace, random)) / 1000) * 1000),
+    ...pace,
+    random,
+  });
+  pending.forEach((tweet, index) => {
+    patchTweet(tweet.id, { scheduledAt: times[index].toISOString(), delayReason: "manual" });
+  });
+  return times[0];
 }
 
 /** After an X rate limit, resume at `until` plus a random extra delay, keeping randomized gaps. */

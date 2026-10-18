@@ -170,7 +170,7 @@ describe("timeline cache", () => {
   const now = new Date("2026-06-01T12:00:00.000Z");
   const intervalMs = 15 * 60_000;
 
-  it("reuses a fresh check, and a successful check until the interval has elapsed", () => {
+  it("reuses only a fresh check (TTL), so manual posts made right after ours are seen promptly", () => {
     expect(
       shouldReuseTimelineCache({
         checkedAt: new Date(now.getTime() - 30_000).toISOString(),
@@ -191,7 +191,7 @@ describe("timeline cache", () => {
         intervalMs,
         ttlMs: TIMELINE_CACHE_TTL_MS,
       }),
-    ).toBe(true);
+    ).toBe(false);
 
     expect(
       shouldReuseTimelineCache({

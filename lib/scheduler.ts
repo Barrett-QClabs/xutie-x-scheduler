@@ -1,5 +1,6 @@
 import { TIMELINE_CACHE_TTL_MS } from "@/lib/constants";
 import {
+  getAnchoredManualId,
   getCredentialsRow,
   getQueueSettings,
   getTimelineCache,
@@ -7,6 +8,7 @@ import {
   patchQueueSettings,
   patchTweet,
   releaseLock,
+  setAnchoredManualId,
   setTimelineCache,
   tryAcquireLock,
   updateAccount,
@@ -19,7 +21,9 @@ import {
   latestLocalPost,
   nextDueTweet,
   pauseQueue,
+  pendingInOrder,
   readCredentials,
+  reanchorPendingToManual,
 } from "@/lib/service";
 import { shouldReuseTimelineCache } from "@/lib/timeline";
 import type { XClient, XTimelineTweet } from "@/lib/x-client";
@@ -76,8 +80,10 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
   if (!tryAcquireLock(now)) return { action: "busy" };
   try {
     deferExtraOverdue(now, options?.random);
-    const due = nextDueTweet(now);
-    if (!due) return { action: "idle" };
+    const upcoming = pendingInOrder()[0];
+    if (!upcoming) return { action: "idle" };
+    const watching = new Date(upcoming.scheduledAt).getTime() - now.getTime() <= WATCH_AHEAD_MS;
+    if (!watching) return { action: "idle" };
 
     let client = options?.client;
     if (!client) {
@@ -99,6 +105,14 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
     }
 
     const gap = await recentPostGap(now, client, fresh.intervalMinutes * 60_000);
+    // A new manual post on X re-anchors the queue once (random extra rolled once and stored).
+    if (gap?.manual && gap.id && gap.id !== getAnchoredManualId()) {
+      setAnchoredManualId(gap.id);
+      const until = reanchorPendingToManual(gap.at, options?.random);
+      if (until) return { action: "deferred", until: until.toISOString(), manual: true };
+    }
+    const due = nextDueTweet(now);
+    if (!due) return { action: "idle" };
     if (gap && now.getTime() < gap.at.getTime() + fresh.intervalMinutes * 60_000) {
       // Hard rule: never closer than one interval. The new slot is interval + random extra.
       const moved = delayPendingForRecentPost(gap.at, gap.manual, options?.random);
@@ -166,20 +180,23 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
   }
 }
 
+/** Watch the X timeline (cached for TIMELINE_CACHE_TTL_MS) while the next post is this close. */
+const WATCH_AHEAD_MS = 20 * 60_000;
+
 const TIMELINE_LOG = "[序帖] 读取最近帖子失败，改用本工具自己的上次发送时间。";
 
 async function recentPostGap(
   now: Date,
   client: XClient,
   intervalMs: number,
-): Promise<{ at: Date; manual: boolean } | null> {
+): Promise<{ at: Date; manual: boolean; id: string } | null> {
   if (!client.latestTweet) return null;
   const remote = await readRemoteLatest(now, client, intervalMs);
   const local = latestLocalPost();
   const winner = laterPost(remote, local);
   if (!winner) return null;
   const ours = new Set(listTweets().map((tweet) => tweet.tweetId).filter((id): id is string => Boolean(id)));
-  return { at: winner.at, manual: Boolean(winner.id) && !ours.has(winner.id) };
+  return { at: winner.at, manual: Boolean(winner.id) && !ours.has(winner.id), id: winner.id };
 }
 
 function laterPost(

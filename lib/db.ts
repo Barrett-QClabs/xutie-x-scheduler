@@ -78,6 +78,7 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, "queue_settings", "timeline_checked_at", "ALTER TABLE queue_settings ADD COLUMN timeline_checked_at TEXT");
   ensureColumn(db, "queue_settings", "timeline_latest_at", "ALTER TABLE queue_settings ADD COLUMN timeline_latest_at TEXT");
   ensureColumn(db, "queue_settings", "timeline_latest_id", "ALTER TABLE queue_settings ADD COLUMN timeline_latest_id TEXT");
+  ensureColumn(db, "queue_settings", "anchored_manual_id", "ALTER TABLE queue_settings ADD COLUMN anchored_manual_id TEXT");
   ensureColumn(db, "queue_settings", "timeline_ok", "ALTER TABLE queue_settings ADD COLUMN timeline_ok INTEGER");
   ensureColumn(
     db,
@@ -291,6 +292,15 @@ export function setTimelineCache(cache: TimelineCache): void {
       cache.ok ? 1 : 0,
       new Date().toISOString(),
     );
+}
+
+/** Id of the manual X post the queue was last re-anchored to (so each manual post anchors once). */
+export function getAnchoredManualId(): string | null {
+  return one<{ anchored_manual_id: string | null }>("SELECT anchored_manual_id FROM queue_settings WHERE id = 1")?.anchored_manual_id ?? null;
+}
+
+export function setAnchoredManualId(id: string | null): void {
+  getDb().prepare("UPDATE queue_settings SET anchored_manual_id = ? WHERE id = 1").run(id);
 }
 
 function mapTweet(row: TweetRow): Tweet {
