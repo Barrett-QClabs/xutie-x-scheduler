@@ -160,6 +160,8 @@ async function postTweet(credentials: Credentials, text: string): Promise<{ id: 
   return { id: (data as { id: string }).id };
 }
 
+const X_REQUEST_TIMEOUT_MS = 20_000;
+
 async function xRequest(
   credentials: Credentials,
   method: "GET" | "POST",
@@ -190,6 +192,8 @@ async function xRequest(
         ...(body ? { "Content-Type": "application/json" } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
+      // Never let a stalled connection block the 5 s scheduler loop (ticks run one after another).
+      signal: AbortSignal.timeout(X_REQUEST_TIMEOUT_MS),
     });
   } catch {
     throw new XApiError("连不上 X 的服务器。", "transient", 0);
