@@ -24,8 +24,15 @@ function queue(source: string, startAt: string) {
     format: "text",
     startAt,
     intervalMinutes: 15,
-    jitterMinutes: 0,
   });
+}
+
+/** random() = 0.5 picks 60 + floor(0.5 * 61) = 90 extra seconds. */
+const half = () => 0.5;
+
+/** Expected slot: previous post + 15 minutes + extra seconds, rounded up to the second. */
+function slot(after: Date, extraSeconds: number): Date {
+  return new Date(Math.ceil((after.getTime() + 15 * 60_000 + extraSeconds * 1000) / 1000) * 1000);
 }
 
 describe("import batch cap", () => {
@@ -40,9 +47,13 @@ describe("import batch cap", () => {
     expect(imported.queued[0].text).toBe("帖子1");
     expect(imported.queued[49].text).toBe("帖子50");
     expect(getPublicState().tweets.some((tweet) => tweet.text === "帖子51")).toBe(false);
-    const gap =
-      new Date(imported.queued[49].scheduledAt).getTime() - new Date(imported.queued[0].scheduledAt).getTime();
-    expect(gap).toBe(49 * 15 * 60_000);
+    for (let index = 1; index < 50; index += 1) {
+      const gap =
+        new Date(imported.queued[index].scheduledAt).getTime() -
+        new Date(imported.queued[index - 1].scheduledAt).getTime();
+      expect(gap).toBeGreaterThanOrEqual(16 * 60_000);
+      expect(gap).toBeLessThanOrEqual(17 * 60_000);
+    }
   });
 
   it("does not count over-limit lines toward the batch of 50", () => {
@@ -84,19 +95,22 @@ describe("recent posts on X", () => {
       },
     };
 
-    const deferred = await tick({ now, client });
-    const earliest = new Date(latestAt.getTime() + 15 * 60_000);
+    const deferred = await tick({ now, client, random: half });
+    const earliest = slot(latestAt, 90);
     expect(deferred).toEqual({ action: "deferred", until: earliest.toISOString(), manual: true });
     expect(posts).toBe(0);
     expect(reads).toBe(1);
 
     const shifted = getPublicState().tweets;
     expect(new Date(shifted[0].scheduledAt).toISOString()).toBe(earliest.toISOString());
-    expect(new Date(shifted[1].scheduledAt).getTime() - new Date(shifted[0].scheduledAt).getTime()).toBe(originalGap);
+    expect(new Date(shifted[1].scheduledAt).getTime() - new Date(shifted[0].scheduledAt).getTime()).toBe(
+      15 * 60_000 + 90_000,
+    );
+    expect(originalGap).toBeLessThan(15 * 60_000 + 90_000);
     expect(shifted.every((tweet) => tweet.delayReason === "manual")).toBe(true);
 
     patchTweet(shifted[0].id, { scheduledAt: now.toISOString() });
-    const cached = await tick({ now: new Date(now.getTime() + 1000), client });
+    const cached = await tick({ now: new Date(now.getTime() + 1000), client, random: half });
     expect(cached).toMatchObject({ action: "deferred", manual: true });
     expect(reads).toBe(1);
     expect(posts).toBe(0);
@@ -139,6 +153,7 @@ describe("recent posts on X", () => {
     let reads = 0;
     const deferred = await tick({
       now,
+      random: half,
       client: {
         verify: async () => user,
         postTweet: async () => {
@@ -155,7 +170,7 @@ describe("recent posts on X", () => {
     const next = getPublicState().tweets.find((tweet) => tweet.text === "下一条");
     expect(next?.delayReason).toBeNull();
     expect(next?.status).toBe("pending");
-    expect(new Date(next!.scheduledAt).toISOString()).toBe(new Date(postedAt.getTime() + 15 * 60_000).toISOString());
+    expect(new Date(next!.scheduledAt).toISOString()).toBe(slot(postedAt, 90).toISOString());
   });
 
   it("logs a timeline failure, falls back to the local last post, and does not reread within the cache window", async () => {
@@ -185,14 +200,14 @@ describe("recent posts on X", () => {
         throw new Error("timeline down");
       },
     };
-    const deferred = await tick({ now, client });
+    const deferred = await tick({ now, client, random: half });
     expect(deferred).toMatchObject({ action: "deferred", manual: false });
     expect(reads).toBe(1);
     expect(getTimelineCache().ok).toBe(false);
     expect(warn).toHaveBeenCalledWith("[序帖] 读取最近帖子失败，改用本工具自己的上次发送时间。", "timeline down");
     const next = getPublicState().tweets.find((tweet) => tweet.text === "下一条");
     expect(next?.delayReason).toBeNull();
-    expect(new Date(next!.scheduledAt).toISOString()).toBe(new Date(postedAt.getTime() + 15 * 60_000).toISOString());
+    expect(new Date(next!.scheduledAt).toISOString()).toBe(slot(postedAt, 90).toISOString());
 
     patchTweet(pending.id, { scheduledAt: new Date(now.getTime() + 30_000).toISOString() });
     const again = await tick({ now: new Date(now.getTime() + 30_000), client });
@@ -219,6 +234,105 @@ describe("recent posts on X", () => {
     expect(warn).toHaveBeenCalledWith("[序帖] 读取最近帖子失败，改用本工具自己的上次发送时间。", "timeline down");
     expect(getTimelineCache().ok).toBe(true);
     expect(getTimelineCache().latestId).toBe("posted-1");
+  });
+});
+
+describe("random extra delay when the queue shifts", () => {
+  function expectRandomGaps(times: number[]) {
+    for (let index = 1; index < times.length; index += 1) {
+      const gap = times[index] - times[index - 1];
+      expect(gap).toBeGreaterThanOrEqual(16 * 60_000);
+      expect(gap).toBeLessThanOrEqual(17 * 60_000);
+    }
+  }
+
+  it("after a manual post on X, moves the queue to that post + interval + 1–2 random minutes", async () => {
+    connect();
+    const now = new Date("2026-10-18T08:00:00.400Z");
+    const manualAt = new Date("2026-10-18T07:55:00.000Z");
+    const imported = queue("甲\n乙\n丙\n丁", new Date(now.getTime() - 1000).toISOString());
+    // Squeeze the batch so every post has to move.
+    imported.queued.forEach((tweet, index) => {
+      patchTweet(tweet.id, { scheduledAt: new Date(now.getTime() - 1000 + index * 60_000).toISOString() });
+    });
+    const deferred = await tick({
+      now,
+      client: {
+        verify: async () => user,
+        postTweet: async () => {
+          throw new Error("不应发帖");
+        },
+        latestTweet: async () => ({ id: "manual-1", createdAt: manualAt.toISOString() }),
+      },
+    });
+    expect(deferred).toMatchObject({ action: "deferred", manual: true });
+    const pending = getPublicState()
+      .tweets.filter((tweet) => tweet.status === "pending")
+      .map((tweet) => new Date(tweet.scheduledAt).getTime())
+      .sort((a, b) => a - b);
+    const firstGap = pending[0] - manualAt.getTime();
+    expect(firstGap).toBeGreaterThanOrEqual(16 * 60_000);
+    expect(firstGap).toBeLessThanOrEqual(17 * 60_000);
+    expect(firstGap % 1000).toBe(0);
+    expect(new Date((deferred as { until: string }).until).getTime()).toBe(pending[0]);
+    expectRandomGaps(pending);
+  });
+
+  it("spaces out overdue posts with interval + random extra instead of a fixed interval", async () => {
+    connect();
+    const now = new Date("2026-10-18T08:00:00.000Z");
+    queue("一\n二\n三\n四", new Date(now.getTime() - 3 * 60 * 60_000).toISOString());
+    const values = [0, 0.999_999, 0.25];
+    let index = 0;
+    const result = await tick({
+      now,
+      random: () => values[index++ % values.length],
+      client: { verify: async () => user, postTweet: async () => ({ id: "first-now" }) },
+    });
+    expect(result).toMatchObject({ action: "posted", tweetId: "first-now" });
+    const pending = getPublicState()
+      .tweets.filter((tweet) => tweet.status === "pending")
+      .map((tweet) => new Date(tweet.scheduledAt).getTime())
+      .sort((a, b) => a - b);
+    expect(pending).toEqual([
+      now.getTime() + 16 * 60_000,
+      now.getTime() + 16 * 60_000 + 17 * 60_000,
+      now.getTime() + 16 * 60_000 + 17 * 60_000 + 15 * 60_000 + 75_000,
+    ]);
+  });
+
+  it("reschedules through PUT /api/queue with the random range and ignores legacy jitterMinutes", async () => {
+    const { PUT } = await import("@/app/api/queue/route");
+    queue(Array.from({ length: 10 }, (_, index) => `重排${index}`).join("\n"), new Date(Date.now() + 60_000).toISOString());
+    const startAt = new Date(Date.now() + 10 * 60_000);
+    const response = await PUT(
+      new Request("http://localhost/api/queue", {
+        method: "PUT",
+        body: JSON.stringify({
+          intervalMinutes: 15,
+          jitterMinutes: 5,
+          randomMinSeconds: 60,
+          randomMaxSeconds: 120,
+          reschedule: true,
+          startAt: startAt.toISOString(),
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    const state = getPublicState();
+    expect(state.queue).toMatchObject({ intervalMinutes: 15, randomMinSeconds: 60, randomMaxSeconds: 120 });
+    const times = state.tweets.map((tweet) => new Date(tweet.scheduledAt).getTime()).sort((a, b) => a - b);
+    expect(times[0]).toBe(startAt.getTime());
+    expectRandomGaps(times);
+
+    const bad = await PUT(
+      new Request("http://localhost/api/queue", {
+        method: "PUT",
+        body: JSON.stringify({ intervalMinutes: 15, randomMinSeconds: 120, randomMaxSeconds: 60 }),
+      }),
+    );
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ code: "invalid_random" });
   });
 });
 

@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { MAX_IMPORT_BATCH } from "@/lib/constants";
-import { toDatetimeLocal } from "@/lib/datetime";
+import { formatMinSec, toDatetimeLocal } from "@/lib/datetime";
 import { explainError } from "@/lib/explain-error";
 import type { MessageKey } from "@/lib/messages";
 import { parseImport } from "@/lib/parse-import";
@@ -34,7 +34,8 @@ export function ImportScreen() {
   const [format, setFormat] = useState<"text" | "csv">("text");
   const [startAt, setStartAt] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState(String(state?.queue.intervalMinutes ?? 15));
-  const [jitterMinutes, setJitterMinutes] = useState(String(state?.queue.jitterMinutes ?? 0));
+  const [randomMinSeconds, setRandomMinSeconds] = useState(String(state?.queue.randomMinSeconds ?? 60));
+  const [randomMaxSeconds, setRandomMaxSeconds] = useState(String(state?.queue.randomMaxSeconds ?? 120));
   const [scheduleSynced, setScheduleSynced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,13 +47,21 @@ export function ImportScreen() {
     if (pending.length > 0) {
       const last = pending[pending.length - 1];
       setStartAt(
-        toDatetimeLocal(new Date(new Date(last.scheduledAt).getTime() + state.queue.intervalMinutes * 60_000)),
+        toDatetimeLocal(
+          new Date(
+            new Date(last.scheduledAt).getTime() +
+              state.queue.intervalMinutes * 60_000 +
+              state.queue.randomMaxSeconds * 1000 +
+              60_000,
+          ),
+        ),
       );
     } else {
       setStartAt(toDatetimeLocal(new Date(Date.now() + 2 * 60_000)));
     }
     setIntervalMinutes(String(state.queue.intervalMinutes));
-    setJitterMinutes(String(state.queue.jitterMinutes));
+    setRandomMinSeconds(String(state.queue.randomMinSeconds));
+    setRandomMaxSeconds(String(state.queue.randomMaxSeconds));
     setScheduleSynced(true);
   }, [state, scheduleSynced]);
 
@@ -95,7 +104,8 @@ export function ImportScreen() {
           format,
           startAt: new Date(startAt).toISOString(),
           intervalMinutes: Number(intervalMinutes),
-          jitterMinutes: Number(jitterMinutes),
+          randomMinSeconds: Number(randomMinSeconds),
+          randomMaxSeconds: Number(randomMaxSeconds),
         }),
       });
       const limit = result.batchLimit || MAX_IMPORT_BATCH;
@@ -171,7 +181,7 @@ export function ImportScreen() {
         />
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-4">
         <div className="space-y-1.5">
           <Label htmlFor="start">{t("startAt")}</Label>
           <Input id="start" type="datetime-local" value={startAt} onChange={(event) => setStartAt(event.target.value)} />
@@ -181,10 +191,30 @@ export function ImportScreen() {
           <Input id="interval" inputMode="numeric" value={intervalMinutes} onChange={(event) => setIntervalMinutes(event.target.value)} />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="jitter">{t("jitterLabel")}</Label>
-          <Input id="jitter" inputMode="numeric" value={jitterMinutes} onChange={(event) => setJitterMinutes(event.target.value)} />
+          <Label htmlFor="random-min">{`${t("randomLabel")} · ${t("randomMinLabel")}`}</Label>
+          <Input
+            id="random-min"
+            inputMode="numeric"
+            value={randomMinSeconds}
+            onChange={(event) => setRandomMinSeconds(event.target.value)}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="random-max">{`${t("randomLabel")} · ${t("randomMaxLabel")}`}</Label>
+          <Input
+            id="random-max"
+            inputMode="numeric"
+            value={randomMaxSeconds}
+            onChange={(event) => setRandomMaxSeconds(event.target.value)}
+          />
         </div>
       </div>
+      <p className="text-xs text-muted-foreground">
+        {t("randomHelp", {
+          min: formatMinSec(Number(randomMinSeconds)),
+          max: formatMinSec(Number(randomMaxSeconds)),
+        })}
+      </p>
 
       <div className="flex flex-wrap items-center gap-3">
         <Button type="button" disabled={busy || acceptedCount === 0 || !startAt} onClick={() => void submit()}>

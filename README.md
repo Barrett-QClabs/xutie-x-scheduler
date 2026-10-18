@@ -12,8 +12,10 @@ Paste or upload a batch of posts, queue them on an interval, and let a local pro
 - Credentials stay on the server. They are encrypted at rest with AES-256-GCM using a key from the environment, and API responses never send them back to the browser.
 - Bulk import: one post per line, blank lines between posts, a line that is exactly `---`, or a `.txt` / `.csv` upload. One batch accepts at most 50 valid posts (`MAX_IMPORT_BATCH`). Extra valid posts are reported so you can split them; lines that fail the length check do not use a slot.
 - Length uses X's weighted count: Latin characters count as 1, CJK as 2, and each `http(s)` URL as 23. Posts over 280 are still queued, marked “Long post”, with a warning that they need X Premium. The hard limit is 25,000 (X's Premium long-post limit); anything longer is rejected. Each import takes up to 50 posts and up to 2,000,000 characters of source text.
-- Queue controls: start time, interval (default 15 minutes), optional jitter, edit, delete, reorder, pause, resume, and retry.
-- Before each send, the scheduler reads the account's latest post on X, including posts made outside this app. If that post is newer than one interval, the due tweet and the pending tweets after it move forward together so the gap is preserved. A delay caused by a post this app did not send is labeled in the queue.
+- Queue controls: start time, interval (default 15 minutes), a random extra delay (default 60–120 seconds), edit, delete, reorder, pause, resume, and retry.
+- Irregular timing: every gap between two consecutive posts is the interval **plus** a fresh random extra delay drawn uniformly, to the second, from the min–max range. With the defaults that is anywhere from 16:00 to 17:00 (for example 16:07, 16:52, 16:23). The interval is a hard minimum: a gap is never shorter than it. The range must satisfy `0 <= min <= max < interval`; set both to 0 for a fixed grid.
+- Before each send, the scheduler reads the account's latest post on X, including posts made outside this app. If that post is newer than one interval, the due tweet moves to that post's time + interval + a random extra delay, and later pending tweets are pushed so each gap is again interval + random extra (posts are never moved earlier). A delay caused by a post this app did not send is labeled in the queue.
+- The same randomized spacing applies whenever the queue shifts: overdue posts after a restart, the wait after an X rate limit (resume at the reset time + random extra), and "reschedule pending posts".
 - State lives in SQLite, so a restart keeps unsent posts. HTTP 429 waits for `x-rate-limit-reset`. Duplicate content is marked failed and the queue continues. An auth failure pauses the queue and shows the reason. A successful post stores the tweet id and a link to `https://x.com/{handle}/status/{id}`.
 
 ## Screenshots
@@ -148,7 +150,7 @@ Changing `CREDENTIALS_ENCRYPTION_KEY` makes old credentials undecryptable and pa
 
 | Table | What it holds |
 | --- | --- |
-| `queue_settings` | Interval, jitter, pause, rate-limit deadline, and the last timeline read |
+| `queue_settings` | Interval, random extra delay range (`random_min_seconds`, `random_max_seconds`, added automatically to older databases with defaults 60/120; the legacy `jitter_minutes` column is no longer used), pause, rate-limit deadline, and the last timeline read |
 | `tweets` | Text, schedule, status, tweet id, error, and whether a post made outside this app delayed it |
 | `credentials` | The four credentials, encrypted, plus the @handle from a successful test |
 

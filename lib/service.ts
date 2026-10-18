@@ -17,7 +17,15 @@ import {
 import { MAX_IMPORT_BATCH, MAX_IMPORT_SOURCE_CHARS } from "@/lib/constants";
 import { AppError } from "@/lib/errors";
 import { parseImport } from "@/lib/parse-import";
-import { assertSchedule, assertStartAt, computeSchedule } from "@/lib/schedule";
+import {
+  assertSchedule,
+  assertStartAt,
+  computeSchedule,
+  nextGapMs,
+  pushChain,
+  randomExtraMs,
+  type SchedulePace,
+} from "@/lib/schedule";
 import type { Credentials, ImportMode, InvalidTweet, PublicState, PublicTweet, Tweet } from "@/lib/types";
 import { inspectTweet, MAX_LONG_POST_LENGTH, MAX_WEIGHTED_LENGTH } from "@/lib/weighted-length";
 import { createXClient, isMockMode, XApiError } from "@/lib/x-client";
@@ -148,7 +156,8 @@ export function importTweets(input: {
   format: "text" | "csv";
   startAt: string;
   intervalMinutes: number;
-  jitterMinutes: number;
+  randomMinSeconds?: number;
+  randomMaxSeconds?: number;
   random?: () => number;
 }): {
   ok: true;
@@ -167,7 +176,10 @@ export function importTweets(input: {
     throw new AppError("too_many", "文本太长，请分成几批导入。");
   }
   const format = input.format === "csv" ? "csv" : "text";
-  assertSchedule(input.intervalMinutes, input.jitterMinutes);
+  const saved = getQueueSettings();
+  const randomMinSeconds = input.randomMinSeconds ?? saved.randomMinSeconds;
+  const randomMaxSeconds = input.randomMaxSeconds ?? saved.randomMaxSeconds;
+  assertSchedule(input.intervalMinutes, randomMinSeconds, randomMaxSeconds);
   const start = assertStartAt(input.startAt);
   const parsed = parseImport(input.source, format);
   const valid: Array<{ text: string; weightedLength: number }> = [];
@@ -191,7 +203,8 @@ export function importTweets(input: {
     count: accepted.length,
     startAt: start,
     intervalMinutes: input.intervalMinutes,
-    jitterMinutes: input.jitterMinutes,
+    randomMinSeconds,
+    randomMaxSeconds,
     random: input.random,
   });
   const now = new Date().toISOString();
@@ -214,7 +227,8 @@ export function importTweets(input: {
   insertTweets(rows);
   patchQueueSettings({
     intervalMinutes: input.intervalMinutes,
-    jitterMinutes: input.jitterMinutes,
+    randomMinSeconds,
+    randomMaxSeconds,
   });
   const username = getCredentialsRow()?.username ?? null;
   return {
@@ -279,7 +293,8 @@ export function retryAllFailed(now = new Date(), random = Math.random): { ok: tr
     count: failed.length,
     startAt: now,
     intervalMinutes: settings.intervalMinutes,
-    jitterMinutes: settings.jitterMinutes,
+    randomMinSeconds: settings.randomMinSeconds,
+    randomMaxSeconds: settings.randomMaxSeconds,
     random,
   });
   failed.forEach((tweet, index) => {
@@ -327,15 +342,20 @@ export function resumeQueue(): { ok: true } {
 
 export function updateScheduleSettings(input: {
   intervalMinutes: number;
-  jitterMinutes: number;
+  randomMinSeconds?: number;
+  randomMaxSeconds?: number;
   reschedule?: boolean;
   startAt?: string;
   random?: () => number;
 }): { ok: true } {
-  assertSchedule(input.intervalMinutes, input.jitterMinutes);
+  const current = getQueueSettings();
+  const randomMinSeconds = input.randomMinSeconds ?? current.randomMinSeconds;
+  const randomMaxSeconds = input.randomMaxSeconds ?? current.randomMaxSeconds;
+  assertSchedule(input.intervalMinutes, randomMinSeconds, randomMaxSeconds);
   patchQueueSettings({
     intervalMinutes: input.intervalMinutes,
-    jitterMinutes: input.jitterMinutes,
+    randomMinSeconds,
+    randomMaxSeconds,
   });
   if (input.reschedule) {
     const pending = pendingInOrder();
@@ -344,7 +364,8 @@ export function updateScheduleSettings(input: {
       count: pending.length,
       startAt: start,
       intervalMinutes: input.intervalMinutes,
-      jitterMinutes: input.jitterMinutes,
+      randomMinSeconds,
+      randomMaxSeconds,
       random: input.random,
     });
     pending.forEach((tweet, index) => {
@@ -354,20 +375,55 @@ export function updateScheduleSettings(input: {
   return { ok: true };
 }
 
-export function delayPendingForRecentPost(earliest: Date, manual: boolean): boolean {
+function currentPace(): SchedulePace {
+  const settings = getQueueSettings();
+  return {
+    intervalMinutes: settings.intervalMinutes,
+    randomMinSeconds: settings.randomMinSeconds,
+    randomMaxSeconds: settings.randomMaxSeconds,
+  };
+}
+
+/** Move a chain of pending posts later (never earlier); returns true when anything moved. */
+function applyChain(
+  tweets: Tweet[],
+  firstMinAt: Date,
+  random: () => number,
+  extra?: Partial<Pick<Tweet, "delayReason">>,
+): boolean {
+  if (tweets.length === 0) return false;
+  const originals = tweets.map((tweet) => new Date(tweet.scheduledAt));
+  const times = pushChain({ originals, firstMinAt, pace: currentPace(), random });
+  let moved = false;
+  tweets.forEach((tweet, index) => {
+    if (times[index].getTime() === originals[index].getTime()) return;
+    moved = true;
+    patchTweet(tweet.id, { scheduledAt: times[index].toISOString(), ...(extra ?? {}) });
+  });
+  return moved;
+}
+
+/**
+ * A post exists at `lastPostAt` (on X or sent by us). If the next pending post
+ * would land within one interval of it, move it to lastPostAt + interval +
+ * random extra, and push the rest so each gap stays interval + random extra.
+ * Returns the new time of the first pending post, or null when nothing moved.
+ */
+export function delayPendingForRecentPost(lastPostAt: Date, manual: boolean, random: () => number = Math.random): Date | null {
   const pending = pendingInOrder();
-  if (pending.length === 0) return false;
+  if (pending.length === 0) return null;
+  const pace = currentPace();
   const firstAt = new Date(pending[0].scheduledAt).getTime();
-  const target = earliest.getTime();
-  if (Number.isNaN(firstAt) || firstAt >= target) return false;
-  const delta = target - firstAt;
-  for (const tweet of pending) {
-    patchTweet(tweet.id, {
-      scheduledAt: new Date(new Date(tweet.scheduledAt).getTime() + delta).toISOString(),
-      ...(manual ? { delayReason: "manual" as const } : {}),
-    });
-  }
-  return true;
+  if (Number.isNaN(firstAt) || firstAt >= lastPostAt.getTime() + pace.intervalMinutes * 60_000) return null;
+  const target = new Date(lastPostAt.getTime() + nextGapMs(pace, random));
+  applyChain(pending, target, random, manual ? { delayReason: "manual" } : undefined);
+  return new Date(pendingInOrder()[0].scheduledAt);
+}
+
+/** After an X rate limit, resume at `until` plus a random extra delay, keeping randomized gaps. */
+export function delayPendingForRateLimit(until: Date, random: () => number = Math.random): void {
+  const pending = pendingInOrder();
+  applyChain(pending, new Date(until.getTime() + randomExtraMs(currentPace(), random)), random);
 }
 
 export function latestLocalPost(): { id: string; at: Date } | null {
@@ -381,21 +437,11 @@ export function latestLocalPost(): { id: string; at: Date } | null {
 }
 
 export function deferExtraOverdue(now: Date, random = Math.random): void {
-  const overdue = listTweets()
-    .filter((tweet) => tweet.status === "pending" && new Date(tweet.scheduledAt).getTime() <= now.getTime())
-    .sort(compareTweets);
+  const pending = pendingInOrder();
+  const overdue = pending.filter((tweet) => new Date(tweet.scheduledAt).getTime() <= now.getTime());
   if (overdue.length <= 1) return;
-  const settings = getQueueSettings();
-  const times = computeSchedule({
-    count: overdue.length - 1,
-    startAt: new Date(now.getTime() + settings.intervalMinutes * 60_000),
-    intervalMinutes: settings.intervalMinutes,
-    jitterMinutes: settings.jitterMinutes,
-    random,
-  });
-  overdue.slice(1).forEach((tweet, index) => {
-    patchTweet(tweet.id, { scheduledAt: times[index].toISOString() });
-  });
+  // The first overdue post goes out now; the rest follow at interval + random extra each.
+  applyChain(pending.slice(1), new Date(now.getTime() + nextGapMs(currentPace(), random)), random);
 }
 
 export function nextDueTweet(now: Date): Tweet | null {

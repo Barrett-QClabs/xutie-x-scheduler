@@ -21,7 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { formatStamp } from "@/lib/datetime";
+import { formatMinSec, formatStamp } from "@/lib/datetime";
 import { explainError } from "@/lib/explain-error";
 import type { PublicTweet } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -33,7 +33,8 @@ export function QueueScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [intervalMinutes, setIntervalMinutes] = useState("15");
-  const [jitterMinutes, setJitterMinutes] = useState("0");
+  const [randomMinSeconds, setRandomMinSeconds] = useState("60");
+  const [randomMaxSeconds, setRandomMaxSeconds] = useState("120");
   const [synced, setSynced] = useState(false);
   const [reschedule, setReschedule] = useState(false);
   const [editing, setEditing] = useState<PublicTweet | null>(null);
@@ -43,7 +44,8 @@ export function QueueScreen() {
   useEffect(() => {
     if (!state || synced) return;
     setIntervalMinutes(String(state.queue.intervalMinutes));
-    setJitterMinutes(String(state.queue.jitterMinutes));
+    setRandomMinSeconds(String(state.queue.randomMinSeconds));
+    setRandomMaxSeconds(String(state.queue.randomMaxSeconds));
     setSynced(true);
   }, [state, synced]);
 
@@ -140,7 +142,7 @@ export function QueueScreen() {
           <p className="text-sm text-muted-foreground">
             {next ? <NextPost iso={next.scheduledAt} locale={locale} /> : t("noPending")}
           </p>
-          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_1fr_auto] sm:items-end">
             <Field label={t("intervalLabel")}>
               <Input
                 inputMode="numeric"
@@ -148,8 +150,19 @@ export function QueueScreen() {
                 onChange={(event) => setIntervalMinutes(event.target.value)}
               />
             </Field>
-            <Field label={t("jitterLabel")}>
-              <Input inputMode="numeric" value={jitterMinutes} onChange={(event) => setJitterMinutes(event.target.value)} />
+            <Field label={`${t("randomLabel")} · ${t("randomMinLabel")}`}>
+              <Input
+                inputMode="numeric"
+                value={randomMinSeconds}
+                onChange={(event) => setRandomMinSeconds(event.target.value)}
+              />
+            </Field>
+            <Field label={`${t("randomLabel")} · ${t("randomMaxLabel")}`}>
+              <Input
+                inputMode="numeric"
+                value={randomMaxSeconds}
+                onChange={(event) => setRandomMaxSeconds(event.target.value)}
+              />
             </Field>
             <Button
               type="button"
@@ -160,7 +173,8 @@ export function QueueScreen() {
                     method: "PUT",
                     body: JSON.stringify({
                       intervalMinutes: Number(intervalMinutes),
-                      jitterMinutes: Number(jitterMinutes),
+                      randomMinSeconds: Number(randomMinSeconds),
+                      randomMaxSeconds: Number(randomMaxSeconds),
                       reschedule,
                     }),
                   }),
@@ -170,6 +184,12 @@ export function QueueScreen() {
               {t("saveSchedule")}
             </Button>
           </div>
+          <p className="text-xs text-muted-foreground">
+            {t("randomHelp", {
+              min: formatMinSec(Number(randomMinSeconds)),
+              max: formatMinSec(Number(randomMaxSeconds)),
+            })}
+          </p>
           <label className="flex items-start gap-2 text-sm">
             <input
               type="checkbox"

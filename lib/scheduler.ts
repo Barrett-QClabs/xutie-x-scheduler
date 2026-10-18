@@ -13,6 +13,7 @@ import {
 } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import {
+  delayPendingForRateLimit,
   delayPendingForRecentPost,
   deferExtraOverdue,
   latestLocalPost,
@@ -99,9 +100,10 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
 
     const gap = await recentPostGap(now, client, fresh.intervalMinutes * 60_000);
     if (gap && now.getTime() < gap.at.getTime() + fresh.intervalMinutes * 60_000) {
-      const earliest = new Date(gap.at.getTime() + fresh.intervalMinutes * 60_000);
-      delayPendingForRecentPost(earliest, gap.manual);
-      return { action: "deferred", until: earliest.toISOString(), manual: gap.manual };
+      // Hard rule: never closer than one interval. The new slot is interval + random extra.
+      const moved = delayPendingForRecentPost(gap.at, gap.manual, options?.random);
+      const until = moved ?? new Date(gap.at.getTime() + fresh.intervalMinutes * 60_000);
+      return { action: "deferred", until: until.toISOString(), manual: gap.manual };
     }
 
     try {
@@ -130,6 +132,7 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
       if (error.kind === "rate_limit") {
         const until = error.resetAt ?? new Date(now.getTime() + 15 * 60_000);
         patchQueueSettings({ rateLimitUntil: until.toISOString(), lastError: "rate_limit" });
+        delayPendingForRateLimit(until, options?.random);
         return { action: "rate_limited", until: until.toISOString() };
       }
       if (error.kind === "auth") {

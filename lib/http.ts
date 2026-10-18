@@ -28,3 +28,9 @@ export async function handle(fn: () => Promise<unknown> | unknown): Promise<Resp
     return Response.json({ ok: false, code: "internal", message: "服务器内部错误。" }, { status: 500 });
   }
 }
+
+/** Undefined when the field is absent or empty, otherwise the number (possibly NaN, rejected later). */
+export function optionalNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return asNumber(value);
+}

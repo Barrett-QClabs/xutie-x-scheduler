@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TIMELINE_CACHE_TTL_MS } from "@/lib/constants";
 import { buildAuthorizationHeader } from "@/lib/oauth";
 import { parseImport } from "@/lib/parse-import";
-import { computeSchedule } from "@/lib/schedule";
+import { assertSchedule, computeSchedule, pushChain, randomExtraMs } from "@/lib/schedule";
 import { shouldReuseTimelineCache } from "@/lib/timeline";
 import { inspectTweet, weightedLength } from "@/lib/weighted-length";
 
@@ -66,26 +66,78 @@ describe("import parsing", () => {
 });
 
 describe("schedule", () => {
-  it("spaces posts by the interval when jitter is zero", () => {
+  const pace = { intervalMinutes: 15, randomMinSeconds: 60, randomMaxSeconds: 120 };
+
+  it("spaces posts by exactly the interval when the random range is zero", () => {
     const start = new Date("2026-10-18T01:00:00.000Z");
-    const times = computeSchedule({ count: 3, startAt: start, intervalMinutes: 15, jitterMinutes: 0 });
+    const times = computeSchedule({ count: 3, startAt: start, intervalMinutes: 15, randomMinSeconds: 0, randomMaxSeconds: 0 });
+    expect(times[0].getTime()).toBe(start.getTime());
     expect(times[1].getTime() - times[0].getTime()).toBe(15 * 60_000);
     expect(times[2].getTime() - times[1].getTime()).toBe(15 * 60_000);
   });
 
-  it("applies jitter and never lets two posts overlap", () => {
-    const start = new Date("2026-10-18T01:00:00.000Z");
-    const values = [1, 0];
+  it("keeps every gap within [interval + min, interval + max], cumulatively from startAt", () => {
+    const start = new Date("2026-10-18T08:00:00.000Z");
+    const times = computeSchedule({ count: 500, startAt: start, ...pace });
+    expect(times[0].getTime()).toBe(start.getTime());
+    for (let index = 1; index < times.length; index += 1) {
+      const gap = times[index].getTime() - times[index - 1].getTime();
+      expect(gap).toBeGreaterThanOrEqual(16 * 60_000);
+      expect(gap).toBeLessThanOrEqual(17 * 60_000);
+      expect(gap).toBeGreaterThanOrEqual(15 * 60_000);
+    }
+  });
+
+  it("randomizes to the second, not to the minute", () => {
+    const start = new Date("2026-10-18T08:00:00.000Z");
+    const times = computeSchedule({ count: 200, startAt: start, ...pace });
+    const gaps = times.slice(1).map((time, index) => time.getTime() - times[index].getTime());
+    expect(gaps.every((gap) => gap % 1000 === 0)).toBe(true);
+    const extraSeconds = new Set(gaps.map((gap) => (gap - 15 * 60_000) / 1000));
+    expect(extraSeconds.size).toBeGreaterThan(30);
+    expect([...extraSeconds].some((value) => value % 60 !== 0)).toBe(true);
+    expect(times.every((time) => time.getUTCMilliseconds() === 0)).toBe(true);
+  });
+
+  it("maps random() onto whole seconds from min to max inclusive", () => {
+    expect(randomExtraMs(pace, () => 0)).toBe(60_000);
+    expect(randomExtraMs(pace, () => 0.5)).toBe(90_000);
+    expect(randomExtraMs(pace, () => 0.999_999)).toBe(120_000);
+    expect(randomExtraMs(pace, () => 1)).toBe(120_000);
+    const values = [0, 0.999_999];
     let index = 0;
     const times = computeSchedule({
-      count: 2,
-      startAt: start,
-      intervalMinutes: 15,
-      jitterMinutes: 14,
+      count: 3,
+      startAt: new Date("2026-10-18T08:00:00.000Z"),
+      ...pace,
       random: () => values[index++],
     });
-    expect(times[0].getTime()).toBe(start.getTime() + 14 * 60_000);
-    expect(times[1].getTime()).toBe(times[0].getTime() + 15_000);
+    expect(times.map((time) => time.toISOString())).toEqual([
+      "2026-10-18T08:00:00.000Z",
+      "2026-10-18T08:16:00.000Z",
+      "2026-10-18T08:33:00.000Z",
+    ]);
+  });
+
+  it("validates 0 <= min <= max < interval in whole seconds", () => {
+    expect(() => assertSchedule(15, 60, 120)).not.toThrow();
+    expect(() => assertSchedule(15, 0, 0)).not.toThrow();
+    expect(() => assertSchedule(15, 120, 60)).toThrow(/随机延迟/);
+    expect(() => assertSchedule(15, -1, 60)).toThrow(/随机延迟/);
+    expect(() => assertSchedule(15, 60, 900)).toThrow(/随机延迟/);
+    expect(() => assertSchedule(15, 1.5, 60)).toThrow(/随机延迟/);
+    expect(() => assertSchedule(1.5, 0, 10)).toThrow(/间隔/);
+  });
+
+  it("pushes a chain later with random gaps but never moves a post earlier", () => {
+    const base = new Date("2026-10-18T08:00:00.000Z").getTime();
+    const originals = [base, base + 60_000, base + 5 * 60 * 60_000].map((ms) => new Date(ms));
+    const times = pushChain({ originals, firstMinAt: new Date(base + 10 * 60_000 + 400), pace });
+    expect(times[0].getTime()).toBe(base + 10 * 60_000 + 1000);
+    const gap = times[1].getTime() - times[0].getTime();
+    expect(gap).toBeGreaterThanOrEqual(16 * 60_000);
+    expect(gap).toBeLessThanOrEqual(17 * 60_000);
+    expect(times[2].getTime()).toBe(originals[2].getTime());
   });
 });
 

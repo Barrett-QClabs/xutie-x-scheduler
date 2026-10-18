@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { DEFAULT_RANDOM_MAX_SECONDS, DEFAULT_RANDOM_MIN_SECONDS } from "@/lib/schedule";
 import type { DelayReason, QueueSettings, Tweet, TweetStatus } from "@/lib/types";
 
 let database: DatabaseSync | null = null;
@@ -78,6 +79,18 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, "queue_settings", "timeline_latest_at", "ALTER TABLE queue_settings ADD COLUMN timeline_latest_at TEXT");
   ensureColumn(db, "queue_settings", "timeline_latest_id", "ALTER TABLE queue_settings ADD COLUMN timeline_latest_id TEXT");
   ensureColumn(db, "queue_settings", "timeline_ok", "ALTER TABLE queue_settings ADD COLUMN timeline_ok INTEGER");
+  ensureColumn(
+    db,
+    "queue_settings",
+    "random_min_seconds",
+    "ALTER TABLE queue_settings ADD COLUMN random_min_seconds INTEGER NOT NULL DEFAULT 60",
+  );
+  ensureColumn(
+    db,
+    "queue_settings",
+    "random_max_seconds",
+    "ALTER TABLE queue_settings ADD COLUMN random_max_seconds INTEGER NOT NULL DEFAULT 120",
+  );
   ensureColumn(db, "tweets", "delay_reason", "ALTER TABLE tweets ADD COLUMN delay_reason TEXT");
   db.prepare(
     `INSERT OR IGNORE INTO queue_settings
@@ -158,19 +171,21 @@ export function deleteCredentials(): void {
 export function getQueueSettings(): QueueSettings {
   const row = one<{
     interval_minutes: number;
-    jitter_minutes: number;
+    random_min_seconds: number | null;
+    random_max_seconds: number | null;
     paused: number;
     pause_reason: string | null;
     rate_limit_until: string | null;
     last_error: string | null;
   }>(
-    `SELECT interval_minutes, jitter_minutes, paused, pause_reason, rate_limit_until, last_error
+    `SELECT interval_minutes, random_min_seconds, random_max_seconds, paused, pause_reason, rate_limit_until, last_error
      FROM queue_settings WHERE id = 1`,
   );
   if (!row) {
     return {
       intervalMinutes: 15,
-      jitterMinutes: 0,
+      randomMinSeconds: DEFAULT_RANDOM_MIN_SECONDS,
+      randomMaxSeconds: DEFAULT_RANDOM_MAX_SECONDS,
       paused: false,
       pauseReason: null,
       rateLimitUntil: null,
@@ -179,7 +194,8 @@ export function getQueueSettings(): QueueSettings {
   }
   return {
     intervalMinutes: row.interval_minutes,
-    jitterMinutes: row.jitter_minutes,
+    randomMinSeconds: row.random_min_seconds ?? DEFAULT_RANDOM_MIN_SECONDS,
+    randomMaxSeconds: row.random_max_seconds ?? DEFAULT_RANDOM_MAX_SECONDS,
     paused: row.paused === 1,
     pauseReason: row.pause_reason,
     rateLimitUntil: row.rate_limit_until,
@@ -190,7 +206,8 @@ export function getQueueSettings(): QueueSettings {
 export function patchQueueSettings(
   fields: Partial<{
     intervalMinutes: number;
-    jitterMinutes: number;
+    randomMinSeconds: number;
+    randomMaxSeconds: number;
     paused: boolean;
     pauseReason: string | null;
     rateLimitUntil: string | null;
@@ -199,7 +216,8 @@ export function patchQueueSettings(
 ): void {
   const map: Record<string, string> = {
     intervalMinutes: "interval_minutes",
-    jitterMinutes: "jitter_minutes",
+    randomMinSeconds: "random_min_seconds",
+    randomMaxSeconds: "random_max_seconds",
     paused: "paused",
     pauseReason: "pause_reason",
     rateLimitUntil: "rate_limit_until",
@@ -402,6 +420,8 @@ export function resetAllData(): void {
     `UPDATE queue_settings SET
       interval_minutes = 15,
       jitter_minutes = 0,
+      random_min_seconds = 60,
+      random_max_seconds = 120,
       paused = 0,
       pause_reason = NULL,
       rate_limit_until = NULL,

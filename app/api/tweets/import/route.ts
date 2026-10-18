@@ -1,4 +1,4 @@
-import { asNumber, handle, readJson } from "@/lib/http";
+import { asNumber, handle, optionalNumber, readJson } from "@/lib/http";
 import { importTweets } from "@/lib/service";
 
 export const runtime = "nodejs";
@@ -12,7 +12,9 @@ export async function POST(request: Request) {
       format: body.format === "csv" ? "csv" : "text",
       startAt: typeof body.startAt === "string" ? body.startAt : "",
       intervalMinutes: asNumber(body.intervalMinutes),
-      jitterMinutes: asNumber(body.jitterMinutes),
+      // Legacy `jitterMinutes` is ignored; omitted values fall back to the saved (or default) range.
+      randomMinSeconds: optionalNumber(body.randomMinSeconds),
+      randomMaxSeconds: optionalNumber(body.randomMaxSeconds),
     });
   });
 }

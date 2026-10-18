@@ -11,6 +11,14 @@ export function formatStamp(iso: string, locale: "zh" | "en"): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
     hourCycle: "h23",
   }).format(date);
+}
+
+/** 75 -> "1:15", 120 -> "2:00". */
+export function formatMinSec(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "–";
+  const whole = Math.round(totalSeconds);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }

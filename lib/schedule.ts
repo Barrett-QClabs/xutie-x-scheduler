@@ -1,11 +1,28 @@
 import { AppError } from "@/lib/errors";
 
-export function assertSchedule(intervalMinutes: number, jitterMinutes: number): void {
+/** Default random extra delay added on top of the interval, in seconds (1–2 minutes). */
+export const DEFAULT_RANDOM_MIN_SECONDS = 60;
+export const DEFAULT_RANDOM_MAX_SECONDS = 120;
+
+export type SchedulePace = {
+  intervalMinutes: number;
+  randomMinSeconds: number;
+  randomMaxSeconds: number;
+};
+
+export function assertSchedule(intervalMinutes: number, randomMinSeconds: number, randomMaxSeconds: number): void {
   if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 24 * 60) {
     throw new AppError("invalid_interval", "间隔需为 1 到 1440 之间的整数分钟。");
   }
-  if (!Number.isInteger(jitterMinutes) || jitterMinutes < 0 || jitterMinutes >= intervalMinutes) {
-    throw new AppError("invalid_jitter", "抖动需为整数分钟，且不小于 0、小于间隔。");
+  const intervalSeconds = intervalMinutes * 60;
+  if (
+    !Number.isInteger(randomMinSeconds) ||
+    !Number.isInteger(randomMaxSeconds) ||
+    randomMinSeconds < 0 ||
+    randomMaxSeconds < randomMinSeconds ||
+    randomMaxSeconds >= intervalSeconds
+  ) {
+    throw new AppError("invalid_random", "随机延迟需为整数秒，0 ≤ 最少 ≤ 最多，且最多要小于间隔。");
   }
 }
 
@@ -24,27 +41,65 @@ export function assertStartAt(startAt: string): Date {
   return start;
 }
 
+/** Round a timestamp up to the next whole second, so gaps are never shortened. */
+export function ceilToSecond(ms: number): number {
+  return Math.ceil(ms / 1000) * 1000;
+}
+
+/** Uniform random whole number of seconds in [min, max], returned in milliseconds. */
+export function randomExtraMs(pace: Pick<SchedulePace, "randomMinSeconds" | "randomMaxSeconds">, random: () => number = Math.random): number {
+  const min = pace.randomMinSeconds;
+  const span = pace.randomMaxSeconds - min;
+  const roll = Math.min(Math.max(random(), 0), 0.999999999);
+  return (min + Math.floor(roll * (span + 1))) * 1000;
+}
+
+/** One gap between consecutive posts: the interval plus a fresh random extra delay. */
+export function nextGapMs(pace: SchedulePace, random: () => number = Math.random): number {
+  return pace.intervalMinutes * 60_000 + randomExtraMs(pace, random);
+}
+
+/**
+ * First post exactly at startAt; every later post is
+ * previous + interval + uniform random extra in [randomMinSeconds, randomMaxSeconds].
+ */
 export function computeSchedule(options: {
   count: number;
   startAt: Date;
   intervalMinutes: number;
-  jitterMinutes: number;
+  randomMinSeconds: number;
+  randomMaxSeconds: number;
   random?: () => number;
 }): Date[] {
   const random = options.random ?? Math.random;
-  const intervalMs = options.intervalMinutes * 60_000;
-  const jitterMs = options.jitterMinutes * 60_000;
   const times: Date[] = [];
   let cursor = options.startAt.getTime();
   for (let index = 0; index < options.count; index += 1) {
-    const swing = jitterMs === 0 ? 0 : Math.round((random() * 2 - 1) * jitterMs);
-    let at = cursor + swing;
-    if (times.length > 0) {
-      const minimum = times[times.length - 1].getTime() + 15_000;
-      if (at < minimum) at = minimum;
-    }
-    times.push(new Date(at));
-    cursor += intervalMs;
+    if (index > 0) cursor += nextGapMs(options, random);
+    times.push(new Date(cursor));
   }
   return times;
+}
+
+/**
+ * Push a chain of posts (already in send order) so that the first is no earlier
+ * than firstMinAt and each following post is at least interval + random extra
+ * after the previous one. Posts are never moved earlier. Returns the new times.
+ */
+export function pushChain(options: {
+  originals: Date[];
+  firstMinAt: Date;
+  pace: SchedulePace;
+  random?: () => number;
+}): Date[] {
+  const random = options.random ?? Math.random;
+  const result: Date[] = [];
+  let previous = 0;
+  options.originals.forEach((original, index) => {
+    const floor = index === 0 ? ceilToSecond(options.firstMinAt.getTime()) : previous + nextGapMs(options.pace, random);
+    const at = Math.max(original.getTime(), floor);
+    result.push(new Date(at));
+    previous = at;
+  });
+  return result;
 }

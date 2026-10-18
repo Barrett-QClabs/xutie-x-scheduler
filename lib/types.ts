@@ -39,7 +39,9 @@ export type PublicTweet = Tweet & {
 
 export type QueueSettings = {
   intervalMinutes: number;
-  jitterMinutes: number;
+  /** Each gap is interval + a uniform random extra delay in [min, max] seconds. */
+  randomMinSeconds: number;
+  randomMaxSeconds: number;
   paused: boolean;
   pauseReason: string | null;
   rateLimitUntil: string | null;

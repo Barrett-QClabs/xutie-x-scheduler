@@ -21,7 +21,6 @@ function queueDue(source: string, startAt = new Date(Date.now() - 60_000).toISOS
     format: "text",
     startAt,
     intervalMinutes: 15,
-    jitterMinutes: 0,
   });
 }
 
@@ -93,7 +92,8 @@ describe("import, queue, and mocked posting", () => {
     expect(imported.invalid[0].reason).toBe("too_long");
     const gap =
       new Date(imported.queued[1].scheduledAt).getTime() - new Date(imported.queued[0].scheduledAt).getTime();
-    expect(gap).toBe(15 * 60_000);
+    expect(gap).toBeGreaterThanOrEqual(15 * 60_000 + 60_000);
+    expect(gap).toBeLessThanOrEqual(15 * 60_000 + 120_000);
 
     const posted = await tick();
     expect(posted).toMatchObject({ action: "posted" });
@@ -108,7 +108,7 @@ describe("import, queue, and mocked posting", () => {
     expect(second?.status).toBe("pending");
 
     reopenDatabase();
-    const later = await tick({ now: new Date(Date.now() + 16 * 60_000) });
+    const later = await tick({ now: new Date(Date.now() + 17 * 60_000 + 1000) });
     expect(later.action).toBe("posted");
     expect(getPublicState().tweets.find((tweet) => tweet.text === "第二条")?.status).toBe("posted");
   });
@@ -123,6 +123,9 @@ describe("import, queue, and mocked posting", () => {
     });
     expect(limited.action).toBe("rate_limited");
     expect(getPublicState().tweets[0].status).toBe("pending");
+    const resumeAt = new Date(getPublicState().tweets[0].scheduledAt).getTime();
+    expect(resumeAt).toBeGreaterThanOrEqual(reset.getTime() + 60_000);
+    expect(resumeAt).toBeLessThanOrEqual(Math.ceil(reset.getTime() / 1000) * 1000 + 120_000);
     expect(getPublicState().queue.paused).toBe(false);
 
     let calls = 0;
@@ -135,8 +138,14 @@ describe("import, queue, and mocked posting", () => {
     });
     expect(calls).toBe(0);
 
-    const after = await tick({
+    const idle = await tick({
       now: new Date(reset.getTime() + 1000),
+      client: client(async () => ({ id: "too-regular" })),
+    });
+    expect(idle.action).toBe("idle");
+
+    const after = await tick({
+      now: new Date(resumeAt),
       client: client(async () => ({ id: "after-limit" })),
     });
     expect(after).toMatchObject({ action: "posted", tweetId: "after-limit" });

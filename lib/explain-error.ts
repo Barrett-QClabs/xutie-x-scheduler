@@ -9,7 +9,7 @@ const CODE_KEYS: Record<string, MessageKey> = {
   invalid_text: "errInvalidText",
   too_long: "errTooLong",
   invalid_interval: "errInterval",
-  invalid_jitter: "errJitter",
+  invalid_random: "errRandom",
   invalid_start: "errStart",
   start_too_late: "errStartLate",
   start_too_early: "errStartEarly",
