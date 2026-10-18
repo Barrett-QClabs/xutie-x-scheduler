@@ -7,3 +7,6 @@ export const MAX_IMPORT_BATCH = 50;
  * until that interval ends, so a wait does not trigger another paid read.
  */
 export const TIMELINE_CACHE_TTL_MS = 60_000;
+
+/** Max raw characters in one import request: room for 50 long posts of ~10,000 characters plus separators. */
+export const MAX_IMPORT_SOURCE_CHARS = 2_000_000;

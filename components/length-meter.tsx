@@ -9,7 +9,13 @@ export function LengthMeter({ text, className }: { text: string; className?: str
   const result = inspectTweet(text);
   const over = result.reason === "too_long";
   return (
-    <span className={cn("text-xs tabular-nums", over ? "text-destructive" : "text-muted-foreground", className)}>
+    <span
+      className={cn(
+        "text-xs tabular-nums",
+        over ? "text-destructive" : result.isLong ? "text-amber-700" : "text-muted-foreground",
+        className,
+      )}
+    >
       {t("chars", { count: result.weightedLength })}
     </span>
   );

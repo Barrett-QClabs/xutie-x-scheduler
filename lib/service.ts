@@ -14,12 +14,12 @@ import {
   updateAccount,
   upsertCredentials,
 } from "@/lib/db";
-import { MAX_IMPORT_BATCH } from "@/lib/constants";
+import { MAX_IMPORT_BATCH, MAX_IMPORT_SOURCE_CHARS } from "@/lib/constants";
 import { AppError } from "@/lib/errors";
 import { parseImport } from "@/lib/parse-import";
 import { assertSchedule, assertStartAt, computeSchedule } from "@/lib/schedule";
 import type { Credentials, ImportMode, InvalidTweet, PublicState, PublicTweet, Tweet } from "@/lib/types";
-import { inspectTweet } from "@/lib/weighted-length";
+import { inspectTweet, MAX_LONG_POST_LENGTH, MAX_WEIGHTED_LENGTH } from "@/lib/weighted-length";
 import { createXClient, isMockMode, XApiError } from "@/lib/x-client";
 
 export function readCredentials(): Credentials | null {
@@ -112,6 +112,7 @@ export async function testCredentials(input?: Partial<Credentials>): Promise<{
 function toPublicTweet(tweet: Tweet, username: string | null): PublicTweet {
   return {
     ...tweet,
+    isLong: tweet.weightedLength > MAX_WEIGHTED_LENGTH,
     tweetUrl: tweet.tweetId
       ? username
         ? `https://x.com/${username}/status/${tweet.tweetId}`
@@ -155,13 +156,14 @@ export function importTweets(input: {
   queuedCount: number;
   queued: PublicTweet[];
   invalid: InvalidTweet[];
+  longCount: number;
   omittedCount: number;
   batchLimit: number;
 } {
   if (typeof input.source !== "string") {
     throw new AppError("invalid_text", "没有收到要导入的文本。");
   }
-  if (input.source.length > 200_000) {
+  if (input.source.length > MAX_IMPORT_SOURCE_CHARS) {
     throw new AppError("too_many", "文本太长，请分成几批导入。");
   }
   const format = input.format === "csv" ? "csv" : "text";
@@ -221,6 +223,7 @@ export function importTweets(input: {
     queuedCount: rows.length,
     queued: rows.map((row) => toPublicTweet(row, username)),
     invalid,
+    longCount: rows.filter((row) => row.weightedLength > MAX_WEIGHTED_LENGTH).length,
     omittedCount,
     batchLimit: MAX_IMPORT_BATCH,
   };
@@ -237,7 +240,7 @@ export function updateTweetText(id: string, text: unknown): PublicTweet {
   if (!inspected.valid) {
     throw new AppError(
       inspected.reason === "too_long" ? "too_long" : "invalid_text",
-      inspected.reason === "too_long" ? `超过 280 字（现为 ${inspected.weightedLength}）。` : "帖子内容不能为空。",
+      inspected.reason === "too_long" ? `超过 ${MAX_LONG_POST_LENGTH} 字上限（现为 ${inspected.weightedLength}）。` : "帖子内容不能为空。",
     );
   }
   patchTweet(id, { text: inspected.text, weightedLength: inspected.weightedLength, errorMessage: null });

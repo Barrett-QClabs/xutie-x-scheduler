@@ -86,6 +86,13 @@ export function createMockXClient(credentials: Credentials): XClient {
       if (text.includes("[[rate-limit]]")) {
         throw new XApiError("Rate limit exceeded", "rate_limit", 429, new Date(Date.now() + 15 * 60_000));
       }
+      if (text.includes("[[too-long]]")) {
+        throw new XApiError(
+          "X 拒绝了这条长文：可能需要 X Premium，或超过了长度上限。X rejected this long post (X Premium may be required, or it is too long). [403] You are not permitted to create a Tweet with this length.",
+          "rejected",
+          403,
+        );
+      }
       if (text.includes("[[fail]]")) {
         throw new XApiError("Internal error", "transient", 503);
       }
@@ -191,6 +198,13 @@ export async function toXApiError(response: Response): Promise<XApiError> {
   }
   const message = extractMessage(body) || `X API 错误（${response.status}）`;
   const kind = classifyStatus(response.status, message, body);
+  if (kind === "rejected" && (response.status === 400 || response.status === 403) && isLengthRejection(`${message} ${JSON.stringify(body ?? {})}`)) {
+    return new XApiError(
+      `X 拒绝了这条长文：可能需要 X Premium，或超过了长度上限。X rejected this long post (X Premium may be required, or it is too long). [${response.status}] ${message}`,
+      kind,
+      response.status,
+    );
+  }
   const resetAt = kind === "rate_limit" ? readReset(response) : undefined;
   return new XApiError(message, kind, response.status, resetAt);
 }
@@ -207,10 +221,18 @@ function extractMessage(body: unknown): string {
   return "";
 }
 
+const LENGTH_PATTERN = /too long|length|premium|character/;
+
+export function isLengthRejection(blob: string): boolean {
+  return LENGTH_PATTERN.test(blob.toLowerCase());
+}
+
 export function classifyStatus(status: number, message: string, body: unknown): XErrorKind {
   if (status === 429) return "rate_limit";
   const blob = `${message} ${JSON.stringify(body ?? {})}`.toLowerCase();
   if (blob.includes("duplicate")) return "duplicate";
+  // A long post refused for length / missing Premium fails on its own; never treat it as an auth problem.
+  if ((status === 400 || status === 403) && isLengthRejection(blob)) return "rejected";
   if (status === 401) return "auth";
   if (
     status === 403 &&

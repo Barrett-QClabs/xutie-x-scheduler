@@ -5,7 +5,10 @@
  * Variation selectors, ZWJ, and skin tones add nothing so a single
  * emoji stays near 2. Flag sequences can still be slightly high.
  */
+/** Standard limit. Longer posts are allowed but need X Premium, so they carry a warning. */
 export const MAX_WEIGHTED_LENGTH = 280;
+/** Hard upper bound: X's long-post limit for Premium accounts. */
+export const MAX_LONG_POST_LENGTH = 25_000;
 const SCALE = 100;
 const URL_WEIGHT = 23;
 
@@ -67,15 +70,17 @@ export function inspectTweet(text: string): {
   text: string;
   weightedLength: number;
   valid: boolean;
+  /** Over 280 but within the Premium limit: allowed, with a warning. */
+  isLong: boolean;
   reason?: "empty" | "too_long";
 } {
   const trimmed = text.trim();
   if (!trimmed) {
-    return { text: "", weightedLength: 0, valid: false, reason: "empty" };
+    return { text: "", weightedLength: 0, valid: false, isLong: false, reason: "empty" };
   }
   const length = weightedLength(trimmed);
-  if (length > MAX_WEIGHTED_LENGTH) {
-    return { text: trimmed, weightedLength: length, valid: false, reason: "too_long" };
+  if (length > MAX_LONG_POST_LENGTH) {
+    return { text: trimmed, weightedLength: length, valid: false, isLong: true, reason: "too_long" };
   }
-  return { text: trimmed, weightedLength: length, valid: true };
+  return { text: trimmed, weightedLength: length, valid: true, isLong: length > MAX_WEIGHTED_LENGTH };
 }

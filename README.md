@@ -11,7 +11,7 @@ Paste or upload a batch of posts, queue them on an interval, and let a local pro
 - Settings page for the four OAuth 1.0a user-context credentials, with a connection test (`GET /2/users/me`) that shows the connected @handle.
 - Credentials stay on the server. They are encrypted at rest with AES-256-GCM using a key from the environment, and API responses never send them back to the browser.
 - Bulk import: one post per line, blank lines between posts, a line that is exactly `---`, or a `.txt` / `.csv` upload. One batch accepts at most 50 valid posts (`MAX_IMPORT_BATCH`). Extra valid posts are reported so you can split them; lines that fail the length check do not use a slot.
-- Length check follows X's weighted limit of 280: Latin characters count as 1, CJK as 2, and each `http(s)` URL as 23.
+- Length uses X's weighted count: Latin characters count as 1, CJK as 2, and each `http(s)` URL as 23. Posts over 280 are still queued, marked “Long post”, with a warning that they need X Premium. The hard limit is 25,000 (X's Premium long-post limit); anything longer is rejected. Each import takes up to 50 posts and up to 2,000,000 characters of source text.
 - Queue controls: start time, interval (default 15 minutes), optional jitter, edit, delete, reorder, pause, resume, and retry.
 - Before each send, the scheduler reads the account's latest post on X, including posts made outside this app. If that post is newer than one interval, the due tweet and the pending tweets after it move forward together so the gap is preserved. A delay caused by a post this app did not send is labeled in the queue.
 - State lives in SQLite, so a restart keeps unsent posts. HTTP 429 waits for `x-rate-limit-reset`. Duplicate content is marked failed and the queue continues. An auth failure pauses the queue and shows the reason. A successful post stores the tweet id and a link to `https://x.com/{handle}/status/{id}`.
@@ -106,6 +106,7 @@ X's prices change. The figures below are from public 2026 information. **Your de
 - Posting too fast returns HTTP 429. 序帖 waits until `x-rate-limit-reset`, or 15 minutes if that header is missing. The tweet stays pending.
 - Public docs often cite about 100 creates per user per 15 minutes and 10,000 per app per 24 hours. Plans differ. The default of one post every 15 minutes is meant to look less like a burst and sits far under those numbers.
 - X rejects duplicate content. That item is marked failed and the queue continues. Edit the text and retry.
+- Posts over 280 need X Premium. If X refuses a long post (for example a 403 about length or Premium), only that post is marked failed with a readable message; the queue keeps going.
 - A 401, or a 403 that is about the token or permissions, pauses the whole queue. A common cause is a still-read-only access token, or a mistyped value. Fix the credentials, pass the connection test, then resume.
 
 ## Deploy
@@ -156,6 +157,7 @@ The cipher is scrypt plus AES-256-GCM. The salt and IV are stored with the ciphe
 ## Limitations
 
 - Text only. No images, video, or polls.
+- Long posts (over 280, up to 25,000) need X Premium on the posting account. 序帖 does not check your subscription in advance.
 - One saved credential set, so one X account.
 - Designed for a single process.
 - No built-in login. Do not expose it on the public internet.

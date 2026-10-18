@@ -47,7 +47,7 @@ describe("import batch cap", () => {
 
   it("does not count over-limit lines toward the batch of 50", () => {
     const valid = Array.from({ length: 50 }, (_, index) => `好${index + 1}`);
-    const imported = queue([...valid, "中".repeat(141)].join("\n"), new Date(Date.now() + 60_000).toISOString());
+    const imported = queue([...valid, "中".repeat(12_501)].join("\n"), new Date(Date.now() + 60_000).toISOString());
     expect(imported.queuedCount).toBe(50);
     expect(imported.omittedCount).toBe(0);
     expect(imported.invalid).toHaveLength(1);

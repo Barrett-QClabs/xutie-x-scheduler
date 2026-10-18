@@ -33,6 +33,8 @@ export type Tweet = {
 
 export type PublicTweet = Tweet & {
   tweetUrl: string | null;
+  /** Over 280 weighted characters: needs X Premium. */
+  isLong: boolean;
 };
 
 export type QueueSettings = {

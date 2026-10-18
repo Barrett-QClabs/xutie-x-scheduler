@@ -205,7 +205,15 @@ export function QueueScreen() {
                   <div className="flex flex-wrap items-center gap-2">
                     <ClientTime iso={tweet.scheduledAt} locale={locale} />
                     <StatusBadge status={tweet.status} label={t(statusKey(tweet.status))} />
+                    {tweet.isLong ? (
+                      <Badge variant="outline" className="bg-amber-100 text-amber-950">
+                        {t("longPost")}
+                      </Badge>
+                    ) : null}
                   </div>
+                  {tweet.isLong && tweet.status !== "posted" ? (
+                    <p className="mt-2 text-sm text-amber-900">{t("longPostWarning")}</p>
+                  ) : null}
                   <p className="mt-3 whitespace-pre-wrap text-sm leading-6 break-words">{tweet.text}</p>
                   {tweet.status === "pending" && tweet.delayReason === "manual" ? (
                     <p className="mt-2 text-sm text-amber-900">{t("manualDelayRow")}</p>

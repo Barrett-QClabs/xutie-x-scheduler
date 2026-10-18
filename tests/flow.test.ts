@@ -87,7 +87,7 @@ describe("import, queue, and mocked posting", () => {
       throw new Error("network");
     };
 
-    const imported = queueDue(`第一条\n第二条\n${"中".repeat(200)}`);
+    const imported = queueDue(`第一条\n第二条\n${"中".repeat(12_501)}`);
     expect(imported.queued.map((tweet) => tweet.text)).toEqual(["第一条", "第二条"]);
     expect(imported.invalid).toHaveLength(1);
     expect(imported.invalid[0].reason).toBe("too_long");
@@ -204,7 +204,8 @@ describe("import, queue, and mocked posting", () => {
 
     updateTweetText(first.id, "甲改过了");
     expect(getPublicState().tweets.find((tweet) => tweet.id === first.id)?.text).toBe("甲改过了");
-    expect(() => updateTweetText(first.id, "中".repeat(150))).toThrow(/280/);
+    expect(updateTweetText(first.id, "中".repeat(150)).isLong).toBe(true);
+    expect(() => updateTweetText(first.id, "中".repeat(12_501))).toThrow(/25000/);
 
     pauseQueue();
     const paused = await tick({
@@ -220,6 +221,47 @@ describe("import, queue, and mocked posting", () => {
     const response = await DELETE(new Request("http://local"), { params: Promise.resolve({ id: removed.id }) });
     expect(response.status).toBe(200);
     expect(getPublicState().tweets.some((tweet) => tweet.id === removed.id)).toBe(false);
+  });
+});
+
+describe("long posts", () => {
+  it("queues posts over 280 with a warning, allows ~10,000-char posts, and fails a rejected one alone", async () => {
+    saveCredentials({
+      apiKey: "abc12345",
+      apiSecret: secret,
+      accessToken: "token-value",
+      accessTokenSecret: "token-secret-value",
+    });
+    const big = "长".repeat(10_000);
+    const source = ["短的", "中".repeat(141), big, `${big}二`, `${big}三`, "x".repeat(25_001)].join("\n---\n");
+    const imported = queueDue(source);
+    expect(imported.queuedCount).toBe(5);
+    expect(imported.longCount).toBe(4);
+    expect(imported.invalid).toHaveLength(1);
+    expect(imported.invalid[0].reason).toBe("too_long");
+    expect(imported.queued[0].isLong).toBe(false);
+    expect(imported.queued[1].isLong).toBe(true);
+    expect(imported.queued[2].weightedLength).toBe(20_000);
+
+    const first = await tick();
+    expect(first.action).toBe("posted");
+    const rejected = await tick({
+      now: new Date(Date.now() + 16 * 60_000),
+      client: client(async () => {
+        throw new XApiError("X 拒绝了这条长文：可能需要 X Premium", "rejected", 403);
+      }),
+    });
+    expect(rejected.action).toBe("failed");
+    const state = getPublicState();
+    expect(state.queue.paused).toBe(false);
+    expect(state.tweets.find((tweet) => tweet.id === imported.queued[1].id)?.errorMessage).toContain("Premium");
+    expect(state.counts.pending).toBe(3);
+  });
+
+  it("accepts an import source large enough for several long posts", () => {
+    const source = Array.from({ length: 8 }, (_, index) => `${index}${"a".repeat(20_000)}`).join("\n---\n");
+    expect(source.length).toBeGreaterThan(160_000);
+    expect(queueDue(source).queuedCount).toBe(8);
   });
 });
 
@@ -262,6 +304,19 @@ describe("live X client", () => {
         { status: 403 },
       );
     await expect(x.postTweet("hello")).rejects.toMatchObject({ kind: "duplicate" });
+
+    global.fetch = async () =>
+      new Response(
+        JSON.stringify({ detail: "You are not permitted to create a Tweet with this length." }),
+        { status: 403 },
+      );
+    const long = await x.postTweet("hello").catch((error: unknown) => error);
+    expect(long).toMatchObject({ kind: "rejected", status: 403 });
+    expect((long as Error).message).toContain("X Premium");
+
+    global.fetch = async () =>
+      new Response(JSON.stringify({ detail: "Not authorized: Premium subscription required for long posts" }), { status: 403 });
+    await expect(x.postTweet("hello")).rejects.toMatchObject({ kind: "rejected" });
 
     global.fetch = async () => new Response(JSON.stringify({ detail: "Unauthorized" }), { status: 401 });
     await expect(x.postTweet("hello")).rejects.toMatchObject({ kind: "auth" });

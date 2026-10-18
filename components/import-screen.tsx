@@ -71,6 +71,7 @@ export function ImportScreen() {
   const acceptedCount = Math.min(validCount, MAX_IMPORT_BATCH);
   const omittedCount = Math.max(0, validCount - MAX_IMPORT_BATCH);
   const invalidCount = preview.items.length - validCount;
+  const longCount = preview.items.filter((item) => item.valid && item.isLong && !item.overCap).length;
 
   async function onUpload(file: File | undefined) {
     if (!file) return;
@@ -85,7 +86,7 @@ export function ImportScreen() {
     setError(null);
     setNotice(null);
     try {
-      const result = await api<{ queuedCount: number; invalid: InvalidTweet[]; omittedCount: number; batchLimit: number }>(
+      const result = await api<{ queuedCount: number; invalid: InvalidTweet[]; longCount?: number; omittedCount: number; batchLimit: number }>(
         "/api/tweets/import",
         {
         method: "POST",
@@ -113,6 +114,9 @@ export function ImportScreen() {
         setNotice(t("importPartial", { count: result.queuedCount, skipped: result.invalid.length }));
       } else {
         setNotice(t("importDone", { count: result.queuedCount }));
+      }
+      if (result.longCount) {
+        setNotice((current) => `${current ?? ""} ${t("importLong", { count: result.longCount ?? 0 })}`.trim());
       }
       if (result.invalid.length === 0 && result.omittedCount === 0) setSource("");
       await refresh();
@@ -198,6 +202,11 @@ export function ImportScreen() {
           {t("batchCapWarning", { limit: MAX_IMPORT_BATCH, omitted: omittedCount })}
         </p>
       ) : null}
+      {longCount > 0 ? (
+        <p className="rounded-lg bg-amber-100 px-3 py-2 text-sm leading-6 text-amber-950">
+          {t("longPostPreview", { count: longCount })}
+        </p>
+      ) : null}
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
       <section className="space-y-3">
@@ -231,8 +240,16 @@ export function ImportScreen() {
                           ? t("reasonTooLong")
                           : t("reasonEmpty")}
                   </Badge>
+                  {item.valid && item.isLong && !item.overCap ? (
+                    <Badge variant="outline" className="bg-amber-100 text-amber-950" title={t("longPostWarning")}>
+                      {t("longPost")}
+                    </Badge>
+                  ) : null}
                   <LengthMeter text={item.raw} className="ml-auto" />
                 </div>
+                {item.valid && item.isLong && !item.overCap ? (
+                  <p className="mb-1 text-xs text-amber-900">{t("longPostWarning")}</p>
+                ) : null}
                 <p className="whitespace-pre-wrap text-sm leading-6 break-words">{item.raw}</p>
               </li>
             ))}

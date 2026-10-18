@@ -12,7 +12,11 @@ describe("weighted length", () => {
     expect(weightedLength("你好")).toBe(4);
     expect(inspectTweet("中".repeat(140)).valid).toBe(true);
     expect(inspectTweet("中".repeat(140)).weightedLength).toBe(280);
-    expect(inspectTweet("中".repeat(141)).valid).toBe(false);
+    expect(inspectTweet("中".repeat(141)).valid).toBe(true);
+    expect(inspectTweet("中".repeat(141)).isLong).toBe(true);
+    expect(inspectTweet("中".repeat(140)).isLong).toBe(false);
+    expect(inspectTweet("中".repeat(12_500)).valid).toBe(true);
+    expect(inspectTweet("中".repeat(12_501)).reason).toBe("too_long");
     expect(inspectTweet("中".repeat(141)).weightedLength).toBe(282);
   });
 
@@ -28,7 +32,9 @@ describe("weighted length", () => {
     expect(inspectTweet("   ").reason).toBe("empty");
     expect(weightedLength("😀")).toBe(2);
     expect(inspectTweet("a".repeat(280)).valid).toBe(true);
-    expect(inspectTweet("a".repeat(281)).reason).toBe("too_long");
+    expect(inspectTweet("a".repeat(281)).valid).toBe(true);
+    expect(inspectTweet("a".repeat(25_000)).valid).toBe(true);
+    expect(inspectTweet("a".repeat(25_001)).reason).toBe("too_long");
   });
 });
 
