@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { QueueSettings, Tweet, TweetStatus } from "@/lib/types";
+import type { DelayReason, QueueSettings, Tweet, TweetStatus } from "@/lib/types";
 
 let database: DatabaseSync | null = null;
 
@@ -48,6 +48,10 @@ function migrate(db: DatabaseSync): void {
       rate_limit_until TEXT,
       last_error TEXT,
       lock_until TEXT,
+      timeline_checked_at TEXT,
+      timeline_latest_at TEXT,
+      timeline_latest_id TEXT,
+      timeline_ok INTEGER,
       updated_at TEXT NOT NULL
     );
 
@@ -62,16 +66,19 @@ function migrate(db: DatabaseSync): void {
       error_message TEXT,
       attempt_count INTEGER NOT NULL DEFAULT 0,
       sort_order INTEGER NOT NULL,
+      delay_reason TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_tweets_status_sched ON tweets(status, scheduled_at);
   `);
-  const columns = db.prepare("PRAGMA table_info(queue_settings)").all() as Array<{ name: string }>;
-  if (!columns.some((column) => column.name === "lock_until")) {
-    db.exec("ALTER TABLE queue_settings ADD COLUMN lock_until TEXT");
-  }
+  ensureColumn(db, "queue_settings", "lock_until", "ALTER TABLE queue_settings ADD COLUMN lock_until TEXT");
+  ensureColumn(db, "queue_settings", "timeline_checked_at", "ALTER TABLE queue_settings ADD COLUMN timeline_checked_at TEXT");
+  ensureColumn(db, "queue_settings", "timeline_latest_at", "ALTER TABLE queue_settings ADD COLUMN timeline_latest_at TEXT");
+  ensureColumn(db, "queue_settings", "timeline_latest_id", "ALTER TABLE queue_settings ADD COLUMN timeline_latest_id TEXT");
+  ensureColumn(db, "queue_settings", "timeline_ok", "ALTER TABLE queue_settings ADD COLUMN timeline_ok INTEGER");
+  ensureColumn(db, "tweets", "delay_reason", "ALTER TABLE tweets ADD COLUMN delay_reason TEXT");
   db.prepare(
     `INSERT OR IGNORE INTO queue_settings
       (id, interval_minutes, jitter_minutes, paused, updated_at)
@@ -97,9 +104,15 @@ type TweetRow = {
   error_message: string | null;
   attempt_count: number;
   sort_order: number;
+  delay_reason: string | null;
   created_at: string;
   updated_at: string;
 };
+
+function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((item) => item.name === column)) db.exec(ddl);
+}
 
 function one<T>(sql: string, ...params: unknown[]): T | null {
   const row = getDb().prepare(sql).get(...params);
@@ -221,6 +234,47 @@ export function releaseLock(): void {
   getDb().prepare("UPDATE queue_settings SET lock_until = NULL WHERE id = 1").run();
 }
 
+export type TimelineCache = {
+  checkedAt: string | null;
+  latestAt: string | null;
+  latestId: string | null;
+  ok: boolean;
+};
+
+export function getTimelineCache(): TimelineCache {
+  const row = one<{
+    timeline_checked_at: string | null;
+    timeline_latest_at: string | null;
+    timeline_latest_id: string | null;
+    timeline_ok: number | null;
+  }>(
+    `SELECT timeline_checked_at, timeline_latest_at, timeline_latest_id, timeline_ok
+     FROM queue_settings WHERE id = 1`,
+  );
+  return {
+    checkedAt: row?.timeline_checked_at ?? null,
+    latestAt: row?.timeline_latest_at ?? null,
+    latestId: row?.timeline_latest_id ?? null,
+    ok: row?.timeline_ok === 1,
+  };
+}
+
+export function setTimelineCache(cache: TimelineCache): void {
+  getDb()
+    .prepare(
+      `UPDATE queue_settings
+       SET timeline_checked_at = ?, timeline_latest_at = ?, timeline_latest_id = ?, timeline_ok = ?, updated_at = ?
+       WHERE id = 1`,
+    )
+    .run(
+      cache.checkedAt,
+      cache.latestAt,
+      cache.latestId,
+      cache.ok ? 1 : 0,
+      new Date().toISOString(),
+    );
+}
+
 function mapTweet(row: TweetRow): Tweet {
   return {
     id: row.id,
@@ -233,6 +287,7 @@ function mapTweet(row: TweetRow): Tweet {
     errorMessage: row.error_message,
     attemptCount: row.attempt_count,
     sortOrder: row.sort_order,
+    delayReason: row.delay_reason === "manual" ? "manual" : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -264,8 +319,8 @@ export function insertTweets(rows: Tweet[]): void {
   const statement = db.prepare(
     `INSERT INTO tweets (
       id, text, weighted_length, status, scheduled_at, posted_at, tweet_id,
-      error_message, attempt_count, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      error_message, attempt_count, sort_order, delay_reason, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   db.exec("BEGIN");
   try {
@@ -281,6 +336,7 @@ export function insertTweets(rows: Tweet[]): void {
         row.errorMessage,
         row.attemptCount,
         row.sortOrder,
+        row.delayReason,
         row.createdAt,
         row.updatedAt,
       );
@@ -302,6 +358,7 @@ const TWEET_COLUMNS: Record<string, string> = {
   errorMessage: "error_message",
   attemptCount: "attempt_count",
   sortOrder: "sort_order",
+  delayReason: "delay_reason",
 };
 
 export function patchTweet(
@@ -316,6 +373,7 @@ export function patchTweet(
     errorMessage: string | null;
     attemptCount: number;
     sortOrder: number;
+    delayReason: DelayReason;
   }>,
 ): void {
   const sets: string[] = [];
@@ -349,6 +407,10 @@ export function resetAllData(): void {
       rate_limit_until = NULL,
       last_error = NULL,
       lock_until = NULL,
+      timeline_checked_at = NULL,
+      timeline_latest_at = NULL,
+      timeline_latest_id = NULL,
+      timeline_ok = NULL,
       updated_at = ?
      WHERE id = 1`,
   ).run(now);

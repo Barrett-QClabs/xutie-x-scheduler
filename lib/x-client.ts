@@ -15,9 +15,15 @@ export class XApiError extends Error {
   }
 }
 
+export type XTimelineTweet = {
+  id: string;
+  createdAt: string;
+};
+
 export interface XClient {
   verify(): Promise<XUser>;
   postTweet(text: string): Promise<{ id: string }>;
+  latestTweet?(userId: string): Promise<XTimelineTweet | null>;
 }
 
 const API_BASE = "https://api.x.com";
@@ -34,13 +40,27 @@ export function createLiveXClient(credentials: Credentials): XClient {
   return {
     verify: () => verifyCredentials(credentials),
     postTweet: (text) => postTweet(credentials, text),
+    latestTweet: (userId) => latestTweet(credentials, userId),
   };
 }
 
 let mockSequence = 0;
+let mockLatest: XTimelineTweet | null = null;
+
+export function resetMockXClient(): void {
+  mockSequence = 0;
+  mockLatest = null;
+}
+
+export function setMockLatestTweet(tweet: XTimelineTweet | null): void {
+  mockLatest = tweet;
+}
 
 export function createMockXClient(credentials: Credentials): XClient {
   return {
+    async latestTweet() {
+      return mockLatest;
+    },
     async verify() {
       if (credentials.apiKey === "invalid" || credentials.accessToken === "invalid") {
         throw new XApiError("Invalid or expired token", "auth", 401);
@@ -70,7 +90,9 @@ export function createMockXClient(credentials: Credentials): XClient {
         throw new XApiError("Internal error", "transient", 503);
       }
       mockSequence += 1;
-      return { id: `mock_${Date.now()}_${mockSequence}` };
+      const id = `mock_${Date.now()}_${mockSequence}`;
+      mockLatest = { id, createdAt: new Date().toISOString() };
+      return { id };
     },
   };
 }
@@ -91,6 +113,25 @@ async function verifyCredentials(credentials: Credentials): Promise<XUser> {
     username: record.username,
     name: typeof record.name === "string" ? record.name : record.username,
   };
+}
+
+async function latestTweet(credentials: Credentials, userId: string): Promise<XTimelineTweet | null> {
+  const payload = await xRequest(credentials, "GET", `/2/users/${encodeURIComponent(userId)}/tweets`, {
+    max_results: "5",
+    "tweet.fields": "created_at",
+    exclude: "retweets",
+  });
+  if (!Array.isArray(payload.data)) return null;
+  let best: { id: string; createdAt: string; time: number } | null = null;
+  for (const item of payload.data) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || typeof record.created_at !== "string") continue;
+    const time = new Date(record.created_at).getTime();
+    if (Number.isNaN(time)) continue;
+    if (!best || time > best.time) best = { id: record.id, createdAt: record.created_at, time };
+  }
+  return best ? { id: best.id, createdAt: best.createdAt } : null;
 }
 
 async function postTweet(credentials: Credentials, text: string): Promise<{ id: string }> {

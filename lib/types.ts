@@ -1,5 +1,7 @@
 export type TweetStatus = "pending" | "posted" | "failed";
 
+export type DelayReason = "manual" | null;
+
 export type Credentials = {
   apiKey: string;
   apiSecret: string;
@@ -24,6 +26,7 @@ export type Tweet = {
   errorMessage: string | null;
   attemptCount: number;
   sortOrder: number;
+  delayReason: DelayReason;
   createdAt: string;
   updatedAt: string;
 };

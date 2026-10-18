@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { MAX_IMPORT_BATCH } from "@/lib/constants";
 import { toDatetimeLocal } from "@/lib/datetime";
 import { explainError } from "@/lib/explain-error";
 import type { MessageKey } from "@/lib/messages";
@@ -57,11 +58,18 @@ export function ImportScreen() {
 
   const preview = useMemo(() => {
     const parsed = parseImport(source, format);
-    const items = parsed.tweets.map((text, index) => ({ index, ...inspectTweet(text), raw: text }));
+    let validSeen = 0;
+    const items = parsed.tweets.map((text, index) => {
+      const inspected = inspectTweet(text);
+      const overCap = inspected.valid ? ++validSeen > MAX_IMPORT_BATCH : false;
+      return { index, ...inspected, raw: text, overCap };
+    });
     return { mode: parsed.mode, items };
   }, [source, format]);
 
   const validCount = preview.items.filter((item) => item.valid).length;
+  const acceptedCount = Math.min(validCount, MAX_IMPORT_BATCH);
+  const omittedCount = Math.max(0, validCount - MAX_IMPORT_BATCH);
   const invalidCount = preview.items.length - validCount;
 
   async function onUpload(file: File | undefined) {
@@ -77,7 +85,9 @@ export function ImportScreen() {
     setError(null);
     setNotice(null);
     try {
-      const result = await api<{ queuedCount: number; invalid: InvalidTweet[] }>("/api/tweets/import", {
+      const result = await api<{ queuedCount: number; invalid: InvalidTweet[]; omittedCount: number; batchLimit: number }>(
+        "/api/tweets/import",
+        {
         method: "POST",
         body: JSON.stringify({
           source,
@@ -87,12 +97,24 @@ export function ImportScreen() {
           jitterMinutes: Number(jitterMinutes),
         }),
       });
-      setNotice(
-        result.invalid.length
-          ? t("importPartial", { count: result.queuedCount, skipped: result.invalid.length })
-          : t("importDone", { count: result.queuedCount }),
-      );
-      if (result.invalid.length === 0) setSource("");
+      const limit = result.batchLimit || MAX_IMPORT_BATCH;
+      if (result.omittedCount > 0 && result.invalid.length > 0) {
+        setNotice(
+          t("importCappedPartial", {
+            count: result.queuedCount,
+            skipped: result.invalid.length,
+            omitted: result.omittedCount,
+            limit,
+          }),
+        );
+      } else if (result.omittedCount > 0) {
+        setNotice(t("importCapped", { count: result.queuedCount, omitted: result.omittedCount, limit }));
+      } else if (result.invalid.length > 0) {
+        setNotice(t("importPartial", { count: result.queuedCount, skipped: result.invalid.length }));
+      } else {
+        setNotice(t("importDone", { count: result.queuedCount }));
+      }
+      if (result.invalid.length === 0 && result.omittedCount === 0) setSource("");
       await refresh();
     } catch (caught) {
       setError(explainError(caught, locale, t));
@@ -161,8 +183,8 @@ export function ImportScreen() {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="button" disabled={busy || validCount === 0 || !startAt} onClick={() => void submit()}>
-          {busy ? t("working") : t("addToQueue", { count: validCount })}
+        <Button type="button" disabled={busy || acceptedCount === 0 || !startAt} onClick={() => void submit()}>
+          {busy ? t("working") : t("addToQueue", { count: acceptedCount })}
         </Button>
         {notice ? <span className="text-sm">{notice}</span> : null}
         {notice && !error ? (
@@ -171,6 +193,11 @@ export function ImportScreen() {
           </Button>
         ) : null}
       </div>
+      {omittedCount > 0 ? (
+        <p className="rounded-lg bg-amber-100 px-3 py-2 text-sm leading-6 text-amber-950">
+          {t("batchCapWarning", { limit: MAX_IMPORT_BATCH, omitted: omittedCount })}
+        </p>
+      ) : null}
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
       <section className="space-y-3">
@@ -192,8 +219,17 @@ export function ImportScreen() {
               <li key={`${item.index}-${item.raw.slice(0, 24)}`} className="rounded-lg bg-card px-3 py-2 ring-1 ring-foreground/10">
                 <div className="mb-1 flex items-center gap-2">
                   <span className="text-xs text-muted-foreground tabular-nums">{item.index + 1}</span>
-                  <Badge variant={item.valid ? "outline" : "destructive"} className={cn(item.valid && "bg-emerald-100 text-emerald-950")}>
-                    {item.valid ? t("valid") : item.reason === "too_long" ? t("reasonTooLong") : t("reasonEmpty")}
+                  <Badge
+                    variant={item.valid && !item.overCap ? "outline" : "destructive"}
+                    className={cn(item.valid && !item.overCap && "bg-emerald-100 text-emerald-950")}
+                  >
+                    {item.overCap
+                      ? t("overCap", { limit: MAX_IMPORT_BATCH })
+                      : item.valid
+                        ? t("valid")
+                        : item.reason === "too_long"
+                          ? t("reasonTooLong")
+                          : t("reasonEmpty")}
                   </Badge>
                   <LengthMeter text={item.raw} className="ml-auto" />
                 </div>

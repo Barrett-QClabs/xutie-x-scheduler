@@ -1,7 +1,27 @@
-import { getQueueSettings, patchQueueSettings, patchTweet, releaseLock, tryAcquireLock } from "@/lib/db";
+import { TIMELINE_CACHE_TTL_MS } from "@/lib/constants";
+import {
+  getCredentialsRow,
+  getQueueSettings,
+  getTimelineCache,
+  listTweets,
+  patchQueueSettings,
+  patchTweet,
+  releaseLock,
+  setTimelineCache,
+  tryAcquireLock,
+  updateAccount,
+} from "@/lib/db";
 import { AppError } from "@/lib/errors";
-import { deferExtraOverdue, nextDueTweet, pauseQueue, readCredentials } from "@/lib/service";
-import type { XClient } from "@/lib/x-client";
+import {
+  delayPendingForRecentPost,
+  deferExtraOverdue,
+  latestLocalPost,
+  nextDueTweet,
+  pauseQueue,
+  readCredentials,
+} from "@/lib/service";
+import { shouldReuseTimelineCache } from "@/lib/timeline";
+import type { XClient, XTimelineTweet } from "@/lib/x-client";
 import { createXClient, XApiError } from "@/lib/x-client";
 
 export type TickResult =
@@ -13,7 +33,8 @@ export type TickResult =
   | { action: "posted"; id: string; tweetId: string }
   | { action: "failed"; id: string }
   | { action: "auth_paused"; id: string }
-  | { action: "retry_later"; id: string };
+  | { action: "retry_later"; id: string }
+  | { action: "deferred"; until: string; manual: boolean };
 
 const globalState = globalThis as unknown as { __xutiScheduler?: boolean; __xutiTick?: Promise<unknown> };
 
@@ -76,6 +97,13 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
       client = createXClient(credentials);
     }
 
+    const gap = await recentPostGap(now, client, fresh.intervalMinutes * 60_000);
+    if (gap && now.getTime() < gap.at.getTime() + fresh.intervalMinutes * 60_000) {
+      const earliest = new Date(gap.at.getTime() + fresh.intervalMinutes * 60_000);
+      delayPendingForRecentPost(earliest, gap.manual);
+      return { action: "deferred", until: earliest.toISOString(), manual: gap.manual };
+    }
+
     try {
       const posted = await client.postTweet(due.text);
       patchTweet(due.id, {
@@ -83,8 +111,15 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
         postedAt: now.toISOString(),
         tweetId: posted.id,
         errorMessage: null,
+        delayReason: null,
       });
       patchQueueSettings({ rateLimitUntil: null, lastError: null });
+      setTimelineCache({
+        checkedAt: now.toISOString(),
+        latestAt: now.toISOString(),
+        latestId: posted.id,
+        ok: true,
+      });
       return { action: "posted", id: due.id, tweetId: posted.id };
     } catch (error) {
       if (!(error instanceof XApiError)) {
@@ -126,4 +161,101 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
   } finally {
     releaseLock();
   }
+}
+
+const TIMELINE_LOG = "[序帖] 读取最近帖子失败，改用本工具自己的上次发送时间。";
+
+async function recentPostGap(
+  now: Date,
+  client: XClient,
+  intervalMs: number,
+): Promise<{ at: Date; manual: boolean } | null> {
+  if (!client.latestTweet) return null;
+  const remote = await readRemoteLatest(now, client, intervalMs);
+  const local = latestLocalPost();
+  const winner = laterPost(remote, local);
+  if (!winner) return null;
+  const ours = new Set(listTweets().map((tweet) => tweet.tweetId).filter((id): id is string => Boolean(id)));
+  return { at: winner.at, manual: Boolean(winner.id) && !ours.has(winner.id) };
+}
+
+function laterPost(
+  remote: { id: string; at: Date } | null,
+  local: { id: string; at: Date } | null,
+): { id: string; at: Date } | null {
+  if (!remote) return local;
+  if (!local) return remote;
+  return remote.at.getTime() >= local.at.getTime() ? remote : local;
+}
+
+async function readRemoteLatest(now: Date, client: XClient, intervalMs: number): Promise<{ id: string; at: Date } | null> {
+  if (!client.latestTweet) return null;
+  const cache = getTimelineCache();
+  const reusable = shouldReuseTimelineCache({
+    checkedAt: cache.checkedAt,
+    latestAt: cache.latestAt,
+    ok: cache.ok,
+    now,
+    intervalMs,
+    ttlMs: TIMELINE_CACHE_TTL_MS,
+  });
+  if (reusable) {
+    if (!cache.ok) return null;
+    return cacheToPost(cache.latestId, cache.latestAt);
+  }
+
+  let userId = getCredentialsRow()?.user_id ?? null;
+  if (!userId) {
+    try {
+      const user = await client.verify();
+      userId = user.id;
+      if (getCredentialsRow()) {
+        updateAccount({ username: user.username, displayName: user.name, userId: user.id });
+      }
+    } catch (error) {
+      console.warn(TIMELINE_LOG, error instanceof Error ? error.message : error);
+      rememberTimelineError(now);
+      return null;
+    }
+  }
+
+  try {
+    const latest = await client.latestTweet(userId);
+    const parsed = normalizeTimelineTweet(latest);
+    setTimelineCache({
+      checkedAt: now.toISOString(),
+      latestAt: parsed?.at.toISOString() ?? null,
+      latestId: parsed?.id ?? null,
+      ok: true,
+    });
+    return parsed;
+  } catch (error) {
+    console.warn(TIMELINE_LOG, error instanceof Error ? error.message : error);
+    rememberTimelineError(now);
+    return null;
+  }
+}
+
+function rememberTimelineError(now: Date): void {
+  const previous = getTimelineCache();
+  setTimelineCache({
+    checkedAt: now.toISOString(),
+    latestAt: previous.latestAt,
+    latestId: previous.latestId,
+    ok: false,
+  });
+}
+
+function cacheToPost(id: string | null, at: string | null): { id: string; at: Date } | null {
+  if (!at) return null;
+  const parsed = new Date(at);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return { id: id ?? "", at: parsed };
+}
+
+function normalizeTimelineTweet(tweet: XTimelineTweet | null): { id: string; at: Date } | null {
+  if (!tweet?.id || !tweet.createdAt) return null;
+  const at = new Date(tweet.createdAt);
+  if (Number.isNaN(at.getTime())) return null;
+  return { id: tweet.id, at };
 }

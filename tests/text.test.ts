@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { TIMELINE_CACHE_TTL_MS } from "@/lib/constants";
 import { buildAuthorizationHeader } from "@/lib/oauth";
 import { parseImport } from "@/lib/parse-import";
 import { computeSchedule } from "@/lib/schedule";
+import { shouldReuseTimelineCache } from "@/lib/timeline";
 import { inspectTweet, weightedLength } from "@/lib/weighted-length";
 
 describe("weighted length", () => {
@@ -101,5 +103,56 @@ describe("oauth 1.0a", () => {
     });
     expect(signature).toBe("hCtSmYh+iHYCEqBWrE7C7hYmtUk=");
     expect(header).toContain('oauth_signature="hCtSmYh%2BiHYCEqBWrE7C7hYmtUk%3D"');
+  });
+});
+
+describe("timeline cache", () => {
+  const now = new Date("2026-06-01T12:00:00.000Z");
+  const intervalMs = 15 * 60_000;
+
+  it("reuses a fresh check, and a successful check until the interval has elapsed", () => {
+    expect(
+      shouldReuseTimelineCache({
+        checkedAt: new Date(now.getTime() - 30_000).toISOString(),
+        latestAt: null,
+        ok: false,
+        now,
+        intervalMs,
+        ttlMs: TIMELINE_CACHE_TTL_MS,
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldReuseTimelineCache({
+        checkedAt: new Date(now.getTime() - 2 * 60_000).toISOString(),
+        latestAt: new Date(now.getTime() - 5 * 60_000).toISOString(),
+        ok: true,
+        now,
+        intervalMs,
+        ttlMs: TIMELINE_CACHE_TTL_MS,
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldReuseTimelineCache({
+        checkedAt: new Date(now.getTime() - 2 * 60_000).toISOString(),
+        latestAt: new Date(now.getTime() - 20 * 60_000).toISOString(),
+        ok: true,
+        now,
+        intervalMs,
+        ttlMs: TIMELINE_CACHE_TTL_MS,
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldReuseTimelineCache({
+        checkedAt: null,
+        latestAt: null,
+        ok: false,
+        now,
+        intervalMs,
+        ttlMs: TIMELINE_CACHE_TTL_MS,
+      }),
+    ).toBe(false);
   });
 });

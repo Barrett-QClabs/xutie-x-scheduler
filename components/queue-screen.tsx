@@ -119,6 +119,9 @@ export function QueueScreen() {
       {state.mockMode ? <Notice>{t("mockBanner")}</Notice> : null}
       {!state.credentialsConfigured ? <Notice>{t("needCreds")}</Notice> : null}
       {state.queue.paused ? <Notice tone="warn">{pauseCopy(state.queue.pauseReason, t)}</Notice> : null}
+      {state.tweets.some((tweet) => tweet.status === "pending" && tweet.delayReason === "manual") ? (
+        <Notice tone="warn">{t("manualDelayBanner")}</Notice>
+      ) : null}
       {rateLimited ? (
         <Notice tone="warn">
           <RateNotice iso={state.queue.rateLimitUntil!} locale={locale} />
@@ -204,6 +207,9 @@ export function QueueScreen() {
                     <StatusBadge status={tweet.status} label={t(statusKey(tweet.status))} />
                   </div>
                   <p className="mt-3 whitespace-pre-wrap text-sm leading-6 break-words">{tweet.text}</p>
+                  {tweet.status === "pending" && tweet.delayReason === "manual" ? (
+                    <p className="mt-2 text-sm text-amber-900">{t("manualDelayRow")}</p>
+                  ) : null}
                   {tweet.errorMessage ? <p className="mt-2 text-sm text-destructive">{tweet.errorMessage}</p> : null}
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <LengthMeter text={tweet.text} />

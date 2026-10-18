@@ -14,14 +14,13 @@ import {
   updateAccount,
   upsertCredentials,
 } from "@/lib/db";
+import { MAX_IMPORT_BATCH } from "@/lib/constants";
 import { AppError } from "@/lib/errors";
 import { parseImport } from "@/lib/parse-import";
 import { assertSchedule, assertStartAt, computeSchedule } from "@/lib/schedule";
 import type { Credentials, ImportMode, InvalidTweet, PublicState, PublicTweet, Tweet } from "@/lib/types";
 import { inspectTweet } from "@/lib/weighted-length";
 import { createXClient, isMockMode, XApiError } from "@/lib/x-client";
-
-const MAX_BATCH = 500;
 
 export function readCredentials(): Credentials | null {
   const row = getCredentialsRow();
@@ -156,6 +155,8 @@ export function importTweets(input: {
   queuedCount: number;
   queued: PublicTweet[];
   invalid: InvalidTweet[];
+  omittedCount: number;
+  batchLimit: number;
 } {
   if (typeof input.source !== "string") {
     throw new AppError("invalid_text", "没有收到要导入的文本。");
@@ -182,11 +183,10 @@ export function importTweets(input: {
     }
     valid.push({ text: inspected.text, weightedLength: inspected.weightedLength });
   });
-  if (valid.length > MAX_BATCH) {
-    throw new AppError("too_many", `一次最多导入 ${MAX_BATCH} 条。`);
-  }
+  const omittedCount = Math.max(0, valid.length - MAX_IMPORT_BATCH);
+  const accepted = valid.slice(0, MAX_IMPORT_BATCH);
   const times = computeSchedule({
-    count: valid.length,
+    count: accepted.length,
     startAt: start,
     intervalMinutes: input.intervalMinutes,
     jitterMinutes: input.jitterMinutes,
@@ -194,7 +194,7 @@ export function importTweets(input: {
   });
   const now = new Date().toISOString();
   let order = nextSortOrder();
-  const rows: Tweet[] = valid.map((item, index) => ({
+  const rows: Tweet[] = accepted.map((item, index) => ({
     id: crypto.randomUUID(),
     text: item.text,
     weightedLength: item.weightedLength,
@@ -205,6 +205,7 @@ export function importTweets(input: {
     errorMessage: null,
     attemptCount: 0,
     sortOrder: order++,
+    delayReason: null,
     createdAt: now,
     updatedAt: now,
   }));
@@ -220,6 +221,8 @@ export function importTweets(input: {
     queuedCount: rows.length,
     queued: rows.map((row) => toPublicTweet(row, username)),
     invalid,
+    omittedCount,
+    batchLimit: MAX_IMPORT_BATCH,
   };
 }
 
@@ -342,10 +345,36 @@ export function updateScheduleSettings(input: {
       random: input.random,
     });
     pending.forEach((tweet, index) => {
-      patchTweet(tweet.id, { scheduledAt: times[index].toISOString() });
+      patchTweet(tweet.id, { scheduledAt: times[index].toISOString(), delayReason: null });
     });
   }
   return { ok: true };
+}
+
+export function delayPendingForRecentPost(earliest: Date, manual: boolean): boolean {
+  const pending = pendingInOrder();
+  if (pending.length === 0) return false;
+  const firstAt = new Date(pending[0].scheduledAt).getTime();
+  const target = earliest.getTime();
+  if (Number.isNaN(firstAt) || firstAt >= target) return false;
+  const delta = target - firstAt;
+  for (const tweet of pending) {
+    patchTweet(tweet.id, {
+      scheduledAt: new Date(new Date(tweet.scheduledAt).getTime() + delta).toISOString(),
+      ...(manual ? { delayReason: "manual" as const } : {}),
+    });
+  }
+  return true;
+}
+
+export function latestLocalPost(): { id: string; at: Date } | null {
+  const posted = listTweets().filter((tweet) => tweet.status === "posted" && tweet.postedAt);
+  if (posted.length === 0) return null;
+  posted.sort((left, right) => right.postedAt!.localeCompare(left.postedAt!));
+  const newest = posted[0];
+  const at = new Date(newest.postedAt!);
+  if (Number.isNaN(at.getTime())) return null;
+  return { id: newest.tweetId ?? "", at };
 }
 
 export function deferExtraOverdue(now: Date, random = Math.random): void {
