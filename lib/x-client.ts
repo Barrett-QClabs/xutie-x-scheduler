@@ -119,7 +119,7 @@ async function latestTweet(credentials: Credentials, userId: string): Promise<XT
   const payload = await xRequest(credentials, "GET", `/2/users/${encodeURIComponent(userId)}/tweets`, {
     max_results: "5",
     "tweet.fields": "created_at",
-    exclude: "retweets",
+    exclude: "retweets,replies",
   });
   if (!Array.isArray(payload.data)) return null;
   let best: { id: string; createdAt: string; time: number } | null = null;

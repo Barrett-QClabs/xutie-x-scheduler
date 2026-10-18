@@ -238,6 +238,7 @@ describe("live timeline read", () => {
       expect(url).toContain("/2/users/42/tweets");
       expect(url).toContain("max_results=5");
       expect(url).toContain("exclude=retweets");
+      expect(decodeURIComponent(url)).toContain("exclude=retweets,replies");
       expect(url).toContain("tweet.fields=created_at");
       return new Response(
         JSON.stringify({
