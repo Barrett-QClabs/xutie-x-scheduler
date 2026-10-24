@@ -1,5 +1,5 @@
 x-unfollow rules (@barrett_tt)
-- Untouchable: whitelist.txt + the first 20 of the following list (most recent first).
+- Untouchable: whitelist.txt only (10 accounts). Top-20 protection removed 2026-10-24.
 - Unfollow plan (rules 2026-10-24):
   (1) ALL non-blue-V accounts the user follows — mutual or not, recent or not.
   (2) Blue-V accounts that do NOT follow back, EXCEPT the first 400 of the following list (most recent

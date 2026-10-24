@@ -30,7 +30,7 @@ const API_BASE = "https://api.x.com";
 const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const USER_FIELDS = "verified,verified_type,public_metrics,username,protected";
 const PAGE_SIZE = 1000;
-const PROTECT_TOP_N = 20; // never unfollow the 20 most-recently-followed accounts
+const PROTECT_TOP_N = 0; // 2026-10-24: removed at user request (400-most-recent blue-V guard covers new follows)
 // Rules 2026-10-24: whitelist.txt + the first PROTECT_TOP_N of the following list (most recent first) are
 // always untouchable. The first PROTECT_RECENT_N (400) only protect BLUE-V non-mutuals (time to follow back);
 // non-blue-V accounts are unfollowed regardless of recency. Blue-V mutuals are never unfollowed.
