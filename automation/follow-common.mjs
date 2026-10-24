@@ -125,3 +125,51 @@ export async function waitForWindow(onWait) {
     await sleep(Math.min(w.waitUntil - Date.now(), 5 * 60_000));
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Priority (since 2026-10-24): keyword follow of NEW people goes first; follow-back gets the rest.
+// ---------------------------------------------------------------------------------------------
+export const KW_PACE_MS = 30 * 60_000; // keyword: ~10 follows per ~15 min + ~15 min rest
+export const POOL_DIR = path.join(DATA_DIR, "keyword-candidates");
+
+function pidAliveOf(status) { return !!status?.pid && pidAlive(status.pid); }
+
+/**
+ * Daily room reserved for keyword follow = what keyword can still do today:
+ *   min(poolSize - keyword follows today, untried candidates left in today's pool,
+ *       10 per 30 min until Shanghai midnight). 0 when keyword follow is off or stopped.
+ */
+export function keywordReserve(cfg = loadConfig()) {
+  const kw = cfg.keywordfollow;
+  const counts = followCountsToday();
+  if (!kw.enabled || stopFlagToday()) return { reserve: 0, why: kw.enabled ? "stopped for day" : "keyword off", counts };
+  const st = readJson(KW_STATUS);
+  if (st && ["pool_exhausted", "stopped_auth"].includes(st.state) && pidAliveOf(st)) return { reserve: 0, why: `keyword ${st.state}`, counts };
+  const day = dayKey(new Date());
+  const left = Math.max(0, kw.poolSize - counts.keyword);
+  let untried = left;
+  const pool = readJson(path.join(POOL_DIR, `${day}.json`));
+  if (pool?.candidates) {
+    const gone = new Set();
+    for (const e of readJsonl(KW_LOG)) if (e.id && (e.result === "ok" || e.day === day)) gone.add(e.id);
+    for (const e of readJsonl(FB_LOG)) if (e.id && (e.result === "ok" || e.pending)) gone.add(e.id);
+    const cache = readJson(path.join(DATA_DIR, "cache.json"));
+    for (const u of cache?.following ?? []) gone.add(u.id);
+    untried = pool.candidates.filter((c) => !gone.has(c.id)).length;
+  }
+  const byTime = Math.ceil(msUntilNextShanghaiMidnight() / KW_PACE_MS) * 10;
+  return { reserve: Math.min(left, untried, byTime), left, untried, byTime, counts };
+}
+
+/** Keyword has the follow slot; follow-back may follow only while keyword is not actively following. */
+export function keywordYieldsSlot(cfg = loadConfig()) {
+  if (!cfg.keywordfollow.enabled) return { ok: true, why: "keyword off" };
+  if (stopFlagToday()) return { ok: true, why: "stopped" };
+  const st = readJson(KW_STATUS);
+  if (!st || !pidAliveOf(st)) return { ok: true, why: "keyword not running" };
+  if (["pool_exhausted", "daily_cap", "disabled", "stopped_for_day", "fatal", "stopped_auth", "search_failed"].includes(st.state)) return { ok: true, why: `keyword ${st.state}` };
+  const left = st.resumeAt ? Date.parse(st.resumeAt) - Date.now() : 0;
+  if (st.state === "resting" && left > 2 * 60_000) return { ok: true, why: "keyword resting", until: Date.parse(st.resumeAt) - 2 * 60_000 };
+  const retry = st.state === "resting" || st.state === "window_wait" || st.state === "rate_limited" ? Math.max(Date.now() + 60_000, Date.parse(st.resumeAt || 0) + 15 * 60_000) : Date.now() + 60_000;
+  return { ok: false, why: `keyword ${st.state}`, retryAt: Math.min(retry, Date.now() + 5 * 60_000) };
+}

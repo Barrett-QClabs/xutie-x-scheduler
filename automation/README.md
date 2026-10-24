@@ -9,7 +9,7 @@ live in `X_AUTOMATION_DIR` (default `/workspace/x-unfollow`), **not** in this re
 | script | what |
 | --- | --- |
 | `unfollow.mjs` / `run.sh` | hourly: unfollow non-mutual, non-blue-V accounts (rules in RULES.txt) |
-| `followback.mjs` / `start-followback.sh` | daemon: follow back followers (priority) |
+| `followback.mjs` / `start-followback.sh` | daemon: follow back followers (gets the room keyword follow leaves) |
 | `keywordfollow.mjs` / `start-keywordfollow.sh` | daemon: daily keyword candidate pool + follows |
 | `follow-common.mjs` | shared combined daily cap, 15-min window, mutex, stop flag, config |
 

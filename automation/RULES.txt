@@ -15,10 +15,14 @@ follow rules (follow-back + keyword follow share ONE daily budget)
 - Shared 15-min window: <= 45 follow POSTs per 15 min across both daemons (X limit 50); 429 -> sleep to reset.
 - Account-level 403 follow limit (or 2 consecutive 403s in keyword follow) -> follow-stop.json; both daemons
   stop following until the next Asia/Shanghai day.
-- Follow-back (followback.mjs) has priority: 10 follows/cycle, 75-105 s apart, then 15 min rest.
-- Keyword follow (keywordfollow.mjs, start-keywordfollow.sh) only follows while follow-back is resting
-  (>2 min left), idle, capped or off, and leaves room for follow-back's remaining targets (reserve =
-  min(targets, ~10 per 30 min until midnight)). 10 follows/cycle, 75-105 s apart, then 12-18 min rest.
+- PRIORITY (changed 2026-10-24): keyword follow of NEW people goes FIRST; follow-back gets the remaining room.
+- Keyword follow (keywordfollow.mjs, start-keywordfollow.sh) follows whenever its pacing allows:
+  10 follows/cycle, 75-105 s apart, then 12-18 min rest. Limited only by the combined cap + shared window.
+- Follow-back (followback.mjs) only follows while keyword follow is NOT actively following (keyword resting
+  with >2 min left, pool exhausted, capped, off, stopped, or not running), and only if
+  combined + keywordReserve < 350, where keywordReserve = min(250 - keyword follows today,
+  untried candidates left in today's pool, 10 per 30 min until Asia/Shanghai midnight); 0 if keyword is off.
+  With keyword active, follow-back is paced by keyword's rests; otherwise 10 follows/cycle + 15 min rest.
 - Keyword pool: once per day keyword-candidates/YYYY-MM-DD.json, 250 accounts from X API v2 recent search
   ("<kw> is:verified -is:retweet") for keywords in automation.config.json (AI, 人工智能, 商业, 创业, crypto,
   币圈, dating, 约会, 两性, 情感). Filters: blue-V/any verification, followers < 1000, not protected,

@@ -155,9 +155,14 @@ export function AutomationScreen() {
       </div>
       <div className="grid gap-3 md:grid-cols-3">
         {daemonCard("unfollow", locale === "zh" ? "取关" : "Unfollow")}
-        {daemonCard("followback", locale === "zh" ? "回关（优先）" : "Follow-back (priority)")}
-        {daemonCard("keywordfollow", locale === "zh" ? "关键词关注" : "Keyword follow")}
+        {daemonCard("keywordfollow", locale === "zh" ? "关键词关注新人（优先）" : "Keyword follow (priority)")}
+        {daemonCard("followback", locale === "zh" ? "回关" : "Follow-back")}
       </div>
+      <p className="text-xs text-muted-foreground">
+        {locale === "zh"
+          ? "优先级：关键词关注新人优先（每 ~15 分钟约 10 个，然后休息 ~15 分钟）。回关只在关键词休息、名单用完或关闭时进行，并且为关键词预留当天还能完成的名额（250 − 今日已关注，且不超过当天剩余时间能完成的数量）。两者合计每天 ≤ 350，共用 15 分钟 50 次的限额，同一时间只有一个在关注。"
+          : "Priority: keyword follow of new people goes first (~10 per ~15 min, then ~15 min rest). Follow-back runs only while keyword is resting, exhausted or off, and leaves room reserved for keyword (250 − keyword follows today, capped by what is reachable before midnight). Combined ≤ 350/day, shared 50/15 min limit, one daemon follows at a time."}
+      </p>
       <Card>
         <CardContent className="space-y-3 p-4">
           <label className="text-sm">{t.keywords}</label>

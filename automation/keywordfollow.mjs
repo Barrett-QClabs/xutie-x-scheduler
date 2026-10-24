@@ -6,8 +6,9 @@
  *     blue-V (any verification), followers < 1000, not protected, not already followed, not @me,
  *     never followed/unfollowed before by these scripts (log.jsonl, followback.jsonl, keywordfollow.jsonl).
  *  2. Follows from that pool, sharing the combined daily cap (350) with followback.mjs.
- *     Follow-back has priority: we only follow while follow-back is resting/idle/capped/off, and keep
- *     room for its remaining targets. ~10 follows per ~15 min (75-105 s gaps), then ~15 min rest (±3 min).
+ *     KEYWORD HAS PRIORITY (since 2026-10-24): we follow whenever pacing allows; follow-back only
+ *     follows during our rests and only with room not reserved for us (keywordReserve in follow-common).
+ *     ~10 follows per ~15 min (75-105 s gaps), then ~15 min rest (±3 min).
  *     Shared 15-min window (45/50) + cross-process mutex with followback.mjs.
  *
  *   node keywordfollow.mjs              # daemon (start-keywordfollow.sh)
@@ -20,16 +21,14 @@ import {
   loadCredentials, xRequest, extractErrorMessage, isBlueV, dayKey, sleep, loadCache, loadAlreadyUnfollowedIds,
 } from "./unfollow.mjs";
 import {
-  DATA_DIR, KW_LOG, KW_STATUS, FB_LOG, FB_STATUS, loadConfig, readJsonl, readJson, followCountsToday,
-  withFollowMutex, waitForWindow, stopFlagToday, setStopFlag, msUntilNextShanghaiMidnight,
+  DATA_DIR, KW_LOG, KW_STATUS, FB_LOG, loadConfig, readJsonl, readJson, followCountsToday,
+  withFollowMutex, waitForWindow, stopFlagToday, setStopFlag, msUntilNextShanghaiMidnight, POOL_DIR, keywordReserve,
 } from "./follow-common.mjs";
 
 const LOCK = path.join(DATA_DIR, "keywordfollow.lock");
-const POOL_DIR = path.join(DATA_DIR, "keyword-candidates");
 const CYCLE_SIZE = 10;
 const GAP_MS = () => 75_000 + Math.floor(Math.random() * 30_001);
 const REST_MS = () => 12 * 60_000 + Math.floor(Math.random() * 6 * 60_000);
-const FB_CYCLE_MS = 30 * 60_000; // follow-back: 10 follows per ~30 min (15 min cycle + 15 min rest)
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const buildOnly = args.includes("--build-only");
@@ -122,26 +121,10 @@ async function buildPool(credentials, userId, username) {
 
 function loadPool(day) { return readJson(poolPath(day)); }
 
-/** Follow-back has priority: may keyword-follow now? */
-function followbackAllowsUs() {
-  const fb = readJson(FB_STATUS);
-  if (!fb) return { ok: true, why: "no follow-back status" };
-  let alive = false; try { process.kill(fb.pid, 0); alive = true; } catch {}
-  if (!alive) return { ok: true, why: "follow-back not running" };
-  if (["idle", "daily_cap", "disabled", "stopped_for_day", "fatal", "stopped_auth"].includes(fb.state)) return { ok: true, why: `follow-back ${fb.state}` };
-  if (fb.state === "resting" && fb.resumeAt && Date.parse(fb.resumeAt) - Date.now() > 2 * 60_000) return { ok: true, why: "follow-back resting" };
-  const resume = fb.state === "resting" && fb.resumeAt ? Date.parse(fb.resumeAt) : 0;
-  return { ok: false, why: `follow-back ${fb.state}`, retryAt: Math.max(resume + 60_000, Date.now() + 60_000) };
-}
-
-/** Our share of today's combined cap after reserving room for follow-back's remaining targets. */
+/** Keyword has priority: only the combined daily cap limits us (no room reserved for follow-back). */
 function keywordAllowance(cap) {
   const c = followCountsToday();
-  const fb = readJson(FB_STATUS) ?? {};
-  let fbAlive = false; try { process.kill(fb.pid, 0); fbAlive = true; } catch {}
-  const fbCapacity = Math.floor(msUntilNextShanghaiMidnight() / FB_CYCLE_MS) * 10;
-  const reserve = fbAlive && loadConfig().followback.enabled ? Math.min(fb.targetsRemaining ?? 0, fbCapacity) : 0;
-  return { allowed: Math.max(0, cap - c.combined - reserve), reserve, ...c };
+  return { allowed: Math.max(0, cap - c.combined), ...c };
 }
 
 async function recheck(credentials, batch) {
@@ -162,7 +145,7 @@ async function main() {
     const cfg = loadConfig();
     console.log(JSON.stringify({ me: username, pool: pool ? { date: pool.date, count: pool.count, error: pool.error,
       sample: pool.candidates.slice(0, 8).map((c) => `@${c.username} (${c.followers_count})`) } : null,
-      allowance: keywordAllowance(cfg.combinedFollowDailyCap), followback: followbackAllowsUs() }, null, 2));
+      allowance: keywordAllowance(cfg.combinedFollowDailyCap), reserveForKeyword: keywordReserve(cfg) }, null, 2));
     return;
   }
 
@@ -199,25 +182,18 @@ async function main() {
 
     const allow = keywordAllowance(cap);
     if (remaining.length === 0 || allow.allowed <= 0) {
-      const why = remaining.length === 0 ? "pool exhausted" : `combined cap (${allow.combined}/${cap}, ${allow.reserve} reserved for follow-back)`;
+      const why = remaining.length === 0 ? "pool exhausted" : `combined cap (${allow.combined}/${cap})`;
       const ms = remaining.length === 0 || allow.combined >= cap ? msUntilNextShanghaiMidnight() : 30 * 60_000;
       writeStatus({ state: remaining.length === 0 ? "pool_exhausted" : "daily_cap", why, resumeAt: new Date(Date.now() + ms).toISOString() });
       say(`${why}; sleeping ${Math.round(Math.min(ms, 30 * 60_000) / 60000)} min`);
       await sleep(Math.min(ms, 30 * 60_000)); continue;
     }
 
-    const gate = followbackAllowsUs();
-    if (!gate.ok) {
-      writeStatus({ state: "waiting_for_followback", why: gate.why, resumeAt: new Date(gate.retryAt).toISOString() });
-      await sleep(Math.min(gate.retryAt - Date.now(), 5 * 60_000)); continue;
-    }
-
     // re-check the next few candidates right before following
     const batch = remaining.slice(0, Math.min(5, CYCLE_SIZE - inCycle));
     const fresh = await recheck(credentials, batch);
     for (const c of batch) {
-      const g = followbackAllowsUs();
-      if (!g.ok || stopFlagToday()) break;
+      if (stopFlagToday() || !loadConfig().keywordfollow.enabled) break;
       if (excludedIds(userId).has(c.id)) { skip.add(c.id); continue; }
       const u = fresh?.get(c.id);
       if (fresh && !u) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "not found/suspended" }); continue; }
