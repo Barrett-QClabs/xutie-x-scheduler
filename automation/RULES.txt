@@ -29,10 +29,22 @@ follow rules (follow-back + keyword follow share ONE daily budget)
   reserve = min(blue-V follow-back targets still waiting, 10 per 30 min until Shanghai midnight);
   0 if follow-back is off / not running. Keyword only follows when combined + reserve < 350.
 - Keyword pool: once per day keyword-candidates/YYYY-MM-DD.json, 250 accounts from X API v2 recent search
-  ("<kw> is:verified -is:retweet") for keywords in automation.config.json (AI, 人工智能, 商业, 创业, crypto,
+  ("<kw> lang:zh is:verified -is:retweet") for keywords in automation.config.json (AI, 人工智能, 商业, 创业, crypto,
   币圈, dating, 约会, 两性, 情感). Filters: blue-V/any verification, followers < 1000, not protected,
   not already followed, not @barrett_tt, never unfollowed (log.jsonl) or followed before by any script,
   not in an earlier day's pool. Each candidate re-checked (connection_status etc.) right before following.
+- KEYWORD FOLLOW IS CHINESE-ZONE (中文区) ONLY (rule 2026-10-24 23:11 Asia/Taipei: "250个，必须是中文区的，
+  英文区的不关注"); English-zone accounts are never keyword-followed. Follow-back is NOT affected.
+  Search query is "<kw> lang:zh is:verified -is:retweet" for EVERY keyword (English ones too: AI, crypto,
+  dating, sports, basketball, NBA, football, soccer → only Chinese tweets). Candidate rule (chineseZoneCheck):
+    (1) matched tweet's X lang == "zh", AND
+    (2) display name OR bio is Chinese: >= 2 CJK Unified Ideographs (U+4E00-9FFF, U+3400-4DBF, U+F900-FAFF)
+        and Japanese kana < half the ideograph count (mentions/URLs ignored); OR, only if name AND bio contain
+        no CJK ideographs and no kana at all, the matched tweet text has >= 4 ideographs (same kana rule).
+    Japanese names/bios (kana-heavy or kana-only) are rejected with no tweet fallback.
+  Same check runs again right before each follow with FRESH name/bio (together with the blue-V re-check).
+  Pools built before the rule are refiltered (unchecked candidates are never followed):
+  `node keywordfollow.mjs --refilter [--top-up]` (top-up = refill to 250 with lang:zh, within maxSearchPages).
 - On/off toggles + keywords: automation.config.json (editable in 序帖 → 自动化 page).
 - Never follow non-blue-V accounts (rule 2026-10-24): follow-back only targets blue-V followers;
   keyword follow only blue-V candidates, re-checked via GET /2/users right before each follow

@@ -284,3 +284,39 @@ export function followbackYieldsSlot(cfg = loadConfig()) {
   // Actively following / rest just ended / waiting on X window → follow-back still wants slots
   return { ok: false, why: `follow-back ${st.state}`, retryAt: Date.now() + 45_000 };
 }
+
+// ---------------------------------------------------------------------------------------------
+// CHINESE-ZONE (中文区) ONLY for keyword follow (rule 2026-10-24 23:11 Asia/Taipei:
+// "250个，必须是中文区的，英文区的不关注"). Follow-back is NOT affected.
+//
+// A field (display name / bio / tweet text) "is Chinese" when, after removing @mentions, URLs and
+// #hashtags' '#', it has ≥ 2 CJK Unified Ideographs (U+4E00–9FFF, Ext-A U+3400–4DBF, compat
+// U+F900–FAFF) AND fewer than half as many Japanese kana (U+3040–30FF, U+31F0–31FF, U+FF66–FF9F)
+// as ideographs — so Japanese names/bios (kana-heavy, or kana only) do not count.
+// A candidate is Chinese-zone only if ALL of:
+//   (1) the matched tweet's X language tag is "zh" (search also uses lang:zh), AND
+//   (2) display name OR bio is Chinese (rule above); OR, only when name and bio contain NO CJK
+//       ideographs at all, the matched tweet text is Chinese with ≥ 4 ideographs (fallback).
+// Name/bio with ideographs or kana that fail the rule (Japanese, incl. kana-only) are rejected — no fallback.
+// ---------------------------------------------------------------------------------------------
+const HAN_RE = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/gu;
+const KANA_RE = /[\u3040-\u30FF\u31F0-\u31FF\uFF66-\uFF9F]/gu;
+const clean = (s) => String(s ?? "").replace(/https?:\/\/\S+/g, " ").replace(/@\w+/g, " ");
+export function cjkStats(s) {
+  const t = clean(s);
+  return { han: (t.match(HAN_RE) ?? []).length, kana: (t.match(KANA_RE) ?? []).length };
+}
+export function isChineseText(s, minHan = 2) {
+  const { han, kana } = cjkStats(s);
+  return han >= minHan && kana * 2 < han;
+}
+/** @returns {{ ok: boolean, why: string }} */
+export function chineseZoneCheck({ tweetLang, name, bio, tweetText }) {
+  if (tweetLang !== "zh") return { ok: false, why: `tweet lang ${tweetLang ?? "unknown"} != zh` };
+  if (isChineseText(name)) return { ok: true, why: "name chinese" };
+  if (isChineseText(bio)) return { ok: true, why: "bio chinese" };
+  const n = cjkStats(name), b = cjkStats(bio);
+  if (n.han + b.han + n.kana + b.kana > 0) return { ok: false, why: "name/bio CJK/kana but not chinese (japanese)" };
+  if (isChineseText(tweetText, 4)) return { ok: true, why: "tweet text chinese (name/bio no CJK)" };
+  return { ok: false, why: "no chinese in name/bio/tweet" };
+}

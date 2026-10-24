@@ -169,8 +169,8 @@ export function AutomationScreen() {
       </p>
       <p className="text-xs text-muted-foreground">
         {locale === "zh"
-          ? "统一节奏：每轮最多共关注 10 人（优先回关关注你的蓝V，关键词新人补齐同一轮剩余名额），然后共同休息 10–15 分钟（此期间双方都不关注），再进入下一轮。两者合计每天 ≤ 350，仍共用 X 的 15 分钟约 50 次限额，同一时间只有一个在关注。关键词关注会为回关预留当天还待回关的蓝V名额，只用剩下的名额关注 250 人候选池里的新人。"
-          : "Shared pace: at most 10 follows total per work window (following back blue-V followers goes first; keyword new people fill the rest of the same window), then a shared 10–15 min rest with zero follows, then repeat. Combined ≤ 350/day, shared X 50/15 min limit, one daemon follows at a time. Keyword follow leaves daily room for the blue-V follow-backs still waiting and only uses what is left for the 250-candidate pool."}
+          ? "统一节奏：每轮最多共关注 10 人（优先回关关注你的蓝V，关键词新人补齐同一轮剩余名额），然后共同休息 10–15 分钟（此期间双方都不关注），再进入下一轮。两者合计每天 ≤ 350，仍共用 X 的 15 分钟约 50 次限额，同一时间只有一个在关注。关键词关注会为回关预留当天还待回关的蓝V名额，只用剩下的名额关注 250 人候选池里的新人。关键词关注只关注中文区：搜索加 lang:zh（英文关键词也只搜中文帖），候选人的帖子必须是中文，且昵称或简介含中文（日文假名不算；昵称和简介都没有中日文字时才看帖子内容），关注前再检查一次；英文区账号不关注。回关不受影响。"
+          : "Shared pace: at most 10 follows total per work window (following back blue-V followers goes first; keyword new people fill the rest of the same window), then a shared 10–15 min rest with zero follows, then repeat. Combined ≤ 350/day, shared X 50/15 min limit, one daemon follows at a time. Keyword follow leaves daily room for the blue-V follow-backs still waiting and only uses what is left for the 250-candidate pool. Keyword follow is Chinese-zone only: searches use lang:zh (English keywords too), the matched post must be Chinese and the name or bio must contain Chinese (Japanese kana doesn't count; the post text is used only when name and bio have no CJK), re-checked right before each follow; English-zone accounts are never followed. Follow-back is not affected."}
       </p>
       <Card>
         <CardContent className="space-y-3 p-4">
