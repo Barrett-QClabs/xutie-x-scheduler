@@ -1,10 +1,12 @@
 x-unfollow rules (@barrett_tt)
-- Untouchable: whitelist.txt + the first 20 of the following list (most recent first). Nothing else.
-  (2026-10-24: the old 400-recent / new-today snapshot protection was removed — recently followed
-  non-blue-V accounts are unfollowed too; blue-V are never unfollowed anyway.)
-- Unfollow plan (changed 2026-10-24): ALL non-blue-V accounts the user follows, whether or not they
-  follow back (mutuals included). Blue-V / any verification is NEVER unfollowed.
-- Oldest-followed first. ~3 min gap (160-200s). Max 15/run, 50/day (Asia/Shanghai).
+- Untouchable: whitelist.txt + the first 20 of the following list (most recent first).
+- Unfollow plan (rules 2026-10-24):
+  (1) ALL non-blue-V accounts the user follows — mutual or not, recent or not.
+  (2) Blue-V accounts that do NOT follow back, EXCEPT the first 400 of the following list (most recent
+      follows get time to follow back). Each blue-V target is re-checked (connection_status) right
+      before the unfollow and skipped if it now follows back.
+  Blue-V mutuals are NEVER unfollowed.
+- Order: all non-blue-V first (oldest-followed first), then blue-V non-mutuals (oldest first). ~3 min gap (160-200s). Max 15/run, 50/day (Asia/Shanghai).
 - Each unfollow logged to log.jsonl; never re-unfollow ids already in log, and never re-follow them
   (follow-back + keyword follow both skip every id in log.jsonl).
 

@@ -26,7 +26,7 @@ type Status = {
   pool: { date: string; count: number; target: number; remaining: number; postsRead: number; error: unknown; sample: { username: string; followers: number; keyword: string }[] } | null;
   recent: { unfollow: Entry[]; followback: Entry[]; keywordfollow: Entry[] };
   rules: string;
-  unfollowPlan?: { updated: string; following: number; inPlan: number; mutualInPlan: number; nonMutualInPlan: number; blueVNeverUnfollowed: number; whitelisted: number; protectedTop20: number; dailyCap: number; daysAtCap: number } | null;
+  unfollowPlan?: { updated: string; following: number; inPlan: number; nonBlueV: number; nonBlueVMutual: number; blueVNonMutual: number; mutualInPlan: number; blueVMutualNever: number; blueVRecentProtected: number; whitelisted: number; protectedTop20: number; dailyCap: number; daysAtCap: number } | null;
 };
 
 const L = {
@@ -161,11 +161,11 @@ export function AutomationScreen() {
       </div>
       <p className="text-xs text-muted-foreground">
         {locale === "zh"
-          ? "只关注蓝V：回关和关键词关注都不会关注非蓝V账号。取关计划：你关注的所有非蓝V账号（无论是否回关你），只保护 whitelist.txt 和关注列表最前 20 个；蓝V永不取关。最早关注的先取关，约 3 分钟一个，每次运行 ≤ 15，每天 ≤ 50，取关过的不会再关注。"
-          : "Blue-V only: follow-back and keyword follow never follow non-blue-V accounts. Unfollow plan: every non-blue-V account you follow (mutual or not); only whitelist.txt and the first 20 of the following list are protected; blue-V are never unfollowed. Oldest first, ~3 min apart, ≤ 15 per run, ≤ 50/day, unfollowed accounts are never re-followed."}
+          ? "只关注蓝V：回关和关键词关注都不会关注非蓝V账号。取关计划：① 你关注的所有非蓝V账号（无论是否互关、是否刚关注）；② 没有回关你的蓝V（最近关注的 400 个除外，给对方回关时间）。互关的蓝V永不取关；whitelist.txt 和关注列表最前 20 个始终不动。先取关非蓝V，再取关未回关蓝V，各自最早关注的先取关，约 3 分钟一个，每次运行 ≤ 15，每天 ≤ 50，取关过的不会再关注。"
+          : "Blue-V only: follow-back and keyword follow never follow non-blue-V accounts. Unfollow plan: (1) every non-blue-V account you follow (mutual or not, recent or not); (2) blue-V accounts that don't follow you back, except the 400 most recent follows (time to follow back). Blue-V mutuals are never unfollowed; whitelist.txt and the first 20 of the following list are always protected. Non-blue-V first, then blue-V non-mutuals, oldest first within each; ~3 min apart, ≤ 15 per run, ≤ 50/day; unfollowed accounts are never re-followed."}
         {s.unfollowPlan && (locale === "zh"
-          ? ` 当前取关计划：${s.unfollowPlan.inPlan} 人（其中互关 ${s.unfollowPlan.mutualInPlan}），按每天 50 约需 ${s.unfollowPlan.daysAtCap} 天（${fmt(s.unfollowPlan.updated)} 更新）。`
-          : ` Current unfollow plan: ${s.unfollowPlan.inPlan} accounts (${s.unfollowPlan.mutualInPlan} mutual), ~${s.unfollowPlan.daysAtCap} days at 50/day (updated ${fmt(s.unfollowPlan.updated)}).`)}
+          ? ` 当前取关计划：${s.unfollowPlan.inPlan} 人 = 非蓝V ${s.unfollowPlan.nonBlueV}（其中互关 ${s.unfollowPlan.nonBlueVMutual}）+ 未回关蓝V ${s.unfollowPlan.blueVNonMutual}；按每天 50 约需 ${s.unfollowPlan.daysAtCap} 天（${fmt(s.unfollowPlan.updated)} 更新）。`
+          : ` Current unfollow plan: ${s.unfollowPlan.inPlan} = ${s.unfollowPlan.nonBlueV} non-blue-V (${s.unfollowPlan.nonBlueVMutual} mutual) + ${s.unfollowPlan.blueVNonMutual} blue-V non-mutual; ~${s.unfollowPlan.daysAtCap} days at 50/day (updated ${fmt(s.unfollowPlan.updated)}).`)}
       </p>
       <p className="text-xs text-muted-foreground">
         {locale === "zh"

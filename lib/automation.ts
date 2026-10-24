@@ -127,7 +127,7 @@ export function getAutomationStatus() {
       remaining: pool.candidates.filter((c) => !kwTriedIds.has(c.id)).length, perKeyword: pool.perKeyword,
       sample: pool.candidates.filter((c) => !kwTriedIds.has(c.id)).slice(0, 12).map((c) => ({ username: c.username, followers: c.followers_count, keyword: c.keyword })) } : null,
     recent: { unfollow: recent(unfollowLog, 15), followback: recent(fbLog, 15), keywordfollow: recent(kwLog.filter((e) => e.result !== "skipped"), 15) },
-    unfollowPlan: readJson<{ updated: string; following: number; inPlan: number; mutualInPlan: number; nonMutualInPlan: number; blueVNeverUnfollowed: number; whitelisted: number; protectedTop20: number; dailyCap: number; daysAtCap: number }>(f("unfollow-plan.json")),
+    unfollowPlan: readJson<{ updated: string; following: number; inPlan: number; nonBlueV: number; nonBlueVMutual: number; blueVNonMutual: number; mutualInPlan: number; blueVMutualNever: number; blueVRecentProtected: number; whitelisted: number; protectedTop20: number; dailyCap: number; daysAtCap: number }>(f("unfollow-plan.json")),
     rules: (() => { try { return fs.readFileSync(f("RULES.txt"), "utf8"); } catch { return ""; } })(),
   };
 }
