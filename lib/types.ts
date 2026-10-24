@@ -27,8 +27,21 @@ export type Tweet = {
   attemptCount: number;
   sortOrder: number;
   delayReason: DelayReason;
+  /** Optional media + thread replies for this queue item (the whole thread counts as one post). */
+  extra?: TweetExtra | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ThreadPost = { text: string; media?: string[]; tweetId?: string | null };
+
+export type TweetExtra = {
+  /** Local image paths attached to the head post. */
+  media?: string[];
+  /** Reply posts sent right after the head, each replying to the previous one. */
+  thread?: ThreadPost[];
+  /** Set once the head has gone out (resume point if a reply fails). */
+  headTweetId?: string | null;
 };
 
 export type PublicTweet = Tweet & {

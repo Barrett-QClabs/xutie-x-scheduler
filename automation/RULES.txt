@@ -1,0 +1,27 @@
+x-unfollow rules (@barrett_tt)
+- 今天刚关注的不要取关: never unfollow the first 400 of the following list (API returns
+  most-recent-first; no follow date exists, so 400 = today/recent-follow buffer (~350 follows/day)).
+- Also protected: anyone in following now but absent from the previous day's snapshot
+  (following-snapshots/YYYY-MM-DD.json, Asia/Shanghai day) = new follows today.
+- First 20 most-recent follows always protected (subset of the 400) + whitelist.txt.
+- Only non-mutual AND non-blue-V (any verification = never unfollowed).
+- Oldest-followed first. ~3 min gap (160-200s). Max 15/run, 50/day (Asia/Shanghai).
+- Each unfollow logged to log.jsonl; never re-unfollow ids already in log.
+
+follow rules (follow-back + keyword follow share ONE daily budget)
+- Combined follows (followback.jsonl + keywordfollow.jsonl, result ok, Asia/Shanghai day) <= 350/day
+  (automation.config.json combinedFollowDailyCap). Both daemons check it inside a shared mutex
+  (follow.mutex) right before every POST /2/users/:id/following.
+- Shared 15-min window: <= 45 follow POSTs per 15 min across both daemons (X limit 50); 429 -> sleep to reset.
+- Account-level 403 follow limit (or 2 consecutive 403s in keyword follow) -> follow-stop.json; both daemons
+  stop following until the next Asia/Shanghai day.
+- Follow-back (followback.mjs) has priority: 10 follows/cycle, 75-105 s apart, then 15 min rest.
+- Keyword follow (keywordfollow.mjs, start-keywordfollow.sh) only follows while follow-back is resting
+  (>2 min left), idle, capped or off, and leaves room for follow-back's remaining targets (reserve =
+  min(targets, ~10 per 30 min until midnight)). 10 follows/cycle, 75-105 s apart, then 12-18 min rest.
+- Keyword pool: once per day keyword-candidates/YYYY-MM-DD.json, 250 accounts from X API v2 recent search
+  ("<kw> is:verified -is:retweet") for keywords in automation.config.json (AI, 人工智能, 商业, 创业, crypto,
+  币圈, dating, 约会, 两性, 情感). Filters: blue-V/any verification, followers < 1000, not protected,
+  not already followed, not @barrett_tt, never unfollowed (log.jsonl) or followed before by any script,
+  not in an earlier day's pool. Each candidate re-checked (connection_status etc.) right before following.
+- On/off toggles + keywords: automation.config.json (editable in 序帖 → 自动化 page).

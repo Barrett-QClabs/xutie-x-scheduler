@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_RANDOM_MAX_SECONDS, DEFAULT_RANDOM_MIN_SECONDS } from "@/lib/schedule";
-import type { DelayReason, QueueSettings, Tweet, TweetStatus } from "@/lib/types";
+import type { DelayReason, QueueSettings, Tweet, TweetExtra, TweetStatus } from "@/lib/types";
 
 let database: DatabaseSync | null = null;
 
@@ -93,6 +93,7 @@ function migrate(db: DatabaseSync): void {
     "ALTER TABLE queue_settings ADD COLUMN random_max_seconds INTEGER NOT NULL DEFAULT 120",
   );
   ensureColumn(db, "tweets", "delay_reason", "ALTER TABLE tweets ADD COLUMN delay_reason TEXT");
+  ensureColumn(db, "tweets", "extra_json", "ALTER TABLE tweets ADD COLUMN extra_json TEXT");
   db.prepare(
     `INSERT OR IGNORE INTO queue_settings
       (id, interval_minutes, jitter_minutes, paused, updated_at)
@@ -119,6 +120,7 @@ type TweetRow = {
   attempt_count: number;
   sort_order: number;
   delay_reason: string | null;
+  extra_json?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -303,6 +305,16 @@ export function setAnchoredManualId(id: string | null): void {
   getDb().prepare("UPDATE queue_settings SET anchored_manual_id = ? WHERE id = 1").run(id);
 }
 
+function parseExtra(raw: string | null | undefined): TweetExtra | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as TweetExtra;
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function mapTweet(row: TweetRow): Tweet {
   return {
     id: row.id,
@@ -316,6 +328,7 @@ function mapTweet(row: TweetRow): Tweet {
     attemptCount: row.attempt_count,
     sortOrder: row.sort_order,
     delayReason: row.delay_reason === "manual" ? "manual" : null,
+    extra: parseExtra(row.extra_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -347,8 +360,8 @@ export function insertTweets(rows: Tweet[]): void {
   const statement = db.prepare(
     `INSERT INTO tweets (
       id, text, weighted_length, status, scheduled_at, posted_at, tweet_id,
-      error_message, attempt_count, sort_order, delay_reason, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      error_message, attempt_count, sort_order, delay_reason, extra_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   db.exec("BEGIN");
   try {
@@ -365,6 +378,7 @@ export function insertTweets(rows: Tweet[]): void {
         row.attemptCount,
         row.sortOrder,
         row.delayReason,
+        row.extra ? JSON.stringify(row.extra) : null,
         row.createdAt,
         row.updatedAt,
       );
@@ -387,6 +401,7 @@ const TWEET_COLUMNS: Record<string, string> = {
   attemptCount: "attempt_count",
   sortOrder: "sort_order",
   delayReason: "delay_reason",
+  extra: "extra_json",
 };
 
 export function patchTweet(
@@ -402,6 +417,7 @@ export function patchTweet(
     attemptCount: number;
     sortOrder: number;
     delayReason: DelayReason;
+    extra: TweetExtra | null;
   }>,
 ): void {
   const sets: string[] = [];
@@ -409,7 +425,8 @@ export function patchTweet(
   for (const [key, column] of Object.entries(TWEET_COLUMNS)) {
     if (!(key in fields)) continue;
     sets.push(`${column} = ?`);
-    params.push(fields[key as keyof typeof fields]);
+    const value = fields[key as keyof typeof fields];
+    params.push(key === "extra" ? (value ? JSON.stringify(value) : null) : value);
   }
   if (sets.length === 0) return;
   sets.push("updated_at = ?");

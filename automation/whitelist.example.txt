@@ -1,0 +1,2 @@
+# One handle per line (without @). Copy to $X_AUTOMATION_DIR/whitelist.txt. Never unfollowed.
+example_handle

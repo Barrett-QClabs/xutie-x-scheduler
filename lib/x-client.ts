@@ -20,9 +20,12 @@ export type XTimelineTweet = {
   createdAt: string;
 };
 
+export type PostOptions = { mediaIds?: string[]; replyTo?: string };
+
 export interface XClient {
   verify(): Promise<XUser>;
-  postTweet(text: string): Promise<{ id: string }>;
+  postTweet(text: string, options?: PostOptions): Promise<{ id: string }>;
+  uploadMedia?(filePath: string): Promise<string>;
   latestTweet?(userId: string): Promise<XTimelineTweet | null>;
 }
 
@@ -39,7 +42,8 @@ export function createXClient(credentials: Credentials): XClient {
 export function createLiveXClient(credentials: Credentials): XClient {
   return {
     verify: () => verifyCredentials(credentials),
-    postTweet: (text) => postTweet(credentials, text),
+    postTweet: (text, options) => postTweet(credentials, text, options),
+    uploadMedia: (filePath) => uploadMedia(credentials, filePath),
     latestTweet: (userId) => latestTweet(credentials, userId),
   };
 }
@@ -60,6 +64,10 @@ export function createMockXClient(credentials: Credentials): XClient {
   return {
     async latestTweet() {
       return mockLatest;
+    },
+    async uploadMedia(filePath: string) {
+      mockSequence += 1;
+      return `mock_media_${mockSequence}_${filePath.length}`;
     },
     async verify() {
       if (credentials.apiKey === "invalid" || credentials.accessToken === "invalid") {
@@ -151,8 +159,11 @@ async function latestTweet(credentials: Credentials, userId: string): Promise<XT
   return best ? { id: best.id, createdAt: best.createdAt } : null;
 }
 
-async function postTweet(credentials: Credentials, text: string): Promise<{ id: string }> {
-  const payload = await xRequest(credentials, "POST", "/2/tweets", undefined, { text });
+async function postTweet(credentials: Credentials, text: string, options?: PostOptions): Promise<{ id: string }> {
+  const body: Record<string, unknown> = { text };
+  if (options?.mediaIds?.length) body.media = { media_ids: options.mediaIds };
+  if (options?.replyTo) body.reply = { in_reply_to_tweet_id: options.replyTo };
+  const payload = await xRequest(credentials, "POST", "/2/tweets", undefined, body);
   const data = payload.data;
   if (!data || typeof data !== "object" || typeof (data as { id?: unknown }).id !== "string") {
     throw new XApiError("X 没有返回帖子 id。", "rejected", 200);
@@ -161,6 +172,305 @@ async function postTweet(credentials: Credentials, text: string): Promise<{ id: 
 }
 
 const X_REQUEST_TIMEOUT_MS = 20_000;
+const X_UPLOAD_TIMEOUT_MS = 60_000;
+
+const IMAGE_TYPES: Record<string, string> = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+
+const VIDEO_TYPES: Record<string, string> = {
+  ".mp4": "video/mp4",
+  ".mov": "video/mp4",
+};
+
+const VIDEO_CHUNK_BYTES = 4 * 1024 * 1024;
+const VIDEO_STATUS_TIMEOUT_MS = 10 * 60_000;
+const UPLOAD_V1_BASE = "https://upload.x.com/1.1/media/upload.json";
+
+/** Upload image (one-shot) or video (chunked INIT/APPEND/FINALIZE + STATUS). Returns media id. */
+async function uploadMedia(credentials: Credentials, filePath: string): Promise<string> {
+  const path = await import("node:path");
+  const ext = path.extname(filePath).toLowerCase();
+  if (VIDEO_TYPES[ext]) return uploadVideo(credentials, filePath, VIDEO_TYPES[ext]);
+  if (IMAGE_TYPES[ext]) return uploadImage(credentials, filePath, IMAGE_TYPES[ext]);
+  throw new XApiError(`不支持的媒体格式：${filePath}`, "rejected", 0);
+}
+
+async function uploadImage(credentials: Credentials, filePath: string, type: string): Promise<string> {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  let bytes: Buffer;
+  try {
+    bytes = await fs.readFile(filePath);
+  } catch {
+    throw new XApiError(`找不到图片文件：${filePath}`, "rejected", 0);
+  }
+  const url = `${API_BASE}/2/media/upload`;
+  const { header } = buildAuthorizationHeader({ method: "POST", url, credentials });
+  const form = new FormData();
+  form.append("media", new Blob([new Uint8Array(bytes)], { type }), path.basename(filePath));
+  form.append("media_category", "tweet_image");
+  form.append("media_type", type);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: header, Accept: "application/json", "User-Agent": "xuti/0.1" },
+      body: form,
+      signal: AbortSignal.timeout(X_UPLOAD_TIMEOUT_MS),
+    });
+  } catch {
+    throw new XApiError("连不上 X 的服务器（上传图片）。", "transient", 0);
+  }
+  if (!response.ok) throw await toXApiError(response);
+  const payload = (await response.json()) as { data?: { id?: unknown; media_id_string?: unknown }; media_id_string?: unknown };
+  const id = payload.data?.id ?? payload.data?.media_id_string ?? payload.media_id_string;
+  if (typeof id !== "string" || !id) throw new XApiError("X 没有返回图片 id。", "rejected", 200);
+  return id;
+}
+
+async function uploadVideo(credentials: Credentials, filePath: string, mediaType: string): Promise<string> {
+  const fs = await import("node:fs/promises");
+  let bytes: Buffer;
+  try {
+    bytes = await fs.readFile(filePath);
+  } catch {
+    throw new XApiError(`找不到视频文件：${filePath}`, "rejected", 0);
+  }
+  try {
+    return await uploadVideoV2(credentials, bytes, mediaType);
+  } catch (error) {
+    // Auth failures are fatal; other v2 failures (404 endpoint, shape, etc.) try v1.1.
+    if (error instanceof XApiError && error.kind === "auth") throw error;
+    console.warn("[序帖] X API v2 视频分块上传失败，改用 v1.1。", error instanceof Error ? error.message : error);
+    return uploadVideoV1(credentials, bytes, mediaType);
+  }
+}
+
+async function uploadVideoV2(credentials: Credentials, bytes: Buffer, mediaType: string): Promise<string> {
+  const initPayload = await xRequest(
+    credentials,
+    "POST",
+    "/2/media/upload/initialize",
+    undefined,
+    {
+      media_type: mediaType,
+      total_bytes: bytes.length,
+      media_category: "amplify_video",
+    },
+    X_UPLOAD_TIMEOUT_MS,
+  );
+  const mediaId = extractMediaId(initPayload);
+  if (!mediaId) throw new XApiError("X 没有返回视频 id（initialize）。", "rejected", 200);
+
+  for (let offset = 0, segment = 0; offset < bytes.length; offset += VIDEO_CHUNK_BYTES, segment += 1) {
+    const chunk = bytes.subarray(offset, Math.min(offset + VIDEO_CHUNK_BYTES, bytes.length));
+    await appendMediaV2(credentials, mediaId, segment, chunk);
+  }
+
+  const finalizePayload = await xRequest(
+    credentials,
+    "POST",
+    `/2/media/upload/${encodeURIComponent(mediaId)}/finalize`,
+    undefined,
+    undefined,
+    X_UPLOAD_TIMEOUT_MS,
+  );
+  await waitForMediaProcessing(credentials, mediaId, readProcessingInfo(finalizePayload), "v2");
+  return mediaId;
+}
+
+async function appendMediaV2(
+  credentials: Credentials,
+  mediaId: string,
+  segmentIndex: number,
+  chunk: Buffer,
+): Promise<void> {
+  const url = `${API_BASE}/2/media/upload/${encodeURIComponent(mediaId)}/append`;
+  const { header } = buildAuthorizationHeader({ method: "POST", url, credentials });
+  const form = new FormData();
+  form.append("segment_index", String(segmentIndex));
+  form.append("media", new Blob([new Uint8Array(chunk)], { type: "application/octet-stream" }), `chunk${segmentIndex}.bin`);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: header, Accept: "application/json", "User-Agent": "xuti/0.1" },
+      body: form,
+      signal: AbortSignal.timeout(X_UPLOAD_TIMEOUT_MS),
+    });
+  } catch {
+    throw new XApiError("连不上 X 的服务器（上传视频分块）。", "transient", 0);
+  }
+  if (!response.ok) throw await toXApiError(response);
+}
+
+async function uploadVideoV1(credentials: Credentials, bytes: Buffer, mediaType: string): Promise<string> {
+  const init = await xUploadV1(credentials, {
+    command: "INIT",
+    total_bytes: String(bytes.length),
+    media_type: mediaType,
+    media_category: "amplify_video",
+  });
+  const mediaId = extractMediaId(init);
+  if (!mediaId) throw new XApiError("X 没有返回视频 id（v1 INIT）。", "rejected", 200);
+
+  for (let offset = 0, segment = 0; offset < bytes.length; offset += VIDEO_CHUNK_BYTES, segment += 1) {
+    const chunk = bytes.subarray(offset, Math.min(offset + VIDEO_CHUNK_BYTES, bytes.length));
+    await appendMediaV1(credentials, mediaId, segment, chunk);
+  }
+
+  const finalize = await xUploadV1(credentials, { command: "FINALIZE", media_id: mediaId });
+  await waitForMediaProcessing(credentials, mediaId, readProcessingInfo(finalize), "v1");
+  return mediaId;
+}
+
+async function appendMediaV1(
+  credentials: Credentials,
+  mediaId: string,
+  segmentIndex: number,
+  chunk: Buffer,
+): Promise<void> {
+  const url = UPLOAD_V1_BASE;
+  const { header } = buildAuthorizationHeader({
+    method: "POST",
+    url,
+    credentials,
+    extraParams: {
+      command: "APPEND",
+      media_id: mediaId,
+      segment_index: String(segmentIndex),
+    },
+  });
+  const form = new FormData();
+  form.append("command", "APPEND");
+  form.append("media_id", mediaId);
+  form.append("segment_index", String(segmentIndex));
+  form.append("media", new Blob([new Uint8Array(chunk)], { type: "application/octet-stream" }), `chunk${segmentIndex}.bin`);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: header, Accept: "application/json", "User-Agent": "xuti/0.1" },
+      body: form,
+      signal: AbortSignal.timeout(X_UPLOAD_TIMEOUT_MS),
+    });
+  } catch {
+    throw new XApiError("连不上 X 的服务器（v1 上传视频分块）。", "transient", 0);
+  }
+  // APPEND often returns 204 No Content
+  if (!response.ok && response.status !== 204) throw await toXApiError(response);
+}
+
+async function xUploadV1(
+  credentials: Credentials,
+  params: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const url = UPLOAD_V1_BASE;
+  const { header } = buildAuthorizationHeader({ method: "POST", url, credentials, extraParams: params });
+  const body = new URLSearchParams(params);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: header,
+        Accept: "application/json",
+        "User-Agent": "xuti/0.1",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+      signal: AbortSignal.timeout(X_UPLOAD_TIMEOUT_MS),
+    });
+  } catch {
+    throw new XApiError("连不上 X 的服务器（v1 视频上传）。", "transient", 0);
+  }
+  if (!response.ok) throw await toXApiError(response);
+  if (response.status === 204) return {};
+  return (await response.json()) as Record<string, unknown>;
+}
+
+type ProcessingInfo = { state?: string; check_after_secs?: number; error?: { message?: string } };
+
+function readProcessingInfo(payload: unknown): ProcessingInfo | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const record = payload as Record<string, unknown>;
+  const data = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : record;
+  const info = data.processing_info;
+  if (!info || typeof info !== "object") return undefined;
+  return info as ProcessingInfo;
+}
+
+function extractMediaId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const data = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : null;
+  const candidates = [data?.id, data?.media_id_string, record.id, record.media_id_string, record.media_id];
+  for (const value of candidates) {
+    if (typeof value === "string" && value) return value;
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return null;
+}
+
+async function waitForMediaProcessing(
+  credentials: Credentials,
+  mediaId: string,
+  initial: ProcessingInfo | undefined,
+  mode: "v2" | "v1",
+): Promise<void> {
+  let info = initial;
+  if (!info) return;
+  const deadline = Date.now() + VIDEO_STATUS_TIMEOUT_MS;
+  while (true) {
+    const state = (info.state ?? "").toLowerCase();
+    if (state === "succeeded" || state === "success") return;
+    if (state === "failed" || state === "error") {
+      const detail = info.error?.message ? `：${info.error.message}` : "";
+      throw new XApiError(`视频处理失败${detail}`, "rejected", 0);
+    }
+    if (Date.now() > deadline) throw new XApiError("视频处理超时。", "transient", 0);
+    const waitSecs = Math.max(1, Number(info.check_after_secs) || 2);
+    await new Promise((resolve) => setTimeout(resolve, waitSecs * 1000));
+    info =
+      mode === "v2"
+        ? readProcessingInfo(
+            await xRequest(
+              credentials,
+              "GET",
+              "/2/media/upload",
+              { command: "STATUS", media_id: mediaId },
+              undefined,
+              X_UPLOAD_TIMEOUT_MS,
+            ),
+          )
+        : readProcessingInfo(await xUploadV1GetStatus(credentials, mediaId));
+    if (!info) return;
+  }
+}
+
+async function xUploadV1GetStatus(credentials: Credentials, mediaId: string): Promise<Record<string, unknown>> {
+  const url = UPLOAD_V1_BASE;
+  const query = { command: "STATUS", media_id: mediaId };
+  const { header } = buildAuthorizationHeader({ method: "GET", url, credentials, extraParams: query });
+  const queryString = `?command=STATUS&media_id=${percentEncode(mediaId)}`;
+  let response: Response;
+  try {
+    response = await fetch(`${url}${queryString}`, {
+      method: "GET",
+      headers: { Authorization: header, Accept: "application/json", "User-Agent": "xuti/0.1" },
+      signal: AbortSignal.timeout(X_UPLOAD_TIMEOUT_MS),
+    });
+  } catch {
+    throw new XApiError("连不上 X 的服务器（v1 STATUS）。", "transient", 0);
+  }
+  if (!response.ok) throw await toXApiError(response);
+  return (await response.json()) as Record<string, unknown>;
+}
 
 async function xRequest(
   credentials: Credentials,
@@ -168,6 +478,7 @@ async function xRequest(
   path: string,
   query?: Record<string, string>,
   body?: unknown,
+  timeoutMs: number = X_REQUEST_TIMEOUT_MS,
 ): Promise<{ data?: unknown }> {
   const url = `${API_BASE}${path}`;
   const { header } = buildAuthorizationHeader({
@@ -193,13 +504,16 @@ async function xRequest(
       },
       body: body ? JSON.stringify(body) : undefined,
       // Never let a stalled connection block the 5 s scheduler loop (ticks run one after another).
-      signal: AbortSignal.timeout(X_REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch {
     throw new XApiError("连不上 X 的服务器。", "transient", 0);
   }
   if (!response.ok) throw await toXApiError(response);
-  return (await response.json()) as { data?: unknown };
+  if (response.status === 204) return {};
+  const text = await response.text();
+  if (!text) return {};
+  return JSON.parse(text) as { data?: unknown };
 }
 
 export async function toXApiError(response: Response): Promise<XApiError> {

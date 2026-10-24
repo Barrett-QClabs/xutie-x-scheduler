@@ -49,3 +49,21 @@ data/*.sqlite-*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local runtime artefacts (never commit)
+.guard-reported-failures.txt
+*.log
+*.out
+*.pid
+*.lock
+*.jsonl
+*.status.json
+cache.json
+following-snapshots/
+keyword-candidates/
+automation.config.json
+follow-stop.json
+follow.mutex
+whitelist.txt
+*.bak
+*.bak-*

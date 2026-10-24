@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { FileUp, ListOrdered, Settings } from "lucide-react";
+import { FileUp, ListOrdered, Settings, UserPlus } from "lucide-react";
 import { useAppState } from "@/components/app-state";
 import { useI18n } from "@/components/i18n-provider";
 import { cn } from "@/lib/utils";
@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 const links = [
   { href: "/", key: "navQueue" as const, icon: ListOrdered },
   { href: "/import", key: "navImport" as const, icon: FileUp },
+  { href: "/automation", key: "navAutomation" as const, icon: UserPlus },
   { href: "/settings", key: "navSettings" as const, icon: Settings },
 ];
 
@@ -72,7 +73,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <main className="px-4 py-6 pb-24 md:px-8 md:py-8 md:pb-10">{children}</main>
         </div>
       </div>
-      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-3 border-t border-border bg-card md:hidden">
+      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-4 border-t border-border bg-card md:hidden">
         {links.map((link) => {
           const active = link.href === "/" ? pathname === "/" : pathname.startsWith(link.href);
           const Icon = link.icon;

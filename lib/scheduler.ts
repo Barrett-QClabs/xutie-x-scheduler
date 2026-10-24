@@ -26,6 +26,7 @@ import {
   reanchorPendingToManual,
 } from "@/lib/service";
 import { shouldReuseTimelineCache } from "@/lib/timeline";
+import type { Tweet, TweetExtra } from "@/lib/types";
 import type { XClient, XTimelineTweet } from "@/lib/x-client";
 import { createXClient, XApiError } from "@/lib/x-client";
 
@@ -122,7 +123,7 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
     }
 
     try {
-      const posted = await client.postTweet(due.text);
+      const posted = await postUnit(client, due);
       patchTweet(due.id, {
         status: "posted",
         postedAt: now.toISOString(),
@@ -179,6 +180,44 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
   } finally {
     releaseLock();
   }
+}
+
+async function uploadAll(client: XClient, paths: string[] | undefined): Promise<string[] | undefined> {
+  if (!paths?.length) return undefined;
+  if (!client.uploadMedia) throw new XApiError("当前客户端不支持上传图片。", "rejected", 0);
+  const ids: string[] = [];
+  for (const file of paths) ids.push(await client.uploadMedia(file));
+  return ids;
+}
+
+/**
+ * Post one queue item: the head (with its images), then every thread reply right
+ * away, each replying to the previous one. Progress is saved after each post so a
+ * retry resumes where it stopped instead of posting duplicates.
+ */
+async function postUnit(client: XClient, due: Tweet): Promise<{ id: string }> {
+  const extra: TweetExtra = due.extra ? JSON.parse(JSON.stringify(due.extra)) : {};
+  if (!extra.media?.length && !extra.thread?.length) return client.postTweet(due.text);
+  let headId = extra.headTweetId ?? null;
+  if (!headId) {
+    const mediaIds = await uploadAll(client, extra.media);
+    headId = (await client.postTweet(due.text, { mediaIds })).id;
+    extra.headTweetId = headId;
+    patchTweet(due.id, { tweetId: headId, extra });
+  }
+  let previous = headId;
+  for (const reply of extra.thread ?? []) {
+    if (reply.tweetId) {
+      previous = reply.tweetId;
+      continue;
+    }
+    const mediaIds = await uploadAll(client, reply.media);
+    const posted = await client.postTweet(reply.text, { mediaIds, replyTo: previous });
+    reply.tweetId = posted.id;
+    previous = posted.id;
+    patchTweet(due.id, { extra });
+  }
+  return { id: headId };
 }
 
 /** Watch the X timeline (cached for TIMELINE_CACHE_TTL_MS) while the next post is this close. */

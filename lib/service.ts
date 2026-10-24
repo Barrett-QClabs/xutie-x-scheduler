@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { decryptString, encryptString } from "@/lib/crypto";
 import {
   deleteCredentials,
@@ -477,4 +478,52 @@ function compareTweets(a: Tweet, b: Tweet): number {
   const time = a.scheduledAt.localeCompare(b.scheduledAt);
   if (time !== 0) return time;
   return a.sortOrder - b.sortOrder;
+}
+
+/** Queue a thread (head + replies, optional images per post) as ONE queue item at `startAt`. */
+export function queueThread(input: { posts: unknown; startAt: string }): { ok: true; queued: PublicTweet } {
+  if (!Array.isArray(input.posts) || input.posts.length === 0 || input.posts.length > 25) {
+    throw new AppError("invalid_text", "线程需要 1 到 25 条帖子。");
+  }
+  const posts = input.posts.map((raw, index) => {
+    const item = (raw ?? {}) as { text?: unknown; media?: unknown };
+    if (typeof item.text !== "string") throw new AppError("invalid_text", `第 ${index + 1} 条没有文字。`);
+    const inspected = inspectTweet(item.text);
+    if (!inspected.valid) {
+      throw new AppError("invalid_text", `第 ${index + 1} 条不合规（${inspected.reason}，${inspected.weightedLength}）。`);
+    }
+    const media = Array.isArray(item.media) ? item.media.filter((m): m is string => typeof m === "string") : [];
+    if (media.length > 4) throw new AppError("invalid_text", `第 ${index + 1} 条媒体超过 4 个。`);
+    const allowedMedia = /\.(jpe?g|png|webp|gif|mp4|mov)$/i;
+    for (const file of media) {
+      if (!file.startsWith("/") || !fs.existsSync(file)) throw new AppError("invalid_text", `找不到媒体文件：${file}`);
+      if (!allowedMedia.test(file)) throw new AppError("invalid_text", `不支持的媒体格式：${file}`);
+    }
+    return { text: inspected.text, weightedLength: inspected.weightedLength, media };
+  });
+  const start = assertStartAt(input.startAt);
+  const [head, ...rest] = posts;
+  const now = new Date().toISOString();
+  const row: Tweet = {
+    id: crypto.randomUUID(),
+    text: head.text,
+    weightedLength: head.weightedLength,
+    status: "pending",
+    scheduledAt: start.toISOString(),
+    postedAt: null,
+    tweetId: null,
+    errorMessage: null,
+    attemptCount: 0,
+    sortOrder: nextSortOrder(),
+    delayReason: null,
+    extra: {
+      media: head.media,
+      thread: rest.map((post) => ({ text: post.text, media: post.media, tweetId: null })),
+      headTweetId: null,
+    },
+    createdAt: now,
+    updatedAt: now,
+  };
+  insertTweets([row]);
+  return { ok: true, queued: toPublicTweet(row, getCredentialsRow()?.username ?? null) };
 }
