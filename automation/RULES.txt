@@ -6,7 +6,7 @@ x-unfollow rules (@barrett_tt)
       follows get time to follow back). Each blue-V target is re-checked (connection_status) right
       before the unfollow and skipped if it now follows back.
   Blue-V mutuals are NEVER unfollowed.
-- Order: all non-blue-V first (oldest-followed first), then blue-V non-mutuals (oldest first). ~3 min gap (160-200s). Max 15/run, 50/day (Asia/Shanghai).
+- Order: all non-blue-V first (oldest-followed first), then blue-V non-mutuals (oldest first). ~3 min gap (160-200s). Max 10/run (hourly), 100/day (Asia/Shanghai).
 - Each unfollow logged to log.jsonl; never re-unfollow ids already in log, and never re-follow them
   (follow-back + keyword follow both skip every id in log.jsonl).
 

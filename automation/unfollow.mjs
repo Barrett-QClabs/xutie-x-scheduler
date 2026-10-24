@@ -38,7 +38,7 @@ const PROTECT_RECENT_N = 400;
 // Additionally, daily snapshots of following IDs are kept; anyone present now but absent
 // from the most recent snapshot of a PREVIOUS day is a new follow today -> protected.
 const SNAP_DIR = path.join(DATA_DIR, "following-snapshots");
-const DAILY_CAP = 50;     // max successful unfollows per calendar day (Asia/Shanghai)
+const DAILY_CAP = 100;    // max successful unfollows per calendar day (Asia/Shanghai)
 const CAP_TZ = "Asia/Shanghai";
 
 // --- CLI ---

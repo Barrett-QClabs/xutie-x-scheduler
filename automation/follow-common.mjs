@@ -27,7 +27,7 @@ export const WINDOW_MS = 15 * 60_000;
 export const WINDOW_MAX = 45; // X allows 50 follows / 15 min per user; keep 5 spare
 
 export const DEFAULT_CONFIG = {
-  unfollow: { enabled: true, perRun: 15, dailyCap: 50 },
+  unfollow: { enabled: true, perRun: 10, dailyCap: 100 },
   followback: { enabled: true },
   keywordfollow: {
     enabled: true,

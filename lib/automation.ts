@@ -25,7 +25,7 @@ export interface AutomationConfig {
 }
 
 const DEFAULT_CONFIG: AutomationConfig = {
-  unfollow: { enabled: true, perRun: 15, dailyCap: 50 },
+  unfollow: { enabled: true, perRun: 10, dailyCap: 100 },
   followback: { enabled: true },
   keywordfollow: {
     enabled: true,
