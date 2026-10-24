@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Unfollow non-mutual accounts on X using OAuth 1.0a credentials
+ * Unfollow ALL non-blue-V accounts the user follows (mutual or not; rule 2026-10-24) using OAuth 1.0a credentials
  * stored (encrypted) by 序帖 at /workspace/xutie-x-scheduler.
  *
  * Usage:
@@ -29,10 +29,10 @@ const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 const USER_FIELDS = "verified,verified_type,public_metrics,username,protected";
 const PAGE_SIZE = 1000;
 const PROTECT_TOP_N = 20; // never unfollow the 20 most-recently-followed accounts
-// "今天刚关注的不要取关": X's following API has NO follow date. The list is returned
-// most-recently-followed first, so the first PROTECT_RECENT_N entries are treated as a
-// today/recent-follows buffer and are NEVER unfollowed (100 ≈ today's + recent follows).
-const PROTECT_RECENT_N = 400;
+// Rule change 2026-10-24: the old 400-recent buffer ("今天刚关注的不要取关") is REMOVED — recently
+// followed non-blue-V accounts are unfollowed too (blue-V never are). Only the first PROTECT_TOP_N
+// of the following list (most recent first) + whitelist.txt remain untouchable.
+const PROTECT_RECENT_N = 0;
 // Additionally, daily snapshots of following IDs are kept; anyone present now but absent
 // from the most recent snapshot of a PREVIOUS day is a new follow today -> protected.
 const SNAP_DIR = path.join(DATA_DIR, "following-snapshots");
@@ -369,30 +369,35 @@ export function newTodayIds(following) {
   return { ids: out, baseline: prev ?? null };
 }
 
-export function protectedRecentIds(following, newIds) {
-  const s = new Set(following.slice(0, Math.max(PROTECT_TOP_N, PROTECT_RECENT_N)).map((u) => u.id));
-  for (const id of newIds) s.add(id);
-  return s;
+export function protectedRecentIds(following, _newIds) {
+  // Only the first PROTECT_TOP_N (20). New-today snapshot ids are no longer protected (rule 2026-10-24);
+  // snapshots are still written for reference.
+  return new Set(following.slice(0, Math.max(PROTECT_TOP_N, PROTECT_RECENT_N)).map((u) => u.id));
 }
 
+// Rule 2026-10-24 ("非蓝v全部列入取关计划"): EVERY non-blue-V account the user follows is in the plan,
+// whether or not it follows back. Blue-V / any verification is never unfollowed.
 function classifyNonMutual(following, followers, whitelist, skipIds, protectedTop) {
   const followerIds = new Set(followers.map((u) => u.id));
   const nonBlue = [];
   let blueCount = 0;
   let whitelisted = 0;
+  let mutualInPlan = 0;
+  let protectedCount = 0;
   for (const u of following) {
     if (!u?.id) continue;
-    if (followerIds.has(u.id)) continue;
-    if (protectedTop.has(u.id)) continue;
+    if (protectedTop.has(u.id)) { protectedCount += 1; continue; }
     if (skipIds.has(u.id)) continue; // already unfollowed per log (matters when using cache)
     if (isBlueV(u)) { blueCount += 1; continue; } // NEVER unfollow blue-V / verified
     if (whitelist.has((u.username ?? "").toLowerCase())) { whitelisted += 1; continue; }
-    nonBlue.push({ id: u.id, username: u.username ?? "", blueV: false,
+    const mutual = followerIds.has(u.id);
+    if (mutual) mutualInPlan += 1;
+    nonBlue.push({ id: u.id, username: u.username ?? "", blueV: false, mutual,
       verified: !!u.verified, verified_type: u.verified_type ?? null });
   }
   // following list is reverse-chronological -> reverse for oldest-followed first
   nonBlue.reverse();
-  return { ordered: nonBlue, nonBlueCount: nonBlue.length, blueCount, whitelisted };
+  return { ordered: nonBlue, nonBlueCount: nonBlue.length, blueCount, whitelisted, mutualInPlan, protectedCount };
 }
 
 async function unfollowOne(credentials, sourceUserId, target) {
@@ -455,7 +460,7 @@ async function main() {
   const whitelist = loadWhitelist();
   const newToday = newTodayIds(lists.following);
   const protectedIds = protectedRecentIds(lists.following, newToday.ids);
-  const { ordered, nonBlueCount, blueCount, whitelisted } = classifyNonMutual(
+  const { ordered, nonBlueCount, blueCount, whitelisted, mutualInPlan, protectedCount } = classifyNonMutual(
     lists.following,
     lists.followers,
     whitelist,
@@ -464,6 +469,14 @@ async function main() {
   );
 
   const todayCount = countTodayUnfollows();
+  try {
+    fs.writeFileSync(path.join(DATA_DIR, "unfollow-plan.json"), JSON.stringify({
+      updated: new Date().toISOString(), rule: "all non-blue-V (mutual or not), outside protections",
+      cacheTimestamp: lists.timestamp, following: lists.following.length, inPlan: nonBlueCount, mutualInPlan,
+      nonMutualInPlan: nonBlueCount - mutualInPlan, blueVNeverUnfollowed: blueCount, whitelisted,
+      protectedTop20: protectedCount, dailyCap: DAILY_CAP, daysAtCap: Math.ceil(nonBlueCount / DAILY_CAP),
+    }, null, 2));
+  } catch {}
   const allowed = Math.max(0, Math.min(LIMIT, DAILY_CAP - todayCount));
   const targets = ordered.slice(0, allowed);
   const unfollowed = [];
@@ -486,6 +499,7 @@ async function main() {
         username: target.username,
         id: target.id,
         blueV: target.blueV,
+        mutual: !!target.mutual,
         result: res.ok ? "ok" : `HTTP ${res.status}`,
         detail: res.ok ? null : extractErrorMessage(res.body),
         rate: res.rate,
@@ -495,7 +509,7 @@ async function main() {
 
       if (res.ok) {
         // DELETE following returns { data: { following: false } } on success
-        unfollowed.push({ username: target.username, id: target.id, blueV: target.blueV });
+        unfollowed.push({ username: target.username, id: target.id, blueV: target.blueV, mutual: target.mutual });
       } else if (res.status === 401 || res.status === 403 || res.status === 429) {
         errors.push({
           username: target.username,
@@ -549,10 +563,12 @@ async function main() {
     counts: {
       following: lists.following.length,
       followers: lists.followers.length,
-      nonMutualTotal: nonBlueCount + blueCount + whitelisted,
-      nonMutualNonBlueV_eligible: nonBlueCount,
-      nonMutualBlueV_protected: blueCount,
-      nonMutualWhitelisted: whitelisted,
+      planNonBlueV_eligible: nonBlueCount,
+      planMutual: mutualInPlan,
+      planNonMutual: nonBlueCount - mutualInPlan,
+      blueV_neverUnfollowed: blueCount,
+      whitelisted,
+      protectedTop20: protectedCount,
       whitelistSize: whitelist.size,
     },
     remainingAfterRun: {
@@ -572,7 +588,7 @@ async function main() {
     dailyCap: { cap: DAILY_CAP, tz: CAP_TZ, doneTodayBeforeRun: todayCount, allowedThisRun: allowed },
     protectTopN: PROTECT_TOP_N,
     protectRecentN: PROTECT_RECENT_N,
-    newFollowsTodayProtected: newToday.ids.size,
+    newFollowsTodaySeen: newToday.ids.size,
     snapshotBaseline: newToday.baseline,
   };
 

@@ -1,12 +1,12 @@
 x-unfollow rules (@barrett_tt)
-- 今天刚关注的不要取关: never unfollow the first 400 of the following list (API returns
-  most-recent-first; no follow date exists, so 400 = today/recent-follow buffer (~350 follows/day)).
-- Also protected: anyone in following now but absent from the previous day's snapshot
-  (following-snapshots/YYYY-MM-DD.json, Asia/Shanghai day) = new follows today.
-- First 20 most-recent follows always protected (subset of the 400) + whitelist.txt.
-- Only non-mutual AND non-blue-V (any verification = never unfollowed).
+- Untouchable: whitelist.txt + the first 20 of the following list (most recent first). Nothing else.
+  (2026-10-24: the old 400-recent / new-today snapshot protection was removed — recently followed
+  non-blue-V accounts are unfollowed too; blue-V are never unfollowed anyway.)
+- Unfollow plan (changed 2026-10-24): ALL non-blue-V accounts the user follows, whether or not they
+  follow back (mutuals included). Blue-V / any verification is NEVER unfollowed.
 - Oldest-followed first. ~3 min gap (160-200s). Max 15/run, 50/day (Asia/Shanghai).
-- Each unfollow logged to log.jsonl; never re-unfollow ids already in log.
+- Each unfollow logged to log.jsonl; never re-unfollow ids already in log, and never re-follow them
+  (follow-back + keyword follow both skip every id in log.jsonl).
 
 follow rules (follow-back + keyword follow share ONE daily budget)
 - Combined follows (followback.jsonl + keywordfollow.jsonl, result ok, Asia/Shanghai day) <= 350/day
@@ -30,3 +30,6 @@ follow rules (follow-back + keyword follow share ONE daily budget)
   not already followed, not @barrett_tt, never unfollowed (log.jsonl) or followed before by any script,
   not in an earlier day's pool. Each candidate re-checked (connection_status etc.) right before following.
 - On/off toggles + keywords: automation.config.json (editable in 序帖 → 自动化 page).
+- Never follow non-blue-V accounts (rule 2026-10-24): follow-back only targets blue-V followers;
+  keyword follow only blue-V candidates, re-checked via GET /2/users right before each follow
+  (if that re-check fails, the batch is skipped rather than followed unchecked).

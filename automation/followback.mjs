@@ -91,6 +91,7 @@ function computeTargets(lists, extraFollowed, skipIds) {
   return lists.followers
     .filter((u) => u?.id && !following.has(u.id) && !extraFollowed.has(u.id) && !unfollowed.has(u.id) && !done.has(u.id) && !skipIds.has(u.id))
     .map((u) => ({ id: u.id, username: u.username ?? "", blueV: isBlueV(u), protected: !!u.protected }))
+    .filter((t) => t.blueV) // user rule 2026-10-24: never follow non-blue-V accounts
     .reverse();
 }
 
@@ -107,7 +108,7 @@ async function main() {
       following: lists.following.length, followers: lists.followers.length,
       followBackTargets: targets.length, blueV: targets.filter((t) => t.blueV).length, protected: targets.filter((t) => t.protected).length,
       followedToday: todayFollowCount(), dailyCap: DAILY_CAP,
-      firstCycle: targets.slice(0, CYCLE_SIZE).map((t) => t.username + (t.protected ? "(protected)" : "")) }, null, 2));
+      firstCycle: targets.slice(0, PACE_CYCLE).map((t) => t.username + (t.protected ? "(protected)" : "")) }, null, 2));
     return;
   }
 
@@ -189,6 +190,7 @@ async function main() {
         if (p2.phase !== "work" || p2.remaining <= 0) return null;
         if (fbRoom().room <= 0) return null;
         if (!keywordYieldsSlot().ok) return null; // keyword grabbed the slot
+        if (!t.blueV) return null; // hard guard: never follow non-blue-V (rule 2026-10-24)
         const res = await xRequest(credentials, "POST", `/2/users/${userId}/following`, undefined, { target_user_id: t.id });
         const entry = { time: ts(), username: t.username, id: t.id, blueV: t.blueV, protected: t.protected,
           result: res.ok ? "ok" : `HTTP ${res.status}`, pending: !!res.body?.data?.pending_follow,

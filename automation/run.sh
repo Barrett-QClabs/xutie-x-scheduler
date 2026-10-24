@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hourly wrapper: unfollow up to N (default 15) non-mutual, non-blue-V accounts.
+# Hourly wrapper: unfollow up to N (default 15) non-blue-V accounts (mutual or not; blue-V never).
 unset NPM_CONFIG_PREFIX
 export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh" >/dev/null; nvm use 22 >/dev/null
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"

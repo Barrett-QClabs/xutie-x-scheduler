@@ -202,6 +202,10 @@ async function main() {
     // Take up to `pace.remaining` slots this window (keyword priority).
     const batch = remaining.slice(0, Math.min(5, pace.remaining));
     const fresh = await recheck(credentials, batch);
+    if (!fresh) { // never follow without a fresh blue-V re-check
+      writeStatus({ state: "recheck_failed", resumeAt: new Date(Date.now() + 60_000).toISOString() });
+      say("pre-follow re-check failed; retrying in 60 s"); await sleep(60_000); continue;
+    }
     let took = 0;
     for (const c of batch) {
       if (stopFlagToday() || !loadConfig().keywordfollow.enabled) break;
@@ -209,8 +213,8 @@ async function main() {
       if (pace.phase !== "work" || pace.remaining <= 0) break;
       if (excludedIds(userId).has(c.id)) { skip.add(c.id); continue; }
       const u = fresh?.get(c.id);
-      if (fresh && !u) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "not found/suspended" }); continue; }
-      if (u) {
+      if (!u) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "not found/suspended" }); continue; }
+      {
         const cs = u.connection_status ?? [];
         const bad = cs.includes("following") ? "already following" : cs.includes("follow_request_sent") ? "request pending"
           : u.protected ? "protected" : !isBlueV(u) ? "no longer verified"

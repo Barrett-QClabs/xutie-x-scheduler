@@ -68,3 +68,4 @@ whitelist.txt
 *.bak
 *.bak-*
 follow-pace.json
+unfollow-plan.json
