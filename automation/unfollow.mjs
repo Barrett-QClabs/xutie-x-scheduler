@@ -30,8 +30,8 @@ const LOG_PATH = path.join(DATA_DIR, "log.jsonl");
 const FB_LOG_PATH = path.join(DATA_DIR, "followback.jsonl");
 const KW_LOG_PATH = path.join(DATA_DIR, "keywordfollow.jsonl");
 const API_BASE = "https://api.x.com";
-/** Full following+followers refresh at most once per day (Asia/Shanghai). */
-const FULL_REFRESH_MS = 24 * 60 * 60 * 1000;
+/** Full following+followers refresh at most once per 7 days; otherwise deltas + headFollowers. */
+export const FULL_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
 /** Reuse cache on 429/503 if younger than this. */
 const CACHE_FALLBACK_MS = 6 * 60 * 60 * 1000;
 const USER_FIELDS = "verified,verified_type,public_metrics,username,protected";
@@ -453,7 +453,7 @@ export async function pageUsers(credentials, kind, userId) {
 
 /**
  * Shared following+followers cache for unfollow + follow-back.
- * Full refresh at most once per 24h; otherwise apply local deltas from follow/unfollow logs.
+ * Full refresh at most once per 7 days; otherwise apply local deltas from follow/unfollow logs.
  * opts.headFollowers: also pull newest follower pages until a known id (for follow-back).
  * opts.forceFull: force a full refresh now.
  */

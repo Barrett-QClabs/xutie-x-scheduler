@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { USER_LOOKUP_BATCH, creditsBackoffMs } from "../automation/unfollow.mjs";
+import { USER_LOOKUP_BATCH, creditsBackoffMs, FULL_REFRESH_MS } from "../automation/unfollow.mjs";
 
 describe("shared list cache helpers", () => {
   it("batches user lookups by 14", () => {
@@ -12,5 +12,9 @@ describe("shared list cache helpers", () => {
       expect(ms).toBeGreaterThanOrEqual(5 * 60_000);
       expect(ms).toBeLessThan(10 * 60_000);
     }
+  });
+
+  it("full list refresh is at most once per 7 days", () => {
+    expect(FULL_REFRESH_MS).toBe(7 * 24 * 60 * 60 * 1000);
   });
 });

@@ -74,7 +74,7 @@ function excludedIds(userId) {
 const poolPath = (day) => path.join(POOL_DIR, `${day}.json`);
 const REJECTED_PATH = path.join(DATA_DIR, "keyword-rejected-authors.json");
 
-/** Persist author ids rejected by filters so search expansions don't re-bill them. */
+/** Persist author ids rejected by filters so later searches don't re-lookup/re-bill them. */
 function loadRejectedAuthors() {
   try {
     const j = JSON.parse(fs.readFileSync(REJECTED_PATH, "utf8"));
@@ -109,7 +109,35 @@ function carryOverCandidates(day, exclude) {
   return out;
 }
 
-/** Build today's pool; with `base` (today's existing pool) tops it up to poolSize, keeping its candidates. */
+/** Pool-build user lookups use 100 ids/request (pre-follow re-checks stay at USER_LOOKUP_BATCH=14). */
+const POOL_USER_LOOKUP_BATCH = 100;
+
+/** Lookup only the author ids we have not already rejected/excluded. */
+async function lookupAuthorsForPool(credentials, ids) {
+  const unique = [...new Set(ids.filter(Boolean))];
+  const out = new Map();
+  let lookedUp = 0;
+  for (let i = 0; i < unique.length; i += POOL_USER_LOOKUP_BATCH) {
+    const batch = unique.slice(i, i + POOL_USER_LOOKUP_BATCH);
+    const res = await xRequest(credentials, "GET", "/2/users", {
+      ids: batch.join(","),
+      "user.fields": "verified,verified_type,public_metrics,protected,username,name,description",
+    });
+    if (!res.ok) {
+      const err = new Error(`pool user lookup failed: HTTP ${res.status} ${extractErrorMessage(res.body)}`);
+      err.status = res.status; err.rate = res.rate; throw err;
+    }
+    lookedUp += batch.length;
+    for (const u of res.body?.data ?? []) out.set(u.id, u);
+  }
+  return { users: out, lookedUp };
+}
+
+/** Build today's pool; with `base` (today's existing pool) tops it up to poolSize, keeping its candidates.
+ *  Search returns tweets only (no user expansions). Known rejects/excludes are skipped before any
+ *  GET /2/users, so tooManyFollowers / notVerified authors are not re-billed on later pages/days.
+ *  Keywords with better historical add-rate are searched first so the 250 pool fills with fewer pages.
+ */
 async function buildPool(credentials, userId, username, base = null) {
   const cfg = loadConfig().keywordfollow;
   const day = dayKey(new Date());
@@ -127,17 +155,21 @@ async function buildPool(credentials, userId, username, base = null) {
   ]);
   const perKeyword = Object.fromEntries(cfg.keywords.map((k) => [k, { pages: 0, posts: 0, added: 0, ...(base?.perKeyword?.[k] ?? {}), done: false }]));
   const tokens = {};
-  let pages = base?.searchPages ?? 0, postsRead = base?.postsRead ?? 0, error = null;
+  let pages = base?.searchPages ?? 0, postsRead = base?.postsRead ?? 0, usersRead = base?.usersRead ?? 0, usersSkippedKnown = base?.usersSkippedKnown ?? 0, error = null;
   const rejected = { notVerified: 0, tooManyFollowers: 0, protected: 0, excluded: 0, notChinese: 0, ...(base?.rejected ?? {}) };
+  const yieldOf = (k) => {
+    const p = perKeyword[k];
+    return p.posts > 0 ? p.added / p.posts : 0.05;
+  };
   while (candidates.size < cfg.poolSize && pages < cfg.maxSearchPages) {
-    const active = cfg.keywords.filter((k) => !perKeyword[k].done);
+    // Prefer keywords that historically convert to candidates (fewer wasted User reads).
+    const active = cfg.keywords.filter((k) => !perKeyword[k].done).sort((a, b) => yieldOf(b) - yieldOf(a));
     if (!active.length) break;
     for (const kw of active) {
       if (candidates.size >= cfg.poolSize || pages >= cfg.maxSearchPages) break;
-      // lang:zh on every keyword (English ones too) → only Chinese-language tweets
+      // Tweets only — no author expansion. User reads happen below, after skip-list filter.
       const q = { query: `${/\s/.test(kw) ? `"${kw}"` : kw} lang:zh is:verified -is:retweet`, max_results: "100",
-        expansions: "author_id", "user.fields": "verified,verified_type,public_metrics,protected,username,name,description",
-        "tweet.fields": "created_at,lang" };
+        "tweet.fields": "created_at,lang,author_id,text" };
       if (tokens[kw]) q.next_token = tokens[kw];
       const r = await xRequest(credentials, "GET", "/2/tweets/search/recent", q);
       pages += 1; perKeyword[kw].pages += 1;
@@ -148,22 +180,51 @@ async function buildPool(credentials, userId, username, base = null) {
       }
       if (!r.ok) { error = { status: r.status, detail: extractErrorMessage(r.body) }; say(`search failed HTTP ${r.status}: ${error.detail}`); break; }
       const tweets = r.body?.data ?? []; postsRead += tweets.length; perKeyword[kw].posts += tweets.length;
-      const users = new Map((r.body?.includes?.users ?? []).map((u) => [u.id, u]));
+      const needLookup = [];
+      const tweetByAuthor = new Map();
       for (const t of tweets) {
-        const u = users.get(t.author_id);
-        if (!u || candidates.has(u.id)) continue;
-        if (!isBlueV(u)) { rejected.notVerified++; rememberRejected(rejectedAuthors, u.id); continue; }
-        if ((u.public_metrics?.followers_count ?? Infinity) >= cfg.maxFollowers) { rejected.tooManyFollowers++; rememberRejected(rejectedAuthors, u.id); continue; }
-        if (u.protected) { rejected.protected++; rememberRejected(rejectedAuthors, u.id); continue; }
-        if (exclude.has(u.id) || u.username?.toLowerCase() === username.toLowerCase()) { rejected.excluded++; continue; }
+        const aid = t.author_id;
+        if (!aid || candidates.has(aid) || tweetByAuthor.has(aid)) continue;
+        if (t.lang && t.lang !== "zh") { rejected.notChinese++; continue; }
+        if (exclude.has(aid) || aid === userId) { rejected.excluded++; usersSkippedKnown += 1; continue; }
+        tweetByAuthor.set(aid, t);
+        needLookup.push(aid);
+      }
+      let users = new Map();
+      if (needLookup.length) {
+        try {
+          const looked = await lookupAuthorsForPool(credentials, needLookup);
+          users = looked.users;
+          usersRead += looked.lookedUp;
+        } catch (err) {
+          if (err.status === 402) {
+            error = { status: 402, detail: err.message };
+            say(`user lookup 402 credits; will back off`); break;
+          }
+          if (err.status === 429) {
+            const w = Math.max(30_000, Number(err.rate?.reset) * 1000 - Date.now() + 5_000);
+            say(`user lookup 429; waiting ${Math.round(w / 1000)}s`); await sleep(w); continue;
+          }
+          error = { status: err.status ?? 0, detail: err.message };
+          say(`user lookup failed: ${err.message}`); break;
+        }
+      }
+      for (const [aid, t] of tweetByAuthor) {
+        if (candidates.size >= cfg.poolSize) break;
+        const u = users.get(aid);
+        if (!u) continue;
+        if (!isBlueV(u)) { rejected.notVerified++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
+        if ((u.public_metrics?.followers_count ?? Infinity) >= cfg.maxFollowers) { rejected.tooManyFollowers++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
+        if (u.protected) { rejected.protected++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
+        if (u.username?.toLowerCase() === username.toLowerCase()) { rejected.excluded++; continue; }
         const zh = chineseZoneCheck({ tweetLang: t.lang, name: u.name, bio: u.description, tweetText: t.text });
-        if (!zh.ok) { rejected.notChinese++; rememberRejected(rejectedAuthors, u.id); continue; }
+        if (!zh.ok) { rejected.notChinese++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
         candidates.set(u.id, { id: u.id, username: u.username, name: u.name, followers_count: u.public_metrics.followers_count,
           verified: u.verified === true, verified_type: u.verified_type ?? null, keyword: kw, tweet_id: t.id, tweet_at: t.created_at,
           tweet_lang: t.lang ?? null, bio: (u.description ?? "").replace(/\s+/g, " ").slice(0, 160),
           text: (t.text ?? "").replace(/\s+/g, " ").slice(0, 200), zh_ok: true, zh_why: zh.why });
+        exclude.add(u.id);
         perKeyword[kw].added += 1;
-        if (candidates.size >= cfg.poolSize) break;
       }
       if (candidates.size >= cfg.poolSize) break; // stop paging once pool is full
       tokens[kw] = r.body?.meta?.next_token;
@@ -173,15 +234,15 @@ async function buildPool(credentials, userId, username, base = null) {
   }
   saveRejectedAuthors(rejectedAuthors);
   const pool = { ...(base ?? {}), date: day, built: base?.built ?? ts(), ...(base ? { toppedUp: ts() } : {}),
-    source: "x-api-v2-recent-search (user OAuth1)", keywords: cfg.keywords,
-    target: cfg.poolSize, count: candidates.size, searchPages: pages, postsRead, perKeyword, rejected, error,
+    source: "x-api-v2-recent-search (user OAuth1, no user expansions)", keywords: cfg.keywords,
+    target: cfg.poolSize, count: candidates.size, searchPages: pages, postsRead, usersRead, usersSkippedKnown, perKeyword, rejected, error,
     carriedFromPreviousDays: carried.length,
     filters: { verified: "verified==true or verified_type!=none", maxFollowers: cfg.maxFollowers, protected: false,
       notFollowing: true, notPreviouslyFollowedOrUnfollowed: true, chineseZone: ZH_RULE, query: "<kw> lang:zh is:verified -is:retweet",
-      rejectedAuthorsSkipList: true, carryOverUnused: true },
+      rejectedAuthorsSkipList: true, carryOverUnused: true, searchExpansions: false, lookupOnlyUnknownAuthors: true },
     candidates: [...candidates.values()], droppedNonChinese: base?.droppedNonChinese ?? [] };
   if (candidates.size > 0 || !error) fs.writeFileSync(poolPath(day), JSON.stringify(pool, null, 2));
-  say(`pool ${day}: ${pool.count}/${cfg.poolSize} (carried ${carried.length}) from ${pages} search pages (${postsRead} posts)${error ? `; error HTTP ${error.status}` : ""}`);
+  say(`pool ${day}: ${pool.count}/${cfg.poolSize} (carried ${carried.length}) from ${pages} search pages (${postsRead} posts, ${usersRead} user reads, skipped-known ${usersSkippedKnown})${error ? `; error HTTP ${error.status}` : ""}`);
   return pool;
 }
 
