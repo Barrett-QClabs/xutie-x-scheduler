@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
+import { StatsPanel } from "@/components/stats-panel";
 
 type Entry = { time?: string; username?: string; result?: string; pending?: boolean; detail?: string | null; keyword?: string | null; followers?: number | null };
 type DaemonStatus = { state?: string; resumeAt?: string; why?: string; reason?: string; targetsRemaining?: number; updated?: string; error?: string };
@@ -146,6 +147,7 @@ export function AutomationScreen() {
       </div>
       {err && <p className="text-sm text-destructive">{err}</p>}
       {s.stopForToday && <p className="rounded-lg border border-destructive p-3 text-sm text-destructive">{t.stopDay}: {s.stopForToday.reason} ({s.stopForToday.by})</p>}
+      <StatsPanel zh={locale === "zh"} />
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         {tiles.map((x) => (
           <Card key={x.label}><CardContent className="p-4"><p className="text-xs text-muted-foreground">{x.label}</p><p className="mt-1 font-heading text-2xl">{x.value}</p></CardContent></Card>

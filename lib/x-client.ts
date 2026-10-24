@@ -472,6 +472,11 @@ async function xUploadV1GetStatus(credentials: Credentials, mediaId: string): Pr
   return (await response.json()) as Record<string, unknown>;
 }
 
+/** Read-only GET with the user's OAuth 1.0a keys (used by daily stats). */
+export async function xGet(credentials: Credentials, path: string, query?: Record<string, string>): Promise<Record<string, unknown>> {
+  return (await xRequest(credentials, "GET", path, query)) as Record<string, unknown>;
+}
+
 async function xRequest(
   credentials: Credentials,
   method: "GET" | "POST",
