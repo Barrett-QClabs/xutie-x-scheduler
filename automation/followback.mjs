@@ -16,7 +16,7 @@ import {
 } from "./unfollow.mjs";
 import {
   DATA_DIR, loadConfig, followCountsToday, withFollowMutex, waitForWindow, stopFlagToday, setStopFlag,
-  msUntilNextShanghaiMidnight as msToMidnight, keywordReserve, keywordYieldsSlot,
+  msUntilNextShanghaiMidnight as msToMidnight, followbackReserve,
   sharedPace, waitForSharedWork, beginSharedRest, PACE_CYCLE, PACE_GAP_MS,
 } from "./follow-common.mjs";
 
@@ -24,10 +24,11 @@ const FB_LOG = path.join(DATA_DIR, "followback.jsonl");
 const LOCK = path.join(DATA_DIR, "followback.lock");
 const STATUS = path.join(DATA_DIR, "followback.status.json");
 // Combined daily follow cap (follow-back + keyword follow) from automation.config.json (default 350).
-// SHARED PACE + KEYWORD PRIORITY (since 2026-10-24): both daemons share one work/rest cycle
-// (≤10 successful follows total per window, then shared 10–15 min rest with zero follows).
-// Keyword gets first dibs on the 10 slots; this daemon fills remaining slots in the same window
-// (keywordYieldsSlot), and only with room not reserved for keyword (keywordReserve).
+// SHARED PACE + FOLLOW-BACK PRIORITY (priority swapped 2026-10-24 21:04 Asia/Taipei): both daemons
+// share one work/rest cycle (≤10 successful follows total per window, then shared 10–15 min rest
+// with zero follows). Follow-back of blue-V followers gets first dibs on the 10 slots; keyword follow
+// fills what is left in the same window (followbackYieldsSlot) and leaves daily room for the
+// follow-backs still waiting (followbackReserve). Follow-back itself is limited only by the combined cap.
 let DAILY_CAP = loadConfig().combinedFollowDailyCap;
 const REFRESH_MIN_MS = 30 * 60_000;
 const REFRESH_MAX_MS = 60 * 60_000;
@@ -44,8 +45,8 @@ function readFbLog() {
 }
 // Combined count (follow-back + keyword follow) so the shared daily cap is enforced.
 function todayFollowCount() { return followCountsToday().combined; }
-// Room follow-back may use today = cap - combined - keyword reserve.
-function fbRoom() { const r = keywordReserve(); return { room: DAILY_CAP - r.counts.combined - r.reserve, reserve: r.reserve }; }
+// Room follow-back may use today = cap - combined (follow-back has priority; no reserve for keyword).
+function fbRoom() { return { room: DAILY_CAP - todayFollowCount() }; }
 const msUntilNextShanghaiMidnight = msToMidnight;
 
 function acquireLock() {
@@ -107,7 +108,7 @@ async function main() {
     console.log(JSON.stringify({ dryRun: true, me: me.body.data.username, cacheTimestamp: lists.timestamp,
       following: lists.following.length, followers: lists.followers.length,
       followBackTargets: targets.length, blueV: targets.filter((t) => t.blueV).length, protected: targets.filter((t) => t.protected).length,
-      followedToday: todayFollowCount(), dailyCap: DAILY_CAP,
+      followedToday: todayFollowCount(), dailyCap: DAILY_CAP, room: fbRoom().room, reserveForFollowback: followbackReserve(),
       firstCycle: targets.slice(0, PACE_CYCLE).map((t) => t.username + (t.protected ? "(protected)" : "")) }, null, 2));
     return;
   }
@@ -149,11 +150,7 @@ async function main() {
     });
 
     const room = fbRoom();
-    if (room.room <= 0) {
-      say(`no room left for follow-back (${today}/${DAILY_CAP}, ${room.reserve} reserved for keyword follow); re-checking in 5 min`);
-      writeStatus({ state: "reserved_for_keyword", targetsRemaining: targets.length, followedToday: today, counts: followCountsToday(), dailyCap: DAILY_CAP, keywordReserve: room.reserve, resumeAt: new Date(Date.now() + 5 * 60_000).toISOString() });
-      await sleep(5 * 60_000); continue;
-    }
+    if (room.room <= 0) continue; // combined cap hit meanwhile → daily_cap branch above
     if (targets.length === 0) {
       say("no follow-back targets; sleeping until next refresh");
       writeStatus({ state: "idle", targetsRemaining: 0, followedToday: today, counts: followCountsToday(), dailyCap: DAILY_CAP, resumeAt: new Date(Date.now() + refreshInterval).toISOString() });
@@ -167,29 +164,21 @@ async function main() {
       await sleep(Math.min(r.ms, 5 * 60_000)); continue;
     }
 
-    // Fill remaining slots in this shared window (keyword already had priority).
+    // Follow-back has priority: take as many of this window's remaining slots as we have targets.
+    writeStatus({ state: "following", targetsRemaining: targets.length, followedToday: todayFollowCount(), counts: followCountsToday(), dailyCap: DAILY_CAP, paceUsed: pace.used, paceRemaining: pace.remaining });
     const batch = targets.slice(0, Math.min(pace.remaining, room.room));
     let consecutive403 = 0;
     for (let i = 0; i < batch.length; i++) {
       const t = batch[i];
       if (todayFollowCount() >= DAILY_CAP || stopFlagToday()) break;
-      // Wait while keyword is actively claiming slots in this window.
-      let gate = keywordYieldsSlot();
-      while (!gate.ok) {
-        writeStatus({ state: "waiting_for_keyword", why: gate.why, targetsRemaining: lastTargets - i, followedToday: todayFollowCount(), counts: followCountsToday(), dailyCap: DAILY_CAP, resumeAt: new Date(gate.retryAt).toISOString() });
-        await sleep(Math.max(20_000, Math.min(gate.retryAt - Date.now(), 45_000)));
-        // If shared rest started while we waited, bail to outer loop.
-        if (sharedPace().phase === "rest") break;
-        gate = keywordYieldsSlot();
-      }
       pace = sharedPace();
       if (pace.phase === "rest" || pace.remaining <= 0 || fbRoom().room <= 0 || stopFlagToday()) break;
-      await waitForWindow((w) => { say(`X follow window full (${w.used}/15min); waiting`); writeStatus({ state: "window_wait", resumeAt: new Date(w.waitUntil).toISOString(), followedToday: todayFollowCount() }); });
+      await waitForWindow((w) => { say(`X follow window full (${w.used}/15min); waiting`); writeStatus({ state: "window_wait", targetsRemaining: lastTargets - i, resumeAt: new Date(w.waitUntil).toISOString(), followedToday: todayFollowCount() }); });
+      writeStatus({ state: "following", targetsRemaining: lastTargets - i, followedToday: todayFollowCount(), counts: followCountsToday(), dailyCap: DAILY_CAP, paceUsed: pace.used, paceRemaining: pace.remaining });
       const done = await withFollowMutex(async () => {
         const p2 = sharedPace();
         if (p2.phase !== "work" || p2.remaining <= 0) return null;
         if (fbRoom().room <= 0) return null;
-        if (!keywordYieldsSlot().ok) return null; // keyword grabbed the slot
         if (!t.blueV) return null; // hard guard: never follow non-blue-V (rule 2026-10-24)
         const res = await xRequest(credentials, "POST", `/2/users/${userId}/following`, undefined, { target_user_id: t.id });
         const entry = { time: ts(), username: t.username, id: t.id, blueV: t.blueV, protected: t.protected,
@@ -235,7 +224,12 @@ async function main() {
       }
       await sleep(PACE_GAP_MS());
     }
-    // Brief pause so we re-enter waitForSharedWork / keyword gate cleanly.
+    // Out of targets for now but this window still has slots: hand them to keyword follow.
+    pace = sharedPace();
+    if (pace.phase === "work" && pace.remaining > 0 && computeTargets(loadCache() ?? lists, extraFollowed, skipIds).length === 0) {
+      writeStatus({ state: "window_yield", why: "no more follow-back targets; remaining slots go to keyword", targetsRemaining: 0, followedToday: todayFollowCount(), counts: followCountsToday(), dailyCap: DAILY_CAP, paceUsed: pace.used, paceRemaining: pace.remaining });
+    }
+    // Brief pause so we re-enter waitForSharedWork cleanly.
     await sleep(5_000);
   }
 }

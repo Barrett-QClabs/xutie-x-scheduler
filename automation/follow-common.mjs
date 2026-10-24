@@ -3,7 +3,8 @@
  *  - combined daily follow cap (Asia/Shanghai day), counted from both logs
  *  - ONE shared work/rest pace: ≤10 successful follows total (keyword + follow-back) per work window,
  *    then a shared rest of 10–15 min (random) with ZERO follows from either daemon, then repeat.
- *    Keyword new people get priority for the 10 slots; follow-back fills what is left in the same window.
+ *    Follow-back of blue-V followers gets priority for the 10 slots; keyword new people fill what is left
+ *    in the same window (priority swapped 2026-10-24 21:04 Asia/Taipei).
  *  - shared X 15-minute window for POST /2/users/:id/following (X limit 50/15 min, we stop at 45)
  *  - a cross-process mutex so the check-cap -> follow -> log step is atomic between daemons
  *  - a shared "stop following for today" flag (set on account-level 403 follow limits)
@@ -12,7 +13,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { dayKey, sleep } from "./unfollow.mjs";
+import { dayKey, sleep, isBlueV, loadAlreadyUnfollowedIds } from "./unfollow.mjs";
 
 export const DATA_DIR = process.env.X_AUTOMATION_DIR || "/workspace/x-unfollow";
 export const FB_LOG = path.join(DATA_DIR, "followback.jsonl");
@@ -130,17 +131,18 @@ export async function waitForWindow(onWait) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Priority (since 2026-10-24): keyword follow of NEW people goes first; follow-back gets the rest.
+// Priority (since 2026-10-24 21:04 Asia/Taipei): FOLLOW-BACK of blue-V followers goes first;
+// keyword follow of new people (250 pool) gets the rest. (Before that, keyword had priority.)
 // ---------------------------------------------------------------------------------------------
 // Shared follow pace (since 2026-10-24): both daemons share ONE work/rest cycle.
-//   work: ≤ PACE_CYCLE successful follows total (keyword first, follow-back fills), ~75–105 s apart
+//   work: ≤ PACE_CYCLE successful follows total (follow-back first, keyword fills), ~75–105 s apart
 //   rest: PACE_REST_MIN–PACE_REST_MAX minutes with ZERO follows of any kind, then repeat
-// Keyword still reserves daily room via keywordReserve so follow-back cannot starve the 250 pool.
+// Follow-back reserves daily room via followbackReserve so keyword cannot starve pending follow-backs.
 // ---------------------------------------------------------------------------------------------
 export const PACE_CYCLE = 10;
 export const PACE_REST_MS = () => 10 * 60_000 + Math.floor(Math.random() * 5 * 60_000); // 10–15 min
 export const PACE_GAP_MS = () => 75_000 + Math.floor(Math.random() * 30_001); // ~90s ±15s
-export const KW_PACE_MS = 30 * 60_000; // for daily keywordReserve time budget (~10 / 30 min)
+export const FB_PACE_MS = 30 * 60_000; // for daily followbackReserve time budget (~10 / 30 min)
 export const POOL_DIR = path.join(DATA_DIR, "keyword-candidates");
 const PACE_FILE = path.join(DATA_DIR, "follow-pace.json");
 
@@ -224,50 +226,61 @@ export async function waitForSharedWork(onWait) {
 }
 
 /**
- * Daily room reserved for keyword follow = what keyword can still do today:
- *   min(poolSize - keyword follows today, untried candidates left in today's pool,
- *       10 per 30 min until Shanghai midnight). 0 when keyword follow is off or stopped.
+ * Follow-back targets still waiting, computed from cache.json the same way followback.mjs does:
+ * followers I do not follow, blue-V only, never unfollowed by us (log.jsonl), not already followed
+ * (ok/pending) by follow-back or keyword follow.
  */
-export function keywordReserve(cfg = loadConfig()) {
-  const kw = cfg.keywordfollow;
-  const counts = followCountsToday();
-  if (!kw.enabled || stopFlagToday()) return { reserve: 0, why: kw.enabled ? "stopped for day" : "keyword off", counts };
-  const st = readJson(KW_STATUS);
-  if (st && ["pool_exhausted", "stopped_auth"].includes(st.state) && pidAliveOf(st)) return { reserve: 0, why: `keyword ${st.state}`, counts };
-  const day = dayKey(new Date());
-  const left = Math.max(0, kw.poolSize - counts.keyword);
-  let untried = left;
-  const pool = readJson(path.join(POOL_DIR, `${day}.json`));
-  if (pool?.candidates) {
-    const gone = new Set();
-    for (const e of readJsonl(KW_LOG)) if (e.id && (e.result === "ok" || e.day === day)) gone.add(e.id);
-    for (const e of readJsonl(FB_LOG)) if (e.id && (e.result === "ok" || e.pending)) gone.add(e.id);
-    const cache = readJson(path.join(DATA_DIR, "cache.json"));
-    for (const u of cache?.following ?? []) gone.add(u.id);
-    untried = pool.candidates.filter((c) => !gone.has(c.id)).length;
-  }
-  const byTime = Math.ceil(msUntilNextShanghaiMidnight() / KW_PACE_MS) * 10;
-  return { reserve: Math.min(left, untried, byTime), left, untried, byTime, counts };
+export function followbackTargetsFromCache() {
+  const cache = readJson(path.join(DATA_DIR, "cache.json"));
+  if (!cache?.followers) return null;
+  const gone = new Set((cache.following ?? []).map((u) => u.id));
+  for (const id of loadAlreadyUnfollowedIds()) gone.add(id);
+  for (const e of readJsonl(FB_LOG)) if (e.id && (e.result === "ok" || e.pending)) gone.add(e.id);
+  for (const e of readJsonl(KW_LOG)) if (e.id && (e.result === "ok" || e.pending)) gone.add(e.id);
+  return cache.followers.filter((u) => u?.id && !gone.has(u.id) && isBlueV(u)).length;
 }
 
 /**
- * May follow-back take a slot in the current shared work window?
- * Keyword has priority: yield while keyword is actively following / building / about to follow
- * with remaining pool + remaining pace slots. During shared rest both wait via waitForSharedWork.
+ * Daily room reserved for follow-back = what follow-back can still do today:
+ *   min(blue-V follow-back targets still waiting (cache.json, capped by the daemon's own
+ *       targetsRemaining when its status is fresh), 10 per 30 min until Shanghai midnight).
+ * 0 when follow-back is off, stopped, or not running.
  */
-export function keywordYieldsSlot(cfg = loadConfig()) {
-  if (!cfg.keywordfollow.enabled) return { ok: true, why: "keyword off" };
+export function followbackReserve(cfg = loadConfig()) {
+  const counts = followCountsToday();
+  if (!cfg.followback.enabled || stopFlagToday()) return { reserve: 0, why: cfg.followback.enabled ? "stopped for day" : "follow-back off", counts };
+  const st = readJson(FB_STATUS);
+  if (!st || !pidAliveOf(st)) return { reserve: 0, why: "follow-back not running", counts };
+  if (["stopped_auth", "fatal", "disabled"].includes(st.state)) return { reserve: 0, why: `follow-back ${st.state}`, counts };
+  let targets = followbackTargetsFromCache() ?? 0;
+  const fresh = st.updated && Date.now() - Date.parse(st.updated) < 90 * 60_000;
+  if (fresh && Number.isFinite(st.targetsRemaining)) targets = Math.min(targets, st.targetsRemaining);
+  const byTime = Math.ceil(msUntilNextShanghaiMidnight() / FB_PACE_MS) * 10;
+  return { reserve: Math.max(0, Math.min(targets, byTime)), targets, byTime, counts };
+}
+
+/**
+ * May keyword follow take a slot in the current shared work window?
+ * Follow-back has priority: keyword yields while follow-back still has blue-V targets and is
+ * actively following / about to follow. Follow-back writes "window_yield" / "idle" when it has
+ * nothing more for this window. During shared rest both wait via waitForSharedWork.
+ */
+export function followbackYieldsSlot(cfg = loadConfig()) {
+  if (!cfg.followback.enabled) return { ok: true, why: "follow-back off" };
   if (stopFlagToday()) return { ok: true, why: "stopped" };
-  const st = readJson(KW_STATUS);
-  if (!st || !pidAliveOf(st)) return { ok: true, why: "keyword not running" };
-  if (["pool_exhausted", "daily_cap", "disabled", "stopped_for_day", "fatal", "stopped_auth", "search_failed"].includes(st.state)) {
-    return { ok: true, why: `keyword ${st.state}` };
+  const st = readJson(FB_STATUS);
+  if (!st || !pidAliveOf(st)) return { ok: true, why: "follow-back not running" };
+  if (["idle", "daily_cap", "disabled", "stopped_for_day", "fatal", "stopped_auth"].includes(st.state)) {
+    return { ok: true, why: `follow-back ${st.state}` };
   }
-  // Keyword is in shared rest with us — waitForSharedWork handles it; treat as yielded for fill logic
-  if (st.state === "shared_rest") return { ok: true, why: "keyword shared_rest" };
-  // Keyword finished its share of this window and is waiting for follow-back to fill / rest to start
-  if (st.state === "window_yield") return { ok: true, why: "keyword window_yield" };
-  // Actively following / rechecking / waiting on X window → keyword still wants slots
-  const retry = Date.now() + 45_000;
-  return { ok: false, why: `keyword ${st.state}`, retryAt: retry };
+  // Follow-back finished its share of this window (no more targets right now)
+  if (st.state === "window_yield") return { ok: true, why: "follow-back window_yield" };
+  // Nothing left for follow-back to do today
+  if (followbackReserve(cfg).reserve <= 0) return { ok: true, why: "no follow-back targets" };
+  // Still resting: waitForSharedWork handles it (rest ends for both at once; follow-back then goes first)
+  if (st.state === "shared_rest" && st.resumeAt && Date.parse(st.resumeAt) > Date.now()) return { ok: true, why: "follow-back shared_rest" };
+  // Stale status (daemon stuck somewhere without updating) — don't block keyword forever
+  if (st.updated && Date.now() - Date.parse(st.updated) > 20 * 60_000) return { ok: true, why: `follow-back status stale (${st.state})` };
+  // Actively following / rest just ended / waiting on X window → follow-back still wants slots
+  return { ok: false, why: `follow-back ${st.state}`, retryAt: Date.now() + 45_000 };
 }

@@ -7,8 +7,11 @@
  *     never followed/unfollowed before by these scripts (log.jsonl, followback.jsonl, keywordfollow.jsonl).
  *  2. Follows from that pool, sharing the combined daily cap (350) with followback.mjs.
  *     SHARED PACE (since 2026-10-24): both daemons share ONE cycle — ≤10 successful follows total
- *     per work window (keyword gets priority for the slots; follow-back fills the rest), then a
- *     shared rest of 10–15 min with ZERO follows, then repeat. Gaps 75–105 s. X window 45/50 + mutex.
+ *     per work window, then a shared rest of 10–15 min with ZERO follows, then repeat. Gaps 75–105 s.
+ *     X window 45/50 + mutex.
+ *     PRIORITY (swapped 2026-10-24 21:04 Asia/Taipei): follow-back of blue-V followers takes the
+ *     window's slots first; keyword follow only fills what is left (followbackYieldsSlot), and its
+ *     daily room = cap − combined − what follow-back still needs (followbackReserve).
  *
  *   node keywordfollow.mjs              # daemon (start-keywordfollow.sh)
  *   node keywordfollow.mjs --build-only # just build today's pool and exit
@@ -21,7 +24,7 @@ import {
 } from "./unfollow.mjs";
 import {
   DATA_DIR, KW_LOG, KW_STATUS, FB_LOG, loadConfig, readJsonl, readJson, followCountsToday,
-  withFollowMutex, waitForWindow, stopFlagToday, setStopFlag, msUntilNextShanghaiMidnight, POOL_DIR, keywordReserve,
+  withFollowMutex, waitForWindow, stopFlagToday, setStopFlag, msUntilNextShanghaiMidnight, POOL_DIR, followbackReserve, followbackYieldsSlot,
   sharedPace, waitForSharedWork, beginSharedRest, PACE_CYCLE, PACE_GAP_MS,
 } from "./follow-common.mjs";
 
@@ -118,10 +121,11 @@ async function buildPool(credentials, userId, username) {
 
 function loadPool(day) { return readJson(poolPath(day)); }
 
-/** Keyword has priority: only the combined daily cap limits us (no room reserved for follow-back). */
+/** Follow-back has priority: keyword room = cap − combined − follow-backs still waiting (followbackReserve). */
 function keywordAllowance(cap) {
-  const c = followCountsToday();
-  return { allowed: Math.max(0, cap - c.combined), ...c };
+  const r = followbackReserve();
+  const c = r.counts;
+  return { allowed: Math.max(0, cap - c.combined - r.reserve), followbackReserve: r.reserve, ...c };
 }
 
 async function recheck(credentials, batch) {
@@ -142,7 +146,7 @@ async function main() {
     const cfg = loadConfig();
     console.log(JSON.stringify({ me: username, pool: pool ? { date: pool.date, count: pool.count, error: pool.error,
       sample: pool.candidates.slice(0, 8).map((c) => `@${c.username} (${c.followers_count})`) } : null,
-      allowance: keywordAllowance(cfg.combinedFollowDailyCap), reserveForKeyword: keywordReserve(cfg) }, null, 2));
+      allowance: keywordAllowance(cfg.combinedFollowDailyCap), reserveForFollowback: followbackReserve(cfg), gate: followbackYieldsSlot(cfg) }, null, 2));
     return;
   }
 
@@ -185,11 +189,21 @@ async function main() {
 
     const allow = keywordAllowance(cap);
     if (remaining.length === 0 || allow.allowed <= 0) {
-      const why = remaining.length === 0 ? "pool exhausted" : `combined cap (${allow.combined}/${cap})`;
-      // Yield the rest of this window's slots to follow-back; do not start a private rest.
-      writeStatus({ state: remaining.length === 0 ? "pool_exhausted" : "daily_cap", why, resumeAt: new Date(Date.now() + 60_000).toISOString() });
-      say(`${why}; yielding shared window to follow-back`);
-      await sleep(60_000); continue;
+      const capHit = allow.combined >= cap;
+      const why = remaining.length === 0 ? "pool exhausted" : capHit ? `combined cap (${allow.combined}/${cap})`
+        : `room reserved for follow-back (${allow.combined}/${cap}, ${allow.followbackReserve} follow-backs waiting)`;
+      const state = remaining.length === 0 ? "pool_exhausted" : capHit ? "daily_cap" : "reserved_for_followback";
+      const wait = state === "reserved_for_followback" ? 5 * 60_000 : 60_000;
+      writeStatus({ state, why, resumeAt: new Date(Date.now() + wait).toISOString() });
+      say(`${why}; leaving shared window to follow-back`);
+      await sleep(wait); continue;
+    }
+
+    // Follow-back goes first: wait while it is still claiming this window's slots.
+    const gate = followbackYieldsSlot(cfg);
+    if (!gate.ok) {
+      writeStatus({ state: "waiting_for_followback", why: gate.why, resumeAt: new Date(gate.retryAt).toISOString() });
+      await sleep(Math.max(20_000, Math.min(gate.retryAt - Date.now(), 45_000))); continue;
     }
 
     pace = sharedPace();
@@ -199,7 +213,7 @@ async function main() {
       await sleep(Math.min(r.ms, 5 * 60_000)); continue;
     }
 
-    // Take up to `pace.remaining` slots this window (keyword priority).
+    // Fill up to `pace.remaining` slots left over by follow-back in this window.
     const batch = remaining.slice(0, Math.min(5, pace.remaining));
     const fresh = await recheck(credentials, batch);
     if (!fresh) { // never follow without a fresh blue-V re-check
@@ -211,6 +225,7 @@ async function main() {
       if (stopFlagToday() || !loadConfig().keywordfollow.enabled) break;
       pace = sharedPace();
       if (pace.phase !== "work" || pace.remaining <= 0) break;
+      if (!followbackYieldsSlot().ok) break; // follow-back wants the slot again
       if (excludedIds(userId).has(c.id)) { skip.add(c.id); continue; }
       const u = fresh?.get(c.id);
       if (!u) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "not found/suspended" }); continue; }
@@ -227,6 +242,7 @@ async function main() {
         const p2 = sharedPace();
         if (p2.phase !== "work" || p2.remaining <= 0) return null;
         if (keywordAllowance(loadConfig().combinedFollowDailyCap).allowed <= 0) return null;
+        if (!followbackYieldsSlot().ok) return null; // follow-back has priority for this slot
         const res = await xRequest(credentials, "POST", `/2/users/${userId}/following`, undefined, { target_user_id: c.id });
         const entry = { time: ts(), day, username: c.username, id: c.id, keyword: c.keyword, followers: u?.public_metrics?.followers_count ?? c.followers_count,
           verified_type: u?.verified_type ?? c.verified_type, result: res.ok ? "ok" : `HTTP ${res.status}`, pending: !!res.body?.data?.pending_follow,
@@ -259,12 +275,8 @@ async function main() {
       }
       await sleep(PACE_GAP_MS());
     }
-    // If we still have pace slots but no more keyword candidates right now, yield so follow-back can fill.
-    pace = sharedPace();
-    if (pace.phase === "work" && pace.remaining > 0) {
-      writeStatus({ state: "window_yield", why: "yield remaining slots to follow-back", paceUsed: pace.used, paceRemaining: pace.remaining });
-      await sleep(30_000);
-    }
+    // Brief pause before re-checking the follow-back gate / pace.
+    await sleep(5_000);
   }
 }
 

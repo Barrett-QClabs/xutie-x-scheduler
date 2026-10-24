@@ -18,14 +18,16 @@ follow rules (follow-back + keyword follow share ONE daily budget)
 - Account-level 403 follow limit (or 2 consecutive 403s in keyword follow) -> follow-stop.json; both daemons
   stop following until the next Asia/Shanghai day.
 - SHARED PACE (changed 2026-10-24): both daemons share ONE work/rest cycle.
-  Work window: ≤ 10 successful follows TOTAL (keyword + follow-back mixed), ~75–105 s apart.
+  Work window: ≤ 10 successful follows TOTAL (follow-back + keyword mixed), ~75–105 s apart.
   Then a shared rest of 10–15 min (random) with ZERO follows of any kind, then repeat.
   State: follow-pace.json (workStartedAt / restUntil). Both daemons call waitForSharedWork.
-- KEYWORD PRIORITY within each work window: keyword follow of NEW people takes slots first;
-  follow-back fills remaining slots in the SAME window (keywordYieldsSlot / window_yield).
-  Daily keywordReserve still applies so follow-back cannot consume the 250-candidate budget:
-  reserve = min(250 − keyword follows today, untried pool left, 10 per 30 min until Shanghai midnight);
-  0 if keyword is off. Follow-back only follows when combined + reserve < 350.
+- FOLLOW-BACK PRIORITY within each work window (swapped 2026-10-24 21:04 Asia/Taipei; before that keyword
+  went first): follow-back of blue-V followers I don't follow yet takes slots first; keyword follow of NEW
+  people fills the remaining slots in the SAME window (followbackYieldsSlot / follow-back window_yield/idle).
+  Follow-back has no daily reserve limit beyond the combined 350 cap.
+  Daily followbackReserve keeps room for follow-backs still waiting so keyword cannot use it up:
+  reserve = min(blue-V follow-back targets still waiting, 10 per 30 min until Shanghai midnight);
+  0 if follow-back is off / not running. Keyword only follows when combined + reserve < 350.
 - Keyword pool: once per day keyword-candidates/YYYY-MM-DD.json, 250 accounts from X API v2 recent search
   ("<kw> is:verified -is:retweet") for keywords in automation.config.json (AI, 人工智能, 商业, 创业, crypto,
   币圈, dating, 约会, 两性, 情感). Filters: blue-V/any verification, followers < 1000, not protected,
