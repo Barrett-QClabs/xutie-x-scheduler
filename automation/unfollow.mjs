@@ -24,12 +24,20 @@ const SCHEDULER_ROOT = process.env.XUTIE_ROOT || "/workspace/xutie-x-scheduler";
 const ENV_PATH = path.join(SCHEDULER_ROOT, ".env.local");
 const DB_PATH = path.join(SCHEDULER_ROOT, "data", "xqueue.sqlite");
 const CACHE_PATH = path.join(DATA_DIR, "cache.json");
+const ME_CACHE_PATH = path.join(DATA_DIR, "me-cache.json");
 const WHITELIST_PATH = path.join(DATA_DIR, "whitelist.txt");
 const LOG_PATH = path.join(DATA_DIR, "log.jsonl");
+const FB_LOG_PATH = path.join(DATA_DIR, "followback.jsonl");
+const KW_LOG_PATH = path.join(DATA_DIR, "keywordfollow.jsonl");
 const API_BASE = "https://api.x.com";
-const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
+/** Full following+followers refresh at most once per day (Asia/Shanghai). */
+const FULL_REFRESH_MS = 24 * 60 * 60 * 1000;
+/** Reuse cache on 429/503 if younger than this. */
+const CACHE_FALLBACK_MS = 6 * 60 * 60 * 1000;
 const USER_FIELDS = "verified,verified_type,public_metrics,username,protected";
 const PAGE_SIZE = 1000;
+/** Pre-action user lookups (follow re-check / unfollow blue-V re-check) batch this many ids per GET /2/users. */
+export const USER_LOOKUP_BATCH = 14;
 const PROTECT_TOP_N = 0; // 2026-10-24: removed at user request (400-most-recent blue-V guard covers new follows)
 // Rules 2026-10-24: whitelist.txt + the first PROTECT_TOP_N of the following list (most recent first) are
 // always untouchable. The first PROTECT_RECENT_N (400) only protect BLUE-V non-mutuals (time to follow back);
@@ -150,6 +158,135 @@ function buildAuthorizationHeader({ method, url, credentials, extraParams }) {
 export function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/** 402 (credits depleted): back off 5–10 min instead of retrying every minute. */
+export function creditsBackoffMs() {
+  return 5 * 60_000 + Math.floor(Math.random() * 5 * 60_000);
+}
+
+/** Cached GET /2/users/me (user id rarely changes). Falls back to storedUserId from credentials. */
+export async function getMe(credentials, stored = {}) {
+  try {
+    const cached = JSON.parse(fs.readFileSync(ME_CACHE_PATH, "utf8"));
+    if (cached?.id && cached?.username && Date.now() - Date.parse(cached.fetchedAt || 0) < 7 * 86400_000) {
+      return { id: cached.id, username: cached.username, fromCache: true };
+    }
+  } catch {}
+  if (stored.storedUserId && stored.storedUsername) {
+    // Prefer live confirm once; if that fails later, still usable.
+  }
+  const meRes = await xRequest(credentials, "GET", "/2/users/me", { "user.fields": "id,username,name" });
+  if (!meRes.ok) {
+    if (stored.storedUserId && stored.storedUsername) {
+      return { id: stored.storedUserId, username: stored.storedUsername, fromCache: true, stale: true };
+    }
+    const err = new Error(`GET /2/users/me failed: HTTP ${meRes.status} ${extractErrorMessage(meRes.body)}`);
+    err.status = meRes.status;
+    throw err;
+  }
+  const me = meRes.body.data;
+  try { fs.writeFileSync(ME_CACHE_PATH, JSON.stringify({ id: me.id, username: me.username, name: me.name, fetchedAt: new Date().toISOString() })); } catch {}
+  return { id: me.id, username: me.username, name: me.name, fromCache: false };
+}
+
+/**
+ * Batch GET /2/users?ids=... (up to USER_LOOKUP_BATCH). Returns Map id -> user, or null on failure.
+ * user.fields defaults include connection_status for follow/unfollow re-checks.
+ */
+export async function lookupUsers(credentials, ids, userFields = "connection_status,verified,verified_type,public_metrics,protected,username,name,description") {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (!unique.length) return new Map();
+  const out = new Map();
+  for (let i = 0; i < unique.length; i += USER_LOOKUP_BATCH) {
+    const batch = unique.slice(i, i + USER_LOOKUP_BATCH);
+    const res = await xRequest(credentials, "GET", "/2/users", { ids: batch.join(","), "user.fields": userFields });
+    if (!res.ok) {
+      const err = new Error(`GET /2/users failed: HTTP ${res.status} ${extractErrorMessage(res.body)}`);
+      err.status = res.status;
+      err.rate = res.rate;
+      throw err;
+    }
+    for (const u of res.body?.data ?? []) out.set(u.id, u);
+  }
+  return out;
+}
+
+function readJsonlLines(file) {
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+}
+
+/** Apply follow/unfollow logs since cache.deltaThrough onto following list (idempotent). */
+export function applyListDeltas(cache) {
+  if (!cache || !Array.isArray(cache.following)) return cache;
+  const since = cache.deltaThrough ? Date.parse(cache.deltaThrough) : 0;
+  const following = cache.following.slice();
+  const byId = new Map(following.map((u, i) => [u.id, i]));
+  let changed = false;
+  for (const file of [FB_LOG_PATH, KW_LOG_PATH]) {
+    for (const e of readJsonlLines(file)) {
+      if (!e?.id || e.result !== "ok" || e.pending) continue;
+      const t = e.time ? Date.parse(e.time) : 0;
+      if (t && t <= since) continue;
+      if (byId.has(e.id)) continue;
+      const u = { id: e.id, username: e.username ?? "", verified: true, verified_type: e.verified_type ?? "blue",
+        public_metrics: { followers_count: e.followers ?? 0 }, protected: !!e.protected };
+      following.unshift(u);
+      byId.set(e.id, 0);
+      changed = true;
+    }
+  }
+  for (const e of readJsonlLines(LOG_PATH)) {
+    if (!e?.id || e.result !== "ok") continue;
+    const t = e.time ? Date.parse(e.time) : 0;
+    if (t && t <= since) continue;
+    const idx = byId.get(e.id);
+    if (idx === undefined) continue;
+    following[idx] = null;
+    byId.delete(e.id);
+    changed = true;
+  }
+  if (changed) cache.following = following.filter(Boolean);
+  cache.deltaThrough = new Date().toISOString();
+  return cache;
+}
+
+/**
+ * Fetch newest followers pages (100 each) until we hit a known follower id, then merge new ones at front.
+ * Stops early so we don't re-read the whole followers list every cycle.
+ */
+export async function pageFollowersHead(credentials, userId, knownFollowerIds, maxPages = 5) {
+  const known = knownFollowerIds instanceof Set ? knownFollowerIds : new Set(knownFollowerIds ?? []);
+  const newest = [];
+  let paginationToken = undefined;
+  let pages = 0;
+  let lastRate = null;
+  let hitKnown = false;
+  // Empty known set: fetch a single page as a seed (caller should full-refresh instead when possible).
+  const pageLimit = known.size === 0 ? 1 : maxPages;
+  while (pages < pageLimit && !hitKnown) {
+    const query = { max_results: "100", "user.fields": USER_FIELDS };
+    if (paginationToken) query.pagination_token = paginationToken;
+    const res = await xRequest(credentials, "GET", `/2/users/${encodeURIComponent(userId)}/followers`, query);
+    lastRate = res.rate;
+    if (!res.ok) {
+      const err = new Error(`followers head fetch failed: HTTP ${res.status} ${extractErrorMessage(res.body)}`);
+      err.status = res.status; err.rate = res.rate; err.body = res.body; throw err;
+    }
+    pages += 1;
+    const page = Array.isArray(res.body?.data) ? res.body.data : [];
+    for (const u of page) {
+      if (known.has(u.id)) { hitKnown = true; break; }
+      newest.push(u);
+    }
+    if (known.size === 0) { hitKnown = true; break; }
+    paginationToken = res.body?.meta?.next_token;
+    if (!paginationToken) { hitKnown = true; break; }
+    await sleep(300);
+  }
+  return { newest, pages, rate: lastRate, hitKnown };
+}
+
 
 function rateHeaders(response) {
   return {
@@ -314,41 +451,84 @@ export async function pageUsers(credentials, kind, userId) {
   return { users, pages, rate: lastRate };
 }
 
-export async function fetchListsOrCache(credentials, userId) {
+/**
+ * Shared following+followers cache for unfollow + follow-back.
+ * Full refresh at most once per 24h; otherwise apply local deltas from follow/unfollow logs.
+ * opts.headFollowers: also pull newest follower pages until a known id (for follow-back).
+ * opts.forceFull: force a full refresh now.
+ */
+export async function fetchListsOrCache(credentials, userId, opts = {}) {
   const existing = loadCache();
-  const age = existing?.timestamp ? Date.now() - Date.parse(existing.timestamp) : Infinity;
-  const freshEnough = age < CACHE_MAX_AGE_MS;
+  let cache = existing && existing.userId === userId ? { ...existing, following: [...(existing.following ?? [])], followers: [...(existing.followers ?? [])] } : null;
+  if (cache) applyListDeltas(cache);
 
-  try {
-    const following = await pageUsers(credentials, "following", userId);
-    const followers = await pageUsers(credentials, "followers", userId);
-    const cache = {
-      timestamp: new Date().toISOString(),
-      userId,
-      following: following.users,
-      followers: followers.users,
-      meta: {
-        followingPages: following.pages,
-        followersPages: followers.pages,
-        followingRate: following.rate,
-        followersRate: followers.rate,
-      },
-    };
-    saveCache(cache);
-    return { ...cache, fromCache: false };
-  } catch (err) {
-    if ((err.status === 429 || err.status === 503) && existing && freshEnough) {
-      console.error(
-        `[warn] ${err.message}; reusing cache from ${existing.timestamp} (age ${Math.round(age / 60000)}m)`,
-      );
-      return { ...existing, fromCache: true, cacheWarning: err.message };
+  const fullAt = cache?.fullRefreshAt ? Date.parse(cache.fullRefreshAt) : 0;
+  const needFull = opts.forceFull || !cache || !cache.following?.length || !cache.followers?.length || (Date.now() - fullAt) >= FULL_REFRESH_MS;
+
+  if (needFull) {
+    try {
+      const following = await pageUsers(credentials, "following", userId);
+      const followers = await pageUsers(credentials, "followers", userId);
+      cache = {
+        timestamp: new Date().toISOString(),
+        fullRefreshAt: new Date().toISOString(),
+        deltaThrough: new Date().toISOString(),
+        userId,
+        following: following.users,
+        followers: followers.users,
+        meta: {
+          followingPages: following.pages,
+          followersPages: followers.pages,
+          followingRate: following.rate,
+          followersRate: followers.rate,
+          mode: "full",
+        },
+      };
+      saveCache(cache);
+      return { ...cache, fromCache: false, mode: "full" };
+    } catch (err) {
+      const age = existing?.timestamp ? Date.now() - Date.parse(existing.timestamp) : Infinity;
+      if (existing && age < CACHE_FALLBACK_MS && (err.status === 429 || err.status === 503 || err.status === 402)) {
+        console.error(`[warn] ${err.message}; reusing cache from ${existing.timestamp} (age ${Math.round(age / 60000)}m)`);
+        const reused = { ...existing };
+        applyListDeltas(reused);
+        saveCache(reused);
+        return { ...reused, fromCache: true, cacheWarning: err.message, mode: "fallback" };
+      }
+      throw err;
     }
-    // Also reuse any cache younger than 6h on any rate-limit-ish failure for those endpoints
-    if (err.status === 429 && existing && freshEnough) {
-      return { ...existing, fromCache: true, cacheWarning: err.message };
-    }
-    throw err;
   }
+
+  // Incremental: optional head-of-followers for new follow-backs
+  if (opts.headFollowers) {
+    try {
+      const known = new Set((cache.followers ?? []).map((u) => u.id));
+      const head = await pageFollowersHead(credentials, userId, known);
+      if (head.newest.length) {
+        const seen = new Set();
+        const merged = [];
+        for (const u of [...head.newest, ...(cache.followers ?? [])]) {
+          if (!u?.id || seen.has(u.id)) continue;
+          seen.add(u.id);
+          merged.push(u);
+        }
+        cache.followers = merged;
+        cache.timestamp = new Date().toISOString();
+        cache.meta = { ...(cache.meta ?? {}), lastHeadPages: head.pages, lastHeadNew: head.newest.length, mode: "delta+head" };
+      } else {
+        cache.meta = { ...(cache.meta ?? {}), lastHeadPages: head.pages, lastHeadNew: 0, mode: "delta" };
+      }
+    } catch (err) {
+      if (err.status === 402 || err.status === 429 || err.status === 503) {
+        console.error(`[warn] followers head: ${err.message}; continuing with delta-only cache`);
+        cache.cacheWarning = err.message;
+      } else throw err;
+    }
+  }
+
+  cache.timestamp = cache.timestamp ?? new Date().toISOString();
+  saveCache(cache);
+  return { ...cache, fromCache: true, mode: cache.meta?.mode ?? "delta" };
 }
 
 export function newTodayIds(following) {
@@ -412,13 +592,20 @@ function classifyNonMutual(following, followers, whitelist, skipIds, protectedTo
     blueMutual, blueRecentProtected, whitelisted, mutualInPlan, protectedCount };
 }
 
-// Fresh connection_status right before a DELETE: a blue-V target that now follows back is skipped.
-async function freshFollowsBack(credentials, id) {
-  const res = await xRequest(credentials, "GET", "/2/users", { ids: id, "user.fields": "connection_status,verified,verified_type" });
-  if (!res.ok) return { ok: false, rate: res.rate };
-  const u = res.body?.data?.[0];
-  if (!u) return { ok: true, gone: true };
-  return { ok: true, followsBack: (u.connection_status ?? []).includes("followed_by"), blueV: isBlueV(u) };
+// Fresh connection_status for up to USER_LOOKUP_BATCH blue-V targets before DELETEs.
+async function freshFollowsBackBatch(credentials, ids) {
+  try {
+    const map = await lookupUsers(credentials, ids, "connection_status,verified,verified_type,username");
+    const out = new Map();
+    for (const id of ids) {
+      const u = map.get(id);
+      if (!u) out.set(id, { ok: true, gone: true });
+      else out.set(id, { ok: true, followsBack: (u.connection_status ?? []).includes("followed_by"), blueV: isBlueV(u), user: u });
+    }
+    return { ok: true, map: out };
+  } catch (err) {
+    return { ok: false, status: err.status, error: err.message };
+  }
 }
 
 async function unfollowOne(credentials, sourceUserId, target) {
@@ -457,21 +644,13 @@ async function main() {
   }
   const { credentials, storedUsername, storedUserId } = loadCredentials();
 
-  // GET /2/users/me
-  const meRes = await xRequest(credentials, "GET", "/2/users/me", {
-    "user.fields": "id,username,name",
-  });
-  if (!meRes.ok) {
-    const summary = {
-      ok: false,
-      authType: "OAuth 1.0a user context (apiKey / apiSecret / accessToken / accessTokenSecret)",
-      error: `GET /2/users/me failed: HTTP ${meRes.status} ${extractErrorMessage(meRes.body)}`,
-      rate: meRes.rate,
-    };
-    console.log(JSON.stringify(summary, null, 2));
+  let me;
+  try {
+    me = await getMe(credentials, { storedUserId, storedUsername });
+  } catch (err) {
+    console.log(JSON.stringify({ ok: false, authType: "OAuth 1.0a user context", error: err.message }, null, 2));
     process.exit(1);
   }
-  const me = meRes.body.data;
   const userId = me.id;
   if (storedUsername && me.username && storedUsername.toLowerCase() !== me.username.toLowerCase()) {
     console.error(`[warn] stored username ${storedUsername} != me ${me.username}`);
@@ -511,6 +690,30 @@ async function main() {
   let stoppedReason = null;
 
   if (!dryRun) {
+    // Prefetch blue-V re-checks in batches of USER_LOOKUP_BATCH; act at normal ~3 min pace.
+    let freshCache = new Map(); // id -> {ok, followsBack, gone, blueV}
+    let freshPrefetchIdx = 0;
+    async function ensureFresh(fromIdx) {
+      const need = [];
+      for (let j = fromIdx; j < targets.length && need.length < USER_LOOKUP_BATCH; j++) {
+        const t = targets[j];
+        if (!t.blueV) continue;
+        if (freshCache.has(t.id)) continue;
+        need.push(t.id);
+      }
+      if (!need.length) return true;
+      const batch = await freshFollowsBackBatch(credentials, need);
+      if (!batch.ok) {
+        if (batch.status === 402) {
+          const w = creditsBackoffMs();
+          console.error(`[warn] blue-V re-check 402; backing off ${Math.round(w / 1000)}s`);
+          await sleep(w);
+        }
+        return false;
+      }
+      for (const [id, v] of batch.map) freshCache.set(id, v);
+      return true;
+    }
     for (let i = 0; i < targets.length; i++) {
       const target = targets[i];
       // Safety re-checks before every DELETE
@@ -520,10 +723,13 @@ async function main() {
       if (attempts >= allowed) break;
       if (countTodayUnfollows() >= DAILY_CAP) { stoppedReason = "daily_cap_reached"; break; }
       if (target.blueV) {
-        // blue-V non-mutual: confirm they still don't follow back (lists may be up to 6h old)
-        const fresh = await freshFollowsBack(credentials, target.id);
-        if (!fresh.ok || fresh.followsBack) {
-          console.error(`[info] skip blue-V ${target.username}: ${fresh.ok ? "now follows back" : "re-check failed"}`);
+        if (!freshCache.has(target.id)) {
+          const ok = await ensureFresh(i);
+          if (!ok) { stoppedReason = "recheck_failed"; break; }
+        }
+        const fresh = freshCache.get(target.id);
+        if (!fresh || fresh.followsBack || fresh.gone) {
+          console.error(`[info] skip blue-V ${target.username}: ${!fresh ? "re-check missing" : fresh.gone ? "gone" : "now follows back"}`);
           continue;
         }
       }

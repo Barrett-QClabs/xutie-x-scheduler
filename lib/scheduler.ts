@@ -81,10 +81,9 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
   if (!tryAcquireLock(now)) return { action: "busy" };
   try {
     deferExtraOverdue(now, options?.random);
-    const upcoming = pendingInOrder()[0];
-    if (!upcoming) return { action: "idle" };
-    const watching = new Date(upcoming.scheduledAt).getTime() - now.getTime() <= WATCH_AHEAD_MS;
-    if (!watching) return { action: "idle" };
+    // Read X only when a post is actually due (one fresh timeline read per post),
+    // not while waiting for it: this keeps billable X reads to ~1 per post.
+    if (!nextDueTweet(now)) return { action: "idle" };
 
     let client = options?.client;
     if (!client) {
@@ -106,7 +105,7 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
     }
 
     // Right before posting, always read X fresh so a manual post from seconds ago is seen.
-    const gap = await recentPostGap(now, client, fresh.intervalMinutes * 60_000, Boolean(nextDueTweet(now)));
+    const gap = await recentPostGap(now, client, fresh.intervalMinutes * 60_000, true);
     // A new manual post on X re-anchors the queue once (random extra rolled once and stored).
     if (gap?.manual && gap.id && gap.id !== getAnchoredManualId()) {
       setAnchoredManualId(gap.id);
@@ -145,8 +144,12 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
         patchTweet(due.id, { status: "failed", errorMessage: message, attemptCount: due.attemptCount + 1 });
         return { action: "failed", id: due.id };
       }
-      if (error.kind === "rate_limit") {
-        const until = error.resetAt ?? new Date(now.getTime() + 15 * 60_000);
+      if (error.kind === "rate_limit" || error.kind === "credits") {
+        // 402 (API credits used up): pause ~10 min instead of marking the post failed.
+        const until =
+          error.kind === "credits"
+            ? new Date(now.getTime() + 10 * 60_000)
+            : (error.resetAt ?? new Date(now.getTime() + 15 * 60_000));
         patchQueueSettings({ rateLimitUntil: until.toISOString(), lastError: "rate_limit" });
         delayPendingForRateLimit(until, options?.random);
         return { action: "rate_limited", until: until.toISOString() };
@@ -219,9 +222,6 @@ async function postUnit(client: XClient, due: Tweet): Promise<{ id: string }> {
   }
   return { id: headId };
 }
-
-/** Watch the X timeline (cached for TIMELINE_CACHE_TTL_MS) while the next post is this close. */
-const WATCH_AHEAD_MS = 20 * 60_000;
 
 const DUE_CACHE_TTL_MS = 10_000;
 

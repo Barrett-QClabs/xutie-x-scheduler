@@ -26,7 +26,8 @@ export function StatsPanel({ zh }: { zh: boolean }) {
     try { setS(await api<Stats>(`/api/stats/daily?days=7${refresh ? "&refresh=1" : ""}`)); setErr(null); }
     catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   }, []);
-  useEffect(() => { load(); const id = setInterval(() => load(), 5 * 60_000); return () => clearInterval(id); }, [load]);
+  // Auto-refresh every 30 min while the tab is visible (the server caches X reads anyway).
+  useEffect(() => { load(); const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 30 * 60_000); return () => clearInterval(id); }, [load]);
 
   const cols = zh
     ? ["X 日（UTC）", "关注多少人", "回关多少人", "回关关注比", "取关多少人", "发了多少贴", "回复多少条", "曝光量"]

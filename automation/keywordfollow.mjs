@@ -27,6 +27,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   loadCredentials, xRequest, extractErrorMessage, isBlueV, dayKey, sleep, loadCache, loadAlreadyUnfollowedIds,
+  getMe, lookupUsers, USER_LOOKUP_BATCH, creditsBackoffMs,
 } from "./unfollow.mjs";
 import {
   DATA_DIR, KW_LOG, KW_STATUS, FB_LOG, loadConfig, readJsonl, readJson, followCountsToday,
@@ -71,6 +72,42 @@ function excludedIds(userId) {
 }
 
 const poolPath = (day) => path.join(POOL_DIR, `${day}.json`);
+const REJECTED_PATH = path.join(DATA_DIR, "keyword-rejected-authors.json");
+
+/** Persist author ids rejected by filters so search expansions don't re-bill them. */
+function loadRejectedAuthors() {
+  try {
+    const j = JSON.parse(fs.readFileSync(REJECTED_PATH, "utf8"));
+    return new Set(Array.isArray(j?.ids) ? j.ids : []);
+  } catch { return new Set(); }
+}
+function saveRejectedAuthors(set) {
+  // Cap growth: keep the newest ~50k ids
+  const ids = [...set];
+  const trimmed = ids.length > 50_000 ? ids.slice(-50_000) : ids;
+  try { fs.writeFileSync(REJECTED_PATH, JSON.stringify({ updated: ts(), ids: trimmed })); } catch {}
+}
+function rememberRejected(set, id) {
+  if (!id || set.has(id)) return;
+  set.add(id);
+}
+
+/** Unused followable candidates from yesterday (and earlier) carried into today's pool. */
+function carryOverCandidates(day, exclude) {
+  const out = [];
+  const files = fs.readdirSync(POOL_DIR).filter((f) => f.endsWith(".json") && f < `${day}.json`).sort().reverse();
+  const tried = new Set(readJsonl(KW_LOG).filter((e) => e.result === "ok" || e.result === "skipped").map((e) => e.id));
+  for (const f of files.slice(0, 3)) { // look back a few days max
+    const pool = readJson(path.join(POOL_DIR, f));
+    for (const c of pool?.candidates ?? []) {
+      if (!c?.id || exclude.has(c.id) || tried.has(c.id)) continue;
+      if (c.zh_ok !== true) continue;
+      out.push({ ...c, carriedFrom: pool.date });
+      exclude.add(c.id);
+    }
+  }
+  return out;
+}
 
 /** Build today's pool; with `base` (today's existing pool) tops it up to poolSize, keeping its candidates. */
 async function buildPool(credentials, userId, username, base = null) {
@@ -78,12 +115,16 @@ async function buildPool(credentials, userId, username, base = null) {
   const day = dayKey(new Date());
   fs.mkdirSync(POOL_DIR, { recursive: true });
   const exclude = excludedIds(userId);
-  // also skip anyone already offered in an earlier day's pool (keeps pools fresh)
-  for (const f of fs.readdirSync(POOL_DIR).filter((f) => f < `${day}.json` && f.endsWith(".json"))) {
-    for (const c of readJson(path.join(POOL_DIR, f))?.candidates ?? []) exclude.add(c.id);
-  }
-  for (const c of base?.droppedNonChinese ?? []) exclude.add(c.id);
-  const candidates = new Map((base?.candidates ?? []).map((c) => [c.id, c]));
+  const rejectedAuthors = loadRejectedAuthors();
+  for (const id of rejectedAuthors) exclude.add(id);
+  // Skip authors already in earlier pools ONLY if we already followed/tried them;
+  // unused Chinese-zone candidates are carried over below instead of discarded.
+  for (const c of base?.droppedNonChinese ?? []) { exclude.add(c.id); rememberRejected(rejectedAuthors, c.id); }
+  const carried = base ? [] : carryOverCandidates(day, exclude);
+  const candidates = new Map([
+    ...carried.map((c) => [c.id, c]),
+    ...(base?.candidates ?? []).map((c) => [c.id, c]),
+  ]);
   const perKeyword = Object.fromEntries(cfg.keywords.map((k) => [k, { pages: 0, posts: 0, added: 0, ...(base?.perKeyword?.[k] ?? {}), done: false }]));
   const tokens = {};
   let pages = base?.searchPages ?? 0, postsRead = base?.postsRead ?? 0, error = null;
@@ -101,18 +142,22 @@ async function buildPool(credentials, userId, username, base = null) {
       const r = await xRequest(credentials, "GET", "/2/tweets/search/recent", q);
       pages += 1; perKeyword[kw].pages += 1;
       if (r.status === 429) { const w = Math.max(30_000, Number(r.rate.reset) * 1000 - Date.now() + 5_000); say(`search 429; waiting ${Math.round(w / 1000)}s`); await sleep(w); continue; }
+      if (r.status === 402) {
+        error = { status: 402, detail: extractErrorMessage(r.body) };
+        say(`search 402 credits; will back off`); break;
+      }
       if (!r.ok) { error = { status: r.status, detail: extractErrorMessage(r.body) }; say(`search failed HTTP ${r.status}: ${error.detail}`); break; }
       const tweets = r.body?.data ?? []; postsRead += tweets.length; perKeyword[kw].posts += tweets.length;
       const users = new Map((r.body?.includes?.users ?? []).map((u) => [u.id, u]));
       for (const t of tweets) {
         const u = users.get(t.author_id);
         if (!u || candidates.has(u.id)) continue;
-        if (!isBlueV(u)) { rejected.notVerified++; continue; }
-        if ((u.public_metrics?.followers_count ?? Infinity) >= cfg.maxFollowers) { rejected.tooManyFollowers++; continue; }
-        if (u.protected) { rejected.protected++; continue; }
+        if (!isBlueV(u)) { rejected.notVerified++; rememberRejected(rejectedAuthors, u.id); continue; }
+        if ((u.public_metrics?.followers_count ?? Infinity) >= cfg.maxFollowers) { rejected.tooManyFollowers++; rememberRejected(rejectedAuthors, u.id); continue; }
+        if (u.protected) { rejected.protected++; rememberRejected(rejectedAuthors, u.id); continue; }
         if (exclude.has(u.id) || u.username?.toLowerCase() === username.toLowerCase()) { rejected.excluded++; continue; }
         const zh = chineseZoneCheck({ tweetLang: t.lang, name: u.name, bio: u.description, tweetText: t.text });
-        if (!zh.ok) { rejected.notChinese++; continue; }
+        if (!zh.ok) { rejected.notChinese++; rememberRejected(rejectedAuthors, u.id); continue; }
         candidates.set(u.id, { id: u.id, username: u.username, name: u.name, followers_count: u.public_metrics.followers_count,
           verified: u.verified === true, verified_type: u.verified_type ?? null, keyword: kw, tweet_id: t.id, tweet_at: t.created_at,
           tweet_lang: t.lang ?? null, bio: (u.description ?? "").replace(/\s+/g, " ").slice(0, 160),
@@ -120,19 +165,23 @@ async function buildPool(credentials, userId, username, base = null) {
         perKeyword[kw].added += 1;
         if (candidates.size >= cfg.poolSize) break;
       }
+      if (candidates.size >= cfg.poolSize) break; // stop paging once pool is full
       tokens[kw] = r.body?.meta?.next_token;
       if (!tokens[kw]) perKeyword[kw].done = true;
     }
     if (error) break;
   }
+  saveRejectedAuthors(rejectedAuthors);
   const pool = { ...(base ?? {}), date: day, built: base?.built ?? ts(), ...(base ? { toppedUp: ts() } : {}),
     source: "x-api-v2-recent-search (user OAuth1)", keywords: cfg.keywords,
     target: cfg.poolSize, count: candidates.size, searchPages: pages, postsRead, perKeyword, rejected, error,
+    carriedFromPreviousDays: carried.length,
     filters: { verified: "verified==true or verified_type!=none", maxFollowers: cfg.maxFollowers, protected: false,
-      notFollowing: true, notPreviouslyFollowedOrUnfollowed: true, chineseZone: ZH_RULE, query: "<kw> lang:zh is:verified -is:retweet" },
+      notFollowing: true, notPreviouslyFollowedOrUnfollowed: true, chineseZone: ZH_RULE, query: "<kw> lang:zh is:verified -is:retweet",
+      rejectedAuthorsSkipList: true, carryOverUnused: true },
     candidates: [...candidates.values()], droppedNonChinese: base?.droppedNonChinese ?? [] };
   if (candidates.size > 0 || !error) fs.writeFileSync(poolPath(day), JSON.stringify(pool, null, 2));
-  say(`pool ${day}: ${pool.count}/${cfg.poolSize} candidates from ${pages} search pages (${postsRead} posts)${error ? `; error HTTP ${error.status}` : ""}`);
+  say(`pool ${day}: ${pool.count}/${cfg.poolSize} (carried ${carried.length}) from ${pages} search pages (${postsRead} posts)${error ? `; error HTTP ${error.status}` : ""}`);
   return pool;
 }
 
@@ -188,17 +237,18 @@ function keywordAllowance(cap) {
 }
 
 async function recheck(credentials, batch) {
-  const r = await xRequest(credentials, "GET", "/2/users", { ids: batch.map((c) => c.id).join(","),
-    "user.fields": "connection_status,verified,verified_type,public_metrics,protected,name,description" });
-  if (!r.ok) return null;
-  return new Map((r.body?.data ?? []).map((u) => [u.id, u]));
+  try {
+    return await lookupUsers(credentials, batch.map((c) => c.id));
+  } catch (err) {
+    err.recheck = true;
+    throw err;
+  }
 }
 
 async function main() {
-  const { credentials } = loadCredentials();
-  const me = await xRequest(credentials, "GET", "/2/users/me", { "user.fields": "id,username" });
-  if (!me.ok) throw new Error(`GET /2/users/me failed: HTTP ${me.status} ${extractErrorMessage(me.body)}`);
-  const userId = me.body.data.id, username = me.body.data.username;
+  const { credentials, storedUserId, storedUsername } = loadCredentials();
+  const me = await getMe(credentials, { storedUserId, storedUsername });
+  const userId = me.id, username = me.username;
 
   if (refilterOnly) {
     let pool = loadPool(dayKey(new Date()));
@@ -258,8 +308,9 @@ async function main() {
       writeStatus({ state: "building_pool", day });
       pool = await buildPool(credentials, userId, username);
       if (pool.error && pool.count === 0) {
-        writeStatus({ state: "search_failed", error: pool.error, resumeAt: new Date(Date.now() + 60 * 60_000).toISOString() });
-        await sleep(60 * 60_000); continue;
+        const wait = pool.error?.status === 402 ? creditsBackoffMs() : 60 * 60_000;
+        writeStatus({ state: pool.error?.status === 402 ? "credits_backoff" : "search_failed", error: pool.error, resumeAt: new Date(Date.now() + wait).toISOString() });
+        await sleep(wait); continue;
       }
     }
     // Pools built before the Chinese-zone rule: check unchecked candidates first (never follow unchecked).
@@ -299,12 +350,15 @@ async function main() {
       await sleep(Math.min(r.ms, 5 * 60_000)); continue;
     }
 
-    // Fill up to `pace.remaining` slots left over by follow-back in this window.
-    const batch = remaining.slice(0, Math.min(5, pace.remaining));
-    const fresh = await recheck(credentials, batch);
-    if (!fresh) { // never follow without a fresh blue-V re-check
-      writeStatus({ state: "recheck_failed", resumeAt: new Date(Date.now() + 60_000).toISOString() });
-      say("pre-follow re-check failed; retrying in 60 s"); await sleep(60_000); continue;
+    // Prefetch up to 14 candidates in ONE GET /2/users; follow them at the normal shared pace.
+    const batch = remaining.slice(0, Math.min(USER_LOOKUP_BATCH, pace.remaining));
+    let fresh;
+    try {
+      fresh = await recheck(credentials, batch);
+    } catch (err) {
+      const wait = err.status === 402 ? creditsBackoffMs() : 60_000;
+      writeStatus({ state: err.status === 402 ? "credits_backoff" : "recheck_failed", resumeAt: new Date(Date.now() + wait).toISOString() });
+      say(`pre-follow re-check failed (${err.message}); retrying in ${Math.round(wait / 1000)}s`); await sleep(wait); continue;
     }
     let took = 0;
     for (const c of batch) {
@@ -322,8 +376,18 @@ async function main() {
           : (u.public_metrics?.followers_count ?? 0) >= cfg.keywordfollow.maxFollowers ? "followers >= max" : null;
         // Chinese-zone re-check with FRESH name/bio (+ the matched tweet's lang/text from the pool)
         const zh = bad ? null : chineseZoneCheck({ tweetLang: c.tweet_lang, name: u.name, bio: u.description, tweetText: c.text });
-        if (zh && !zh.ok) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: `not chinese-zone: ${zh.why}` }); continue; }
-        if (bad) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: bad }); continue; }
+        if (zh && !zh.ok) {
+          skip.add(c.id);
+          const rj = loadRejectedAuthors(); rememberRejected(rj, c.id); saveRejectedAuthors(rj);
+          logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: `not chinese-zone: ${zh.why}` }); continue;
+        }
+        if (bad) {
+          skip.add(c.id);
+          if (bad === "no longer verified" || bad === "followers >= max" || bad === "protected") {
+            const rj = loadRejectedAuthors(); rememberRejected(rj, c.id); saveRejectedAuthors(rj);
+          }
+          logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: bad }); continue;
+        }
       }
       await waitForWindow((w) => { say(`X follow window full (${w.used}/15min); waiting`); writeStatus({ state: "window_wait", resumeAt: new Date(w.waitUntil).toISOString() }); });
       writeStatus({ state: "following", paceUsed: pace.used, paceRemaining: pace.remaining });
@@ -347,6 +411,10 @@ async function main() {
         const wait = Math.max(60_000, Number(res.rate.reset) * 1000 - Date.now() + 5_000 || 15 * 60_000);
         writeStatus({ state: "rate_limited", resumeAt: new Date(Date.now() + wait).toISOString() });
         say(`429; sleeping ${Math.round(wait / 1000)}s`); await sleep(wait); break;
+      } else if (res.status === 402) {
+        const wait = creditsBackoffMs();
+        writeStatus({ state: "credits_backoff", resumeAt: new Date(Date.now() + wait).toISOString() });
+        say(`402 credits; backing off ${Math.round(wait / 1000)}s`); await sleep(wait); break;
       } else if (res.status === 401) {
         writeStatus({ state: "stopped_auth", detail: entry.detail }); say("401; stopping"); process.exit(2);
       } else if (res.status === 403) {

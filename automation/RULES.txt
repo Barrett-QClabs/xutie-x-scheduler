@@ -49,3 +49,18 @@ follow rules (follow-back + keyword follow share ONE daily budget)
 - Never follow non-blue-V accounts (rule 2026-10-24): follow-back only targets blue-V followers;
   keyword follow only blue-V candidates, re-checked via GET /2/users right before each follow
   (if that re-check fails, the batch is skipped rather than followed unchecked).
+
+
+read-saving (2026-10-25, user "能不能少读呢？")
+- Shared cache.json: full following+followers refresh at most once per Asia/Shanghai day; otherwise
+  maintain locally from followback.jsonl / keywordfollow.jsonl / log.jsonl deltas. Follow-back only
+  pulls the newest followers pages until it hits a known follower id.
+- GET /2/users/me cached in me-cache.json (7 days).
+- Keyword pool: unused Chinese-zone candidates carry into the next day; search only tops the pool up
+  to poolSize; rejected author ids persisted in keyword-rejected-authors.json and skipped on search.
+- Pre-follow / pre-unfollow user re-checks use GET /2/users?ids=... in batches of 14 (USER_LOOKUP_BATCH),
+  then act at the normal follow/unfollow pace. Covers blue-V + Chinese-zone (keyword) and
+  connection_status follow-back (unfollow blue-V).
+- 402 (credits depleted): daemons back off 5–10 min (not every 60s). 序帖 treats 402 as a pause, not a failed post.
+- 序帖 timeline: one fresh read when a post is due (no 20-min watch polling). Stats: past UTC days cached
+  permanently after the day ends; today TTL 60 min; panel auto-poll 30 min.

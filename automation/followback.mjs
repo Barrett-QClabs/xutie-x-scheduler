@@ -12,7 +12,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   loadCredentials, xRequest, extractErrorMessage, isBlueV, dayKey, sleep,
-  loadCache, saveCache, pageUsers, loadAlreadyUnfollowedIds,
+  loadCache, saveCache, loadAlreadyUnfollowedIds, fetchListsOrCache, getMe,
+  lookupUsers, USER_LOOKUP_BATCH, creditsBackoffMs,
 } from "./unfollow.mjs";
 import {
   DATA_DIR, loadConfig, followCountsToday, withFollowMutex, waitForWindow, stopFlagToday, setStopFlag,
@@ -66,19 +67,24 @@ let lastTargets = 0;
 let refreshInterval = REFRESH_MIN_MS;
 async function getLists(credentials, userId, force = false) {
   const cache = loadCache();
+  // Between head pulls, reuse on-disk cache + log deltas (no X reads).
   const age = cache?.timestamp ? Date.now() - Date.parse(cache.timestamp) : Infinity;
-  if (!force && cache && age < refreshInterval) return cache;
+  if (!force && cache && age < refreshInterval) {
+    return cache;
+  }
   try {
-    const following = await pageUsers(credentials, "following", userId);
-    const followers = await pageUsers(credentials, "followers", userId);
-    const fresh = { timestamp: ts(), userId, following: following.users, followers: followers.users,
-      meta: { by: "followback", followingRate: following.rate, followersRate: followers.rate } };
-    saveCache(fresh);
+    const fresh = await fetchListsOrCache(credentials, userId, { headFollowers: true, forceFull: force && !(cache?.fullRefreshAt) });
     lastRefresh = Date.now();
     refreshInterval = REFRESH_MIN_MS + Math.floor(Math.random() * (REFRESH_MAX_MS - REFRESH_MIN_MS));
-    say(`refreshed lists: following=${fresh.following.length} followers=${fresh.followers.length}`);
+    say(`lists ${fresh.mode ?? "?"}: following=${fresh.following.length} followers=${fresh.followers.length}` +
+      (fresh.meta?.lastHeadNew != null ? ` (+${fresh.meta.lastHeadNew} new followers in ${fresh.meta.lastHeadPages} pages)` : ""));
     return fresh;
   } catch (err) {
+    if (err.status === 402) {
+      const w = creditsBackoffMs();
+      say(`list refresh 402; backing off ${Math.round(w / 1000)}s`);
+      await sleep(w);
+    }
     if (cache) { say(`list refresh failed (${err.message}); using cache from ${cache.timestamp}`); return cache; }
     throw err;
   }
@@ -97,15 +103,14 @@ function computeTargets(lists, extraFollowed, skipIds) {
 }
 
 async function main() {
-  const { credentials } = loadCredentials();
-  const me = await xRequest(credentials, "GET", "/2/users/me", { "user.fields": "id,username" });
-  if (!me.ok) throw new Error(`GET /2/users/me failed: HTTP ${me.status} ${extractErrorMessage(me.body)}`);
-  const userId = me.body.data.id;
+  const { credentials, storedUserId, storedUsername } = loadCredentials();
+  const me = await getMe(credentials, { storedUserId, storedUsername });
+  const userId = me.id;
 
   if (dryRun) {
     const lists = await getLists(credentials, userId, false);
     const targets = computeTargets(lists, new Set(), new Set());
-    console.log(JSON.stringify({ dryRun: true, me: me.body.data.username, cacheTimestamp: lists.timestamp,
+    console.log(JSON.stringify({ dryRun: true, me: me.username, cacheTimestamp: lists.timestamp,
       following: lists.following.length, followers: lists.followers.length,
       followBackTargets: targets.length, blueV: targets.filter((t) => t.blueV).length, protected: targets.filter((t) => t.protected).length,
       followedToday: todayFollowCount(), dailyCap: DAILY_CAP, room: fbRoom().room, reserveForFollowback: followbackReserve(),
@@ -114,7 +119,7 @@ async function main() {
   }
 
   if (!acquireLock()) { say("another followback daemon is running; exiting"); return; }
-  say(`daemon started as @${me.body.data.username} (${userId}), pid ${process.pid}`);
+  say(`daemon started as @${me.username} (${userId}), pid ${process.pid}`);
   const extraFollowed = new Set();
   const skipIds = new Set(); // per-target hard failures this session
 
@@ -166,20 +171,38 @@ async function main() {
 
     // Follow-back has priority: take as many of this window's remaining slots as we have targets.
     writeStatus({ state: "following", targetsRemaining: targets.length, followedToday: todayFollowCount(), counts: followCountsToday(), dailyCap: DAILY_CAP, paceUsed: pace.used, paceRemaining: pace.remaining });
-    const batch = targets.slice(0, Math.min(pace.remaining, room.room));
+    // Prefetch up to 14 candidates' blue-V / connection_status in ONE read; act at normal pace.
+    const batch = targets.slice(0, Math.min(USER_LOOKUP_BATCH, pace.remaining, room.room));
+    let freshMap = null;
+    try {
+      freshMap = await lookupUsers(credentials, batch.map((t) => t.id));
+    } catch (err) {
+      if (err.status === 402) {
+        const w = creditsBackoffMs();
+        writeStatus({ state: "credits_backoff", resumeAt: new Date(Date.now() + w).toISOString() });
+        say(`pre-follow re-check 402; backing off ${Math.round(w / 1000)}s`); await sleep(w); continue;
+      }
+      writeStatus({ state: "recheck_failed", resumeAt: new Date(Date.now() + 60_000).toISOString() });
+      say(`pre-follow re-check failed (${err.message}); retrying in 60 s`); await sleep(60_000); continue;
+    }
     let consecutive403 = 0;
     for (let i = 0; i < batch.length; i++) {
       const t = batch[i];
       if (todayFollowCount() >= DAILY_CAP || stopFlagToday()) break;
       pace = sharedPace();
       if (pace.phase === "rest" || pace.remaining <= 0 || fbRoom().room <= 0 || stopFlagToday()) break;
+      const u = freshMap?.get(t.id);
+      if (!u) { skipIds.add(t.id); logFb({ time: ts(), username: t.username, id: t.id, result: "skipped", detail: "not found/suspended" }); continue; }
+      if (!isBlueV(u)) { skipIds.add(t.id); logFb({ time: ts(), username: t.username, id: t.id, result: "skipped", detail: "no longer verified" }); continue; }
+      const cs = u.connection_status ?? [];
+      if (cs.includes("following") || cs.includes("follow_request_sent")) { skipIds.add(t.id); extraFollowed.add(t.id); continue; }
       await waitForWindow((w) => { say(`X follow window full (${w.used}/15min); waiting`); writeStatus({ state: "window_wait", targetsRemaining: lastTargets - i, resumeAt: new Date(w.waitUntil).toISOString(), followedToday: todayFollowCount() }); });
       writeStatus({ state: "following", targetsRemaining: lastTargets - i, followedToday: todayFollowCount(), counts: followCountsToday(), dailyCap: DAILY_CAP, paceUsed: pace.used, paceRemaining: pace.remaining });
       const done = await withFollowMutex(async () => {
         const p2 = sharedPace();
         if (p2.phase !== "work" || p2.remaining <= 0) return null;
         if (fbRoom().room <= 0) return null;
-        if (!t.blueV) return null; // hard guard: never follow non-blue-V (rule 2026-10-24)
+        if (!isBlueV(u)) return null; // hard guard: never follow non-blue-V (rule 2026-10-24)
         const res = await xRequest(credentials, "POST", `/2/users/${userId}/following`, undefined, { target_user_id: t.id });
         const entry = { time: ts(), username: t.username, id: t.id, blueV: t.blueV, protected: t.protected,
           result: res.ok ? "ok" : `HTTP ${res.status}`, pending: !!res.body?.data?.pending_follow,
@@ -205,6 +228,10 @@ async function main() {
         say(`429 rate limit; waiting ${Math.round(wait / 1000)}s until reset`);
         writeStatus({ state: "rate_limited", resumeAt: new Date(Date.now() + wait).toISOString() });
         await sleep(wait); break;
+      } else if (res.status === 402) {
+        const w = creditsBackoffMs();
+        writeStatus({ state: "credits_backoff", resumeAt: new Date(Date.now() + w).toISOString() });
+        say(`402 credits; backing off ${Math.round(w / 1000)}s`); await sleep(w); break;
       } else if (res.status === 401) {
         writeStatus({ state: "stopped_auth", detail: entry.detail });
         say("401 unauthorized; stopping daemon"); process.exit(2);

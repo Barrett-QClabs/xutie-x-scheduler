@@ -1,7 +1,7 @@
 import { buildAuthorizationHeader, percentEncode } from "@/lib/oauth";
 import type { Credentials, XUser } from "@/lib/types";
 
-export type XErrorKind = "rate_limit" | "duplicate" | "auth" | "transient" | "rejected";
+export type XErrorKind = "rate_limit" | "credits" | "duplicate" | "auth" | "transient" | "rejected";
 
 export class XApiError extends Error {
   constructor(
@@ -562,6 +562,8 @@ export function isLengthRejection(blob: string): boolean {
 
 export function classifyStatus(status: number, message: string, body: unknown): XErrorKind {
   if (status === 429) return "rate_limit";
+  // 402: the X API account is out of credits. Not the post's fault: pause and retry later.
+  if (status === 402) return "credits";
   const blob = `${message} ${JSON.stringify(body ?? {})}`.toLowerCase();
   if (blob.includes("duplicate")) return "duplicate";
   // A long post refused for length / missing Premium fails on its own; never treat it as an auth problem.

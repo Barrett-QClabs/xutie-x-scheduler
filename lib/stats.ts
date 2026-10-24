@@ -2,7 +2,8 @@
  * Daily stats by X day (UTC calendar day = 08:00–08:00 Asia/Taipei / Shanghai).
  * Local sources: automation logs (follows / unfollows), follower cache (follow-backs), 序帖 DB (posts).
  * X API source: the user's own timeline (replies + impression_count), cached per day
- * (today refreshed at most every 20 min, older days every 6 h). On fetch failure the value is
+ * (today refreshed at most every 60 min; a past day is read once after it has ended and then
+ * cached permanently, to keep billable X reads low). On fetch failure the value is
  * null ("unavailable") unless an earlier successful fetch exists, which is returned with its time.
  */
 import fs from "node:fs";
@@ -12,8 +13,9 @@ import { getCredentialsRow, getDb } from "@/lib/db";
 import { readCredentials } from "@/lib/service";
 import { isMockMode, xGet } from "@/lib/x-client";
 
-const TODAY_TTL_MS = 20 * 60_000;
-const PAST_TTL_MS = 6 * 3600_000;
+const TODAY_TTL_MS = 60 * 60_000;
+/** Manual refresh ("刷新") re-reads today at most this often. */
+const FORCE_MIN_AGE_MS = 10 * 60_000;
 const CACHE_FILE = path.join(process.cwd(), "data", "stats-cache.json");
 
 type TimelineDay = { fetchedAt: string; complete: boolean; posts: number; replies: number; impressions: number; withMetrics: number; error?: string };
@@ -72,9 +74,11 @@ async function refreshTimeline(days: string[], force: boolean): Promise<Cache> {
     const c = cache.days[d];
     if (!c) return true;
     const age = Date.now() - Date.parse(c.fetchedAt);
-    // a past day fetched while it was still "today" must be re-read once it has ended
-    const fetchedBeforeEnd = d !== today && Date.parse(c.fetchedAt) < Date.parse(`${shift(d, 1)}T00:00:00Z`);
-    return force ? age > 60_000 : fetchedBeforeEnd || age > (d === today ? TODAY_TTL_MS : PAST_TTL_MS);
+    if (d === today) return age > (force ? FORCE_MIN_AGE_MS : TODAY_TTL_MS);
+    // A past day is final once it was read completely after it ended: never re-read it
+    // (even on manual refresh). One fetched while still "today" is re-read once.
+    const fetchedBeforeEnd = Date.parse(c.fetchedAt) < Date.parse(`${shift(d, 1)}T00:00:00Z`);
+    return fetchedBeforeEnd || !c.complete;
   });
   if (!stale.length) return cache;
   if (!inflight) {
@@ -155,7 +159,7 @@ export async function getDailyStats(opts: { days?: number; refresh?: boolean } =
       keywordFollowedBack: `keyword-followed accounts present in follower list (cache.json as of ${followersAsOf ?? "unavailable"})`,
       unfollows: "log.jsonl (result ok)",
       postsBy序帖: "序帖 DB tweets.status = posted by posted_at",
-      repliesAndImpressions: "GET /2/users/:id/tweets (exclude=retweets), public_metrics.impression_count; cached 20 min (today) / 6 h (past days)",
+      repliesAndImpressions: "GET /2/users/:id/tweets (exclude=retweets), public_metrics.impression_count; cached 60 min (today) / permanently once a past day has ended",
     },
     timelineError,
     days: rows,

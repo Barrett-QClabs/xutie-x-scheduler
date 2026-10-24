@@ -126,8 +126,8 @@ describe("dynamic re-anchoring to manual posts", () => {
     // After the manual post was detected the next post's time changed once and then stayed put.
     expect(firstScheduleAfter.m1.length).toBeLessThanOrEqual(2);
     expect(firstScheduleAfter.m2.length).toBeLessThanOrEqual(2);
-    // Timeline is read at most about once a minute while watching.
-    const minutes = (now - start.getTime()) / 60_000;
-    expect(reads).toBeLessThanOrEqual(minutes + 10);
+    // X is read only when a post is due: one read per post, plus one per deferral
+    // caused by a manual post (never polled while waiting).
+    expect(reads).toBeLessThanOrEqual(6 + 2 * manuals.length);
   });
 });
