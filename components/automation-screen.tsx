@@ -160,8 +160,8 @@ export function AutomationScreen() {
       </div>
       <p className="text-xs text-muted-foreground">
         {locale === "zh"
-          ? "优先级：关键词关注新人优先（每 ~15 分钟约 10 个，然后休息 ~15 分钟）。回关只在关键词休息、名单用完或关闭时进行，并且为关键词预留当天还能完成的名额（250 − 今日已关注，且不超过当天剩余时间能完成的数量）。两者合计每天 ≤ 350，共用 15 分钟 50 次的限额，同一时间只有一个在关注。"
-          : "Priority: keyword follow of new people goes first (~10 per ~15 min, then ~15 min rest). Follow-back runs only while keyword is resting, exhausted or off, and leaves room reserved for keyword (250 − keyword follows today, capped by what is reachable before midnight). Combined ≤ 350/day, shared 50/15 min limit, one daemon follows at a time."}
+          ? "统一节奏：每轮最多共关注 10 人（关键词新人优先占名额，回关补齐同一轮剩余名额），然后共同休息 10–15 分钟（此期间双方都不关注），再进入下一轮。两者合计每天 ≤ 350，仍共用 X 的 15 分钟约 50 次限额，同一时间只有一个在关注。回关还会为关键词预留当天还能完成的名额（250 − 今日关键词已关注）。"
+          : "Shared pace: at most 10 follows total per work window (keyword new people take slots first; follow-back fills the rest in the same window), then a shared 10–15 min rest with zero follows, then repeat. Combined ≤ 350/day, shared X 50/15 min limit, one daemon follows at a time. Follow-back also leaves daily room reserved for keyword (250 − keyword follows today)."}
       </p>
       <Card>
         <CardContent className="space-y-3 p-4">

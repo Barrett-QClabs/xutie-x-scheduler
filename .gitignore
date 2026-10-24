@@ -67,3 +67,4 @@ follow.mutex
 whitelist.txt
 *.bak
 *.bak-*
+follow-pace.json

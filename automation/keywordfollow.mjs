@@ -6,10 +6,9 @@
  *     blue-V (any verification), followers < 1000, not protected, not already followed, not @me,
  *     never followed/unfollowed before by these scripts (log.jsonl, followback.jsonl, keywordfollow.jsonl).
  *  2. Follows from that pool, sharing the combined daily cap (350) with followback.mjs.
- *     KEYWORD HAS PRIORITY (since 2026-10-24): we follow whenever pacing allows; follow-back only
- *     follows during our rests and only with room not reserved for us (keywordReserve in follow-common).
- *     ~10 follows per ~15 min (75-105 s gaps), then ~15 min rest (±3 min).
- *     Shared 15-min window (45/50) + cross-process mutex with followback.mjs.
+ *     SHARED PACE (since 2026-10-24): both daemons share ONE cycle — ≤10 successful follows total
+ *     per work window (keyword gets priority for the slots; follow-back fills the rest), then a
+ *     shared rest of 10–15 min with ZERO follows, then repeat. Gaps 75–105 s. X window 45/50 + mutex.
  *
  *   node keywordfollow.mjs              # daemon (start-keywordfollow.sh)
  *   node keywordfollow.mjs --build-only # just build today's pool and exit
@@ -23,12 +22,10 @@ import {
 import {
   DATA_DIR, KW_LOG, KW_STATUS, FB_LOG, loadConfig, readJsonl, readJson, followCountsToday,
   withFollowMutex, waitForWindow, stopFlagToday, setStopFlag, msUntilNextShanghaiMidnight, POOL_DIR, keywordReserve,
+  sharedPace, waitForSharedWork, beginSharedRest, PACE_CYCLE, PACE_GAP_MS,
 } from "./follow-common.mjs";
 
 const LOCK = path.join(DATA_DIR, "keywordfollow.lock");
-const CYCLE_SIZE = 10;
-const GAP_MS = () => 75_000 + Math.floor(Math.random() * 30_001);
-const REST_MS = () => 12 * 60_000 + Math.floor(Math.random() * 6 * 60_000);
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const buildOnly = args.includes("--build-only");
@@ -152,7 +149,7 @@ async function main() {
   if (!acquireLock()) { say("another keywordfollow daemon is running; exiting"); return; }
   say(`daemon started as @${username} (${userId}), pid ${process.pid}`);
   const skip = new Set();
-  let inCycle = 0, consecutive403 = 0;
+  let consecutive403 = 0;
 
   while (true) {
     const cfg = loadConfig();
@@ -165,6 +162,12 @@ async function main() {
       writeStatus({ state: "stopped_for_day", reason: stop.reason, resumeAt: new Date(Date.now() + ms).toISOString() });
       say(`follows stopped for today (${stop.reason})`); await sleep(Math.min(ms, 30 * 60_000)); continue;
     }
+
+    // Shared work/rest: sleep through rest (and open a new work window when it ends).
+    let pace = await waitForSharedWork((p) => {
+      writeStatus({ state: "shared_rest", resumeAt: new Date(p.waitUntil).toISOString(), why: "shared 10-follow window full" });
+      say(`shared rest until ${new Date(p.waitUntil).toISOString()}`);
+    });
 
     let pool = loadPool(day);
     if (!pool) {
@@ -183,17 +186,27 @@ async function main() {
     const allow = keywordAllowance(cap);
     if (remaining.length === 0 || allow.allowed <= 0) {
       const why = remaining.length === 0 ? "pool exhausted" : `combined cap (${allow.combined}/${cap})`;
-      const ms = remaining.length === 0 || allow.combined >= cap ? msUntilNextShanghaiMidnight() : 30 * 60_000;
-      writeStatus({ state: remaining.length === 0 ? "pool_exhausted" : "daily_cap", why, resumeAt: new Date(Date.now() + ms).toISOString() });
-      say(`${why}; sleeping ${Math.round(Math.min(ms, 30 * 60_000) / 60000)} min`);
-      await sleep(Math.min(ms, 30 * 60_000)); continue;
+      // Yield the rest of this window's slots to follow-back; do not start a private rest.
+      writeStatus({ state: remaining.length === 0 ? "pool_exhausted" : "daily_cap", why, resumeAt: new Date(Date.now() + 60_000).toISOString() });
+      say(`${why}; yielding shared window to follow-back`);
+      await sleep(60_000); continue;
     }
 
-    // re-check the next few candidates right before following
-    const batch = remaining.slice(0, Math.min(5, CYCLE_SIZE - inCycle));
+    pace = sharedPace();
+    if (pace.remaining <= 0) {
+      const r = beginSharedRest("keyword");
+      writeStatus({ state: "shared_rest", resumeAt: r.restUntil });
+      await sleep(Math.min(r.ms, 5 * 60_000)); continue;
+    }
+
+    // Take up to `pace.remaining` slots this window (keyword priority).
+    const batch = remaining.slice(0, Math.min(5, pace.remaining));
     const fresh = await recheck(credentials, batch);
+    let took = 0;
     for (const c of batch) {
       if (stopFlagToday() || !loadConfig().keywordfollow.enabled) break;
+      pace = sharedPace();
+      if (pace.phase !== "work" || pace.remaining <= 0) break;
       if (excludedIds(userId).has(c.id)) { skip.add(c.id); continue; }
       const u = fresh?.get(c.id);
       if (fresh && !u) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "not found/suspended" }); continue; }
@@ -204,10 +217,12 @@ async function main() {
           : (u.public_metrics?.followers_count ?? 0) >= cfg.keywordfollow.maxFollowers ? "followers >= max" : null;
         if (bad) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: bad }); continue; }
       }
-      await waitForWindow((w) => { say(`shared follow window full (${w.used}/15min); waiting`); writeStatus({ state: "window_wait", resumeAt: new Date(w.waitUntil).toISOString() }); });
-      writeStatus({ state: "following", inCycle });
+      await waitForWindow((w) => { say(`X follow window full (${w.used}/15min); waiting`); writeStatus({ state: "window_wait", resumeAt: new Date(w.waitUntil).toISOString() }); });
+      writeStatus({ state: "following", paceUsed: pace.used, paceRemaining: pace.remaining });
       const done = await withFollowMutex(async () => {
-        if (keywordAllowance(loadConfig().combinedFollowDailyCap).allowed <= 0) return null; // re-check cap inside lock
+        const p2 = sharedPace();
+        if (p2.phase !== "work" || p2.remaining <= 0) return null;
+        if (keywordAllowance(loadConfig().combinedFollowDailyCap).allowed <= 0) return null;
         const res = await xRequest(credentials, "POST", `/2/users/${userId}/following`, undefined, { target_user_id: c.id });
         const entry = { time: ts(), day, username: c.username, id: c.id, keyword: c.keyword, followers: u?.public_metrics?.followers_count ?? c.followers_count,
           verified_type: u?.verified_type ?? c.verified_type, result: res.ok ? "ok" : `HTTP ${res.status}`, pending: !!res.body?.data?.pending_follow,
@@ -217,8 +232,8 @@ async function main() {
       });
       if (!done) break;
       const { res, entry } = done;
-      say(`follow @${c.username} [${c.keyword}] -> ${entry.result} (rate ${res.rate.remaining}/${res.rate.limit})`);
-      if (res.ok) { inCycle += 1; consecutive403 = 0; }
+      say(`follow @${c.username} [${c.keyword}] -> ${entry.result} (rate ${res.rate.remaining}/${res.rate.limit}, pace ${sharedPace().used}/${PACE_CYCLE})`);
+      if (res.ok) { took += 1; consecutive403 = 0; }
       else if (res.status === 429) {
         const wait = Math.max(60_000, Number(res.rate.reset) * 1000 - Date.now() + 5_000 || 15 * 60_000);
         writeStatus({ state: "rate_limited", resumeAt: new Date(Date.now() + wait).toISOString() });
@@ -231,14 +246,20 @@ async function main() {
           setStopFlag("keywordfollow", entry.detail || "repeated 403"); say(`403 (${entry.detail}); stopping follows for today`); break;
         }
       } else skip.add(c.id);
-      if (inCycle >= CYCLE_SIZE) break;
-      await sleep(GAP_MS());
+      pace = sharedPace();
+      if (pace.remaining <= 0) {
+        const r = beginSharedRest("keyword");
+        writeStatus({ state: "shared_rest", resumeAt: r.restUntil });
+        say(`shared window full; resting ${Math.round(r.ms / 60000)} min`); await sleep(Math.min(r.ms, 5 * 60_000));
+        break;
+      }
+      await sleep(PACE_GAP_MS());
     }
-    if (inCycle >= CYCLE_SIZE) {
-      const rest = REST_MS();
-      inCycle = 0;
-      writeStatus({ state: "resting", resumeAt: new Date(Date.now() + rest).toISOString() });
-      say(`cycle done; resting ${Math.round(rest / 60000)} min`); await sleep(rest);
+    // If we still have pace slots but no more keyword candidates right now, yield so follow-back can fill.
+    pace = sharedPace();
+    if (pace.phase === "work" && pace.remaining > 0) {
+      writeStatus({ state: "window_yield", why: "yield remaining slots to follow-back", paceUsed: pace.used, paceRemaining: pace.remaining });
+      await sleep(30_000);
     }
   }
 }
