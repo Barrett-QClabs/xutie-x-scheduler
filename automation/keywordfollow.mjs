@@ -304,7 +304,10 @@ const followable = (c) => c.zh_ok === true;
 function keywordAllowance(cap) {
   const r = followbackReserve();
   const c = r.counts;
-  return { allowed: Math.max(0, cap - c.combined - r.reserve), followbackReserve: r.reserve, ...c };
+  // User rule 2026-10-25: keyword follows max 250/day on their own, inside the 350 combined cap.
+  const kwCap = Number(loadConfig().keywordfollow?.dailyCap ?? 250);
+  const allowed = Math.max(0, Math.min(cap - c.combined - r.reserve, kwCap - c.keyword));
+  return { allowed, keywordDailyCap: kwCap, followbackReserve: r.reserve, ...c };
 }
 
 async function recheck(credentials, batch) {
