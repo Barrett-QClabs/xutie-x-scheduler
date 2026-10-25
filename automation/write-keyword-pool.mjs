@@ -14,12 +14,14 @@
  * (category is the first path segment after "search-").
  *
  * Filters (every candidate must pass):
- *   blue verified, followers_count ≤ maxFollowers (config, default 100),
+ *   blue verified, followers_count ≤ maxFollowers (config, default 1000; inclusive),
  *   not protected, chineseZoneCheck, not excluded (following / logs / whitelist),
  *   not already in prior pools as followed/tried.
  *
  * Writes keyword-candidates/<Asia/Shanghai date>.json in the shape keywordfollow.mjs expects.
- * --merge: keep existing today's candidates and union by id (new entries win fields).
+ * --merge: keep existing today's candidates and union by id (existing entries are kept first).
+ * Pool is capped at poolSize (default 250), split evenly across AI / 商业 / 两性 and
+ * interleaved by category; --keep-all keeps every passing candidate instead.
  *
  * Hourly top-up: save new plugin search pages, then
  *   node write-keyword-pool.mjs --merge
@@ -35,7 +37,7 @@ const merge = process.argv.includes("--merge");
 const dayArgIdx = process.argv.indexOf("--day");
 const day = dayArgIdx >= 0 ? process.argv[dayArgIdx + 1] : dayKey(new Date());
 const args = process.argv.slice(2).filter((a, i, arr) => {
-  if (a === "--merge") return false;
+  if (a === "--merge" || a === "--keep-all") return false;
   if (a === "--day") return false;
   if (dayArgIdx >= 0 && i === dayArgIdx - 2 + 2 /* relative */) return false;
   if (arr[i - 1] === "--day") return false;
@@ -124,7 +126,7 @@ if (!files.length) {
 }
 
 const cfg = loadConfig().keywordfollow;
-const maxFollowers = cfg.maxFollowers ?? 100;
+const maxFollowers = cfg.maxFollowers ?? 1000;
 const poolSize = cfg.poolSize ?? 250;
 const me = (() => {
   try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, "me-cache.json"), "utf8")); } catch { return { id: "1933586991612080128", username: "barrett_tt" }; }
@@ -139,6 +141,7 @@ const perKeyword = {};
 const perCategory = { AI: 0, 商业: 0, 两性: 0 };
 const rejected = { notVerified: 0, tooManyFollowers: 0, protected: 0, excluded: 0, notChinese: 0, noCategory: 0, whitelist: 0, noUser: 0 };
 let postsRead = 0, pages = 0;
+const keptIds = new Set(); // candidates carried over from today's existing pool (--merge)
 
 if (merge && fs.existsSync(outPath)) {
   try {
@@ -149,6 +152,7 @@ if (merge && fs.existsSync(outPath)) {
       if (c.zh_ok !== true) continue;
       if ((c.followers_count ?? Infinity) > maxFollowers) continue;
       candidates.set(String(c.id), c);
+      keptIds.add(String(c.id));
       const cat = c.category || categoryOfKeyword(c.keyword);
       if (cat && perCategory[cat] != null) perCategory[cat] += 1;
       if (c.keyword) {
@@ -220,11 +224,30 @@ for (const file of files) {
   }
 }
 
-const list = [...candidates.values()];
-// Prefer even spread hint: sort by category then followers ascending (smaller accounts first)
-const catOrder = { AI: 0, 商业: 1, 两性: 2 };
-list.sort((a, b) => (catOrder[a.category] ?? 9) - (catOrder[b.category] ?? 9) || (a.followers_count - b.followers_count));
-const trimmed = list.slice(0, Math.max(poolSize, list.length)); // keep all found; daemon caps follows
+// Balance: cap the pool at poolSize split evenly across AI / 商业 / 两性 (a short category's
+// leftover quota goes to the others). Within a category, candidates already in today's pool
+// (--merge) are kept first, then smaller accounts. Output is interleaved AI, 商业, 两性, … so the
+// daemon (which follows in file order) spreads follows evenly. --keep-all disables the cap.
+const keepAll = process.argv.includes("--keep-all");
+const CATS = ["AI", "商业", "两性"];
+const byCat = Object.fromEntries(CATS.map((k) => [k, []]));
+for (const c of candidates.values()) (byCat[c.category] ?? (byCat[c.category] = [])).push(c);
+for (const arr of Object.values(byCat)) arr.sort((a, b) => (keptIds.has(b.id) - keptIds.has(a.id)) || (a.followers_count - b.followers_count));
+const cats = Object.keys(byCat);
+const quota = Object.fromEntries(cats.map((k) => [k, 0]));
+if (keepAll) for (const k of cats) quota[k] = byCat[k].length;
+else {
+  let left = poolSize;
+  while (left > 0) {
+    const open = cats.filter((k) => quota[k] < byCat[k].length);
+    if (!open.length) break;
+    const share = Math.max(1, Math.floor(left / open.length));
+    for (const k of open) { if (left <= 0) break; const add = Math.min(share, byCat[k].length - quota[k], left); quota[k] += add; left -= add; }
+  }
+}
+const picked = cats.map((k) => byCat[k].slice(0, quota[k]));
+const trimmed = [];
+for (let i = 0; picked.some((a) => i < a.length); i++) for (const a of picked) if (i < a.length) trimmed.push(a[i]);
 const pool = {
   date: day,
   built: new Date().toISOString(),

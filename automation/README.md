@@ -12,7 +12,7 @@ Runtime data (logs, cache, locks, snapshots, candidate pools, `whitelist.txt`, `
 | `unfollow.mjs` / `run.sh` | hourly: unfollow all non-blue-V accounts + blue-V non-mutuals outside the 400 most recent; blue-V mutuals never (rules in RULES.txt). Still uses paid GETs for list cache / blue-V re-check. |
 | `followback.mjs` / `start-followback.sh` | daemon: follow back blue-V followers from `followback-targets.json` (written by the free X plugin). **Zero paid reads** (`NO_PAID_READS=1`); paid API is POST follow only. |
 | `write-followback-targets.mjs` | merge free-plugin follower page JSON → `followback-targets.json` (hourly: newest 1–3 pages with `--merge`) |
-| `keywordfollow.mjs` / `start-keywordfollow.sh` | daemon: follow new people from `keyword-candidates/YYYY-MM-DD.json` (AI/商业/两性, ≤100 followers, Chinese-zone). **Zero paid reads** (`NO_PAID_READS=1`); paid API is POST follow only. |
+| `keywordfollow.mjs` / `start-keywordfollow.sh` | daemon: follow new people from `keyword-candidates/YYYY-MM-DD.json` (AI/商业/两性, ≤1000 followers, Chinese-zone). **Zero paid reads** (`NO_PAID_READS=1`); paid API is POST follow only. |
 | `write-keyword-pool.mjs` | merge free-plugin search pages → `keyword-candidates/YYYY-MM-DD.json` (hourly: `--merge` after saving new pages under `plugin-pages/keyword/`) |
 | `follow-common.mjs` | shared combined daily cap, 15-min window, mutex, stop flag, config |
 

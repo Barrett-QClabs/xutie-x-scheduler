@@ -31,7 +31,7 @@ follow rules (follow-back + keyword follow share ONE daily budget)
 - Keyword pool: once per day keyword-candidates/YYYY-MM-DD.json, target 250 accounts from the FREE X plugin
   (search_posts_all + author expansions → plugin-pages/keyword/*.json → write-keyword-pool.mjs).
   Paid developer API is NOT used for search/user lookup. Categories: AI / 商业 / 两性 only.
-  Query: "<kw> lang:zh is:verified -is:retweet". Filters: blue-V, followers ≤ 100 (hard rule 2026-10-25),
+  Query: "<kw> lang:zh is:verified -is:retweet". Filters: blue-V, followers ≤ 1000 inclusive (hard rule 2026-10-25, raised from 100),
   Chinese-zone, not protected, not already followed, not @barrett_tt, never unfollowed (log.jsonl) or
   followed before by any script. Daemon runs with NO_PAID_READS=1 (POST follow only; no paid pre-follow re-check).
 - KEYWORD FOLLOW IS CHINESE-ZONE (中文区) ONLY (rule 2026-10-24 23:11 Asia/Taipei: "250个，必须是中文区的，

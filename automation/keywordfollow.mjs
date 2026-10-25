@@ -7,7 +7,7 @@
  * follows via the paid write API. NO_PAID_READS defaults on and throws if any GET to api.x.com
  * is attempted (same guard as followback.mjs).
  *
- * Filters (enforced when the pool is built): blue-V, followers ≤ maxFollowers (default 100),
+ * Filters (enforced when the pool is built): blue-V, followers ≤ maxFollowers (default 1000, inclusive),
  * Chinese-zone (chineseZoneCheck), not protected, not already followed / never unfollowed,
  * categories AI / 商业 / 两性.
  *
@@ -224,7 +224,7 @@ async function buildPool(credentials, userId, username, base = null) {
         const u = users.get(aid);
         if (!u) continue;
         if (!isBlueV(u)) { rejected.notVerified++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
-        if ((u.public_metrics?.followers_count ?? Infinity) >= cfg.maxFollowers) { rejected.tooManyFollowers++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
+        if ((u.public_metrics?.followers_count ?? Infinity) > cfg.maxFollowers) { rejected.tooManyFollowers++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
         if (u.protected) { rejected.protected++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
         if (u.username?.toLowerCase() === username.toLowerCase()) { rejected.excluded++; continue; }
         const zh = chineseZoneCheck({ tweetLang: t.lang, name: u.name, bio: u.description, tweetText: t.text });
@@ -475,7 +475,7 @@ async function main() {
         const cs = u.connection_status ?? [];
         const bad = cs.includes("following") ? "already following" : cs.includes("follow_request_sent") ? "request pending"
           : u.protected ? "protected" : !isBlueV(u) ? "no longer verified"
-          : (u.public_metrics?.followers_count ?? 0) >= cfg.keywordfollow.maxFollowers ? "followers >= max" : null;
+          : (u.public_metrics?.followers_count ?? 0) > cfg.keywordfollow.maxFollowers ? "followers > max" : null;
         const zh = bad ? null : chineseZoneCheck({ tweetLang: c.tweet_lang, name: u.name, bio: u.description, tweetText: c.text });
         if (zh && !zh.ok) {
           skip.add(c.id);
@@ -484,7 +484,7 @@ async function main() {
         }
         if (bad) {
           skip.add(c.id);
-          if (bad === "no longer verified" || bad === "followers >= max" || bad === "protected") {
+          if (bad === "no longer verified" || bad === "followers > max" || bad === "protected") {
             const rj = loadRejectedAuthors(); rememberRejected(rj, c.id); saveRejectedAuthors(rj);
           }
           logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: bad }); continue;
@@ -492,7 +492,7 @@ async function main() {
       } else {
         // Pool already filtered; light local guards only.
         if ((c.followers_count ?? 0) > cfg.keywordfollow.maxFollowers) {
-          skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "followers >= max (pool)" }); continue;
+          skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "followers > max (pool)" }); continue;
         }
         if (c.zh_ok !== true) { skip.add(c.id); continue; }
       }

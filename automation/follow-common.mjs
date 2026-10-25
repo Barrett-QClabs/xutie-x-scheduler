@@ -35,7 +35,7 @@ export const DEFAULT_CONFIG = {
     keywords: ["AI", "人工智能", "ChatGPT", "大模型", "AIGC", "Claude", "商业", "创业", "赚钱", "副业", "投资", "电商", "两性", "恋爱", "婚姻", "情感", "男女", "约会"],
     categories: ["AI", "商业", "两性"],
     poolSize: 250,
-    maxFollowers: 100,
+    maxFollowers: 1000, // inclusive: followers_count ≤ maxFollowers (user rule 2026-10-25)
     maxSearchPages: 40,
   },
   combinedFollowDailyCap: 350,
