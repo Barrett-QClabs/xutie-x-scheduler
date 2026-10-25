@@ -1,27 +1,21 @@
 #!/usr/bin/env node
 /**
- * Keyword auto-follow daemon for @barrett_tt.
- *  1. Once per Asia/Shanghai day builds keyword-candidates/YYYY-MM-DD.json (default 250 accounts):
- *     authors of recent posts about the configured keywords (X API v2 recent search, user's OAuth1 keys),
- *     blue-V (any verification), followers < 1000, not protected, not already followed, not @me,
- *     never followed/unfollowed before by these scripts (log.jsonl, followback.jsonl, keywordfollow.jsonl).
- *     CHINESE-ZONE ONLY (2026-10-24 23:11 Asia/Taipei, "必须是中文区的，英文区的不关注"): queries carry
- *     lang:zh, and every candidate must pass chineseZoneCheck (follow-common.mjs): matched tweet lang zh
- *     AND Chinese name/bio (CJK ideographs, not Japanese-kana) — tweet text is the fallback only when
- *     name+bio have no CJK at all. Re-checked with fresh name/bio right before each follow.
- *  2. Follows from that pool, sharing the combined daily cap (350) with followback.mjs.
- *     SHARED PACE (since 2026-10-24): both daemons share ONE cycle — ≤10 successful follows total
- *     per work window, then a shared rest of 10–15 min with ZERO follows, then repeat. Gaps 75–105 s.
- *     X window 45/50 + mutex.
- *     PRIORITY (swapped 2026-10-24 21:04 Asia/Taipei): follow-back of blue-V followers takes the
- *     window's slots first; keyword follow only fills what is left (followbackYieldsSlot), and its
- *     daily room = cap − combined − what follow-back still needs (followbackReserve).
+ * Keyword auto-follow daemon for @barrett_tt (zero paid X developer API reads when NO_PAID_READS=1).
+ *
+ * Pool comes from keyword-candidates/YYYY-MM-DD.json, written by write-keyword-pool.mjs from
+ * free X plugin search pages (search_posts_all + author expansions). This process only POSTs
+ * follows via the paid write API. NO_PAID_READS defaults on and throws if any GET to api.x.com
+ * is attempted (same guard as followback.mjs).
+ *
+ * Filters (enforced when the pool is built): blue-V, followers ≤ maxFollowers (default 100),
+ * Chinese-zone (chineseZoneCheck), not protected, not already followed / never unfollowed,
+ * categories AI / 商业 / 两性.
+ *
+ * Shares combined daily cap + shared work/rest pace with followback.mjs; follow-back has priority.
  *
  *   node keywordfollow.mjs              # daemon (start-keywordfollow.sh)
- *   node keywordfollow.mjs --build-only # just build today's pool and exit
- *   node keywordfollow.mjs --dry-run    # show what would happen, no follows
- *   node keywordfollow.mjs --refilter [--top-up]  # Chinese-check today's unchecked remaining candidates
- *                                       # (drop non-Chinese); --top-up refills to poolSize with lang:zh search
+ *   node keywordfollow.mjs --dry-run    # show pool / allowance, no follows
+ *   (pool build): node write-keyword-pool.mjs [--merge]  # free plugin pages → pool file
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -41,6 +35,14 @@ const dryRun = args.includes("--dry-run");
 const buildOnly = args.includes("--build-only");
 const refilterOnly = args.includes("--refilter");
 const topUp = args.includes("--top-up");
+const ME_CACHE_PATH = path.join(DATA_DIR, "me-cache.json");
+const IDLE_REREAD_MS = 10 * 60_000;
+
+// Hard guard: keywordfollow must never issue paid GETs. Default ON unless explicitly disabled.
+if (process.env.NO_PAID_READS !== "0") {
+  process.env.NO_PAID_READS = "1";
+}
+
 const ZH_RULE = "tweet lang zh AND (name or bio has >=2 CJK ideographs with kana < han/2); tweet text (>=4 ideographs, kana < han/2) only if name+bio have no CJK ideographs or kana";
 
 const ts = () => new Date().toISOString();
@@ -48,6 +50,14 @@ const say = (m) => console.log(`[${ts()}] ${m}`);
 const logKw = (e) => fs.appendFileSync(KW_LOG, JSON.stringify(e) + "\n");
 let statusBase = {};
 const writeStatus = (o) => { statusBase = { ...statusBase, ...o }; try { fs.writeFileSync(KW_STATUS, JSON.stringify({ updated: ts(), pid: process.pid, ...o, counts: followCountsToday(), pool: statusBase.pool }, null, 2)); } catch {} };
+
+function loadMeFromCache() {
+  try {
+    const cached = JSON.parse(fs.readFileSync(ME_CACHE_PATH, "utf8"));
+    if (cached?.id && cached?.username) return { id: String(cached.id), username: cached.username, fromCache: true };
+  } catch {}
+  return null;
+}
 
 function acquireLock() {
   if (fs.existsSync(LOCK)) {
@@ -308,40 +318,61 @@ async function recheck(credentials, batch) {
 
 async function main() {
   const { credentials, storedUserId, storedUsername } = loadCredentials();
-  const me = await getMe(credentials, { storedUserId, storedUsername });
+  const noPaid = process.env.NO_PAID_READS === "1";
+  // ZERO paid reads by default: never call getMe. Use me-cache.json or credentials store.
+  const me = noPaid
+    ? (loadMeFromCache() ?? (storedUserId && storedUsername ? { id: String(storedUserId), username: storedUsername, fromCache: true } : null))
+    : await getMe(credentials, { storedUserId, storedUsername });
+  if (!me?.id) throw new Error("no me-cache.json / stored user id; cannot follow without a paid GET /2/users/me");
   const userId = me.id, username = me.username;
 
-  if (refilterOnly) {
-    let pool = loadPool(dayKey(new Date()));
-    if (!pool) { console.log("no pool for today"); return; }
-    const before = pool.candidates.length;
-    const res = await refilterPool(credentials, userId, pool);
-    if (!res) process.exit(1);
-    if (topUp && pool.candidates.length < loadConfig().keywordfollow.poolSize) pool = await buildPool(credentials, userId, username, pool);
+  if (refilterOnly || buildOnly) {
+    if (noPaid) {
+      console.log(JSON.stringify({
+        error: "NO_PAID_READS=1: pool build/refilter via paid API is disabled. Use write-keyword-pool.mjs with free X plugin search pages.",
+        helper: "node write-keyword-pool.mjs [--merge]",
+        poolDir: POOL_DIR,
+      }, null, 2));
+      return;
+    }
+    if (refilterOnly) {
+      let pool = loadPool(dayKey(new Date()));
+      if (!pool) { console.log("no pool for today"); return; }
+      const before = pool.candidates.length;
+      const res = await refilterPool(credentials, userId, pool);
+      if (!res) process.exit(1);
+      if (topUp && pool.candidates.length < loadConfig().keywordfollow.poolSize) pool = await buildPool(credentials, userId, username, pool);
+      const exclude = excludedIds(userId);
+      const left = pool.candidates.filter((c) => followable(c) && !exclude.has(c.id));
+      console.log(JSON.stringify({ date: pool.date, before, ...res, toppedUp: topUp ? pool.candidates.length - (before - res.dropped) : 0,
+        count: pool.candidates.length, remainingChinese: left.length, searchPages: pool.searchPages,
+        droppedSample: pool.droppedNonChinese.slice(-8).map((c) => `@${c.username} (${c.zh_why})`),
+        keptSample: left.slice(0, 8).map((c) => `@${c.username} ${c.name} (${c.zh_why})`) }, null, 2));
+      return;
+    }
+    const pool = await buildPool(credentials, userId, username);
+    const cfg = loadConfig();
     const exclude = excludedIds(userId);
-    const left = pool.candidates.filter((c) => followable(c) && !exclude.has(c.id));
-    console.log(JSON.stringify({ date: pool.date, before, ...res, toppedUp: topUp ? pool.candidates.length - (before - res.dropped) : 0,
-      count: pool.candidates.length, remainingChinese: left.length, searchPages: pool.searchPages,
-      droppedSample: pool.droppedNonChinese.slice(-8).map((c) => `@${c.username} (${c.zh_why})`),
-      keptSample: left.slice(0, 8).map((c) => `@${c.username} ${c.name} (${c.zh_why})`) }, null, 2));
+    console.log(JSON.stringify({ me: username, pool: { date: pool.date, count: pool.count, error: pool.error,
+      remainingChinese: pool.candidates.filter((c) => followable(c) && !exclude.has(c.id)).length },
+      allowance: keywordAllowance(cfg.combinedFollowDailyCap) }, null, 2));
     return;
   }
 
-  if (buildOnly || dryRun) {
-    const pool = loadPool(dayKey(new Date())) ?? (dryRun ? null : await buildPool(credentials, userId, username));
+  if (dryRun) {
+    const pool = loadPool(dayKey(new Date()));
     const cfg = loadConfig();
     const exclude = excludedIds(userId);
-    console.log(JSON.stringify({ me: username, pool: pool ? { date: pool.date, count: pool.count, error: pool.error,
-      chineseZone: ZH_RULE, droppedNonChinese: pool.droppedNonChinese?.length ?? 0,
-      unchecked: pool.candidates.filter((c) => c.zh_ok === undefined && !exclude.has(c.id)).length,
-      remainingChinese: pool.candidates.filter((c) => followable(c) && !exclude.has(c.id)).length,
-      sample: pool.candidates.filter((c) => followable(c) && !exclude.has(c.id)).slice(0, 8).map((c) => `@${c.username} ${c.name} (${c.followers_count}, ${c.zh_why})`) } : null,
+    console.log(JSON.stringify({ me: username, userId, noPaidReads: process.env.NO_PAID_READS,
+      pool: pool ? { date: pool.date, count: pool.count, source: pool.source, perCategory: pool.perCategory,
+        remainingChinese: pool.candidates.filter((c) => followable(c) && !exclude.has(c.id)).length,
+        sample: pool.candidates.filter((c) => followable(c) && !exclude.has(c.id)).slice(0, 8).map((c) => `@${c.username} ${c.name} (${c.followers_count}, ${c.category || c.keyword})`) } : null,
       allowance: keywordAllowance(cfg.combinedFollowDailyCap), reserveForFollowback: followbackReserve(cfg), gate: followbackYieldsSlot(cfg) }, null, 2));
     return;
   }
 
   if (!acquireLock()) { say("another keywordfollow daemon is running; exiting"); return; }
-  say(`daemon started as @${username} (${userId}), pid ${process.pid}`);
+  say(`daemon started as @${username} (${userId}), pid ${process.pid}, NO_PAID_READS=${process.env.NO_PAID_READS} (file-driven pool, zero paid reads)`);
   const skip = new Set();
   const refilterFailedAt = {};
   let consecutive403 = 0;
@@ -366,6 +397,11 @@ async function main() {
 
     let pool = loadPool(day);
     if (!pool) {
+      if (noPaid) {
+        say(`pool file missing for ${day}; waiting for write-keyword-pool.mjs (${Math.round(IDLE_REREAD_MS / 60000)} min)`);
+        writeStatus({ state: "idle_no_pool", day, noPaidReads: true, resumeAt: new Date(Date.now() + IDLE_REREAD_MS).toISOString() });
+        await sleep(IDLE_REREAD_MS); continue;
+      }
       writeStatus({ state: "building_pool", day });
       pool = await buildPool(credentials, userId, username);
       if (pool.error && pool.count === 0) {
@@ -375,7 +411,8 @@ async function main() {
       }
     }
     // Pools built before the Chinese-zone rule: check unchecked candidates first (never follow unchecked).
-    if (pool.candidates.some((c) => c.zh_ok === undefined) && !refilterFailedAt[day]) {
+    // Under NO_PAID_READS we cannot refilter via paid API — only follow zh_ok===true entries.
+    if (!noPaid && pool.candidates.some((c) => c.zh_ok === undefined) && !refilterFailedAt[day]) {
       const res = await refilterPool(credentials, userId, pool);
       if (!res) refilterFailedAt[day] = Date.now();
     }
@@ -411,31 +448,34 @@ async function main() {
       await sleep(Math.min(r.ms, 5 * 60_000)); continue;
     }
 
-    // Prefetch up to 14 candidates in ONE GET /2/users; follow them at the normal shared pace.
-    const batch = remaining.slice(0, Math.min(USER_LOOKUP_BATCH, pace.remaining));
-    let fresh;
-    try {
-      fresh = await recheck(credentials, batch);
-    } catch (err) {
-      const wait = err.status === 402 ? creditsBackoffMs() : 60_000;
-      writeStatus({ state: err.status === 402 ? "credits_backoff" : "recheck_failed", resumeAt: new Date(Date.now() + wait).toISOString() });
-      say(`pre-follow re-check failed (${err.message}); retrying in ${Math.round(wait / 1000)}s`); await sleep(wait); continue;
+    // Under NO_PAID_READS: trust the plugin-built pool (no paid GET /2/users re-check).
+    // Otherwise prefetch up to 14 candidates in ONE GET /2/users.
+    const batch = remaining.slice(0, Math.min(noPaid ? pace.remaining : USER_LOOKUP_BATCH, pace.remaining));
+    let fresh = null;
+    if (!noPaid) {
+      try {
+        fresh = await recheck(credentials, batch);
+      } catch (err) {
+        const wait = err.status === 402 ? creditsBackoffMs() : 60_000;
+        writeStatus({ state: err.status === 402 ? "credits_backoff" : "recheck_failed", resumeAt: new Date(Date.now() + wait).toISOString() });
+        say(`pre-follow re-check failed (${err.message}); retrying in ${Math.round(wait / 1000)}s`); await sleep(wait); continue;
+      }
     }
     let took = 0;
+    writeStatus({ state: "following", paceUsed: pace.used, paceRemaining: pace.remaining, noPaidReads: noPaid });
     for (const c of batch) {
       if (stopFlagToday() || !loadConfig().keywordfollow.enabled) break;
       pace = sharedPace();
       if (pace.phase !== "work" || pace.remaining <= 0) break;
       if (!followbackYieldsSlot().ok) break; // follow-back wants the slot again
       if (excludedIds(userId).has(c.id)) { skip.add(c.id); continue; }
-      const u = fresh?.get(c.id);
-      if (!u) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "not found/suspended" }); continue; }
-      {
+      if (!noPaid) {
+        const u = fresh?.get(c.id);
+        if (!u) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "not found/suspended" }); continue; }
         const cs = u.connection_status ?? [];
         const bad = cs.includes("following") ? "already following" : cs.includes("follow_request_sent") ? "request pending"
           : u.protected ? "protected" : !isBlueV(u) ? "no longer verified"
           : (u.public_metrics?.followers_count ?? 0) >= cfg.keywordfollow.maxFollowers ? "followers >= max" : null;
-        // Chinese-zone re-check with FRESH name/bio (+ the matched tweet's lang/text from the pool)
         const zh = bad ? null : chineseZoneCheck({ tweetLang: c.tweet_lang, name: u.name, bio: u.description, tweetText: c.text });
         if (zh && !zh.ok) {
           skip.add(c.id);
@@ -449,17 +489,25 @@ async function main() {
           }
           logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: bad }); continue;
         }
+      } else {
+        // Pool already filtered; light local guards only.
+        if ((c.followers_count ?? 0) > cfg.keywordfollow.maxFollowers) {
+          skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "followers >= max (pool)" }); continue;
+        }
+        if (c.zh_ok !== true) { skip.add(c.id); continue; }
       }
       await waitForWindow((w) => { say(`X follow window full (${w.used}/15min); waiting`); writeStatus({ state: "window_wait", resumeAt: new Date(w.waitUntil).toISOString() }); });
-      writeStatus({ state: "following", paceUsed: pace.used, paceRemaining: pace.remaining });
+      writeStatus({ state: "following", paceUsed: pace.used, paceRemaining: pace.remaining, noPaidReads: noPaid });
       const done = await withFollowMutex(async () => {
         const p2 = sharedPace();
         if (p2.phase !== "work" || p2.remaining <= 0) return null;
         if (keywordAllowance(loadConfig().combinedFollowDailyCap).allowed <= 0) return null;
         if (!followbackYieldsSlot().ok) return null; // follow-back has priority for this slot
+        // Paid WRITE only — POST follow. NO_PAID_READS guard blocks any GET.
         const res = await xRequest(credentials, "POST", `/2/users/${userId}/following`, undefined, { target_user_id: c.id });
-        const entry = { time: ts(), day, username: c.username, id: c.id, keyword: c.keyword, followers: u?.public_metrics?.followers_count ?? c.followers_count,
-          verified_type: u?.verified_type ?? c.verified_type, result: res.ok ? "ok" : `HTTP ${res.status}`, pending: !!res.body?.data?.pending_follow,
+        const entry = { time: ts(), day, username: c.username, id: c.id, keyword: c.keyword, category: c.category ?? null,
+          followers: (fresh?.get(c.id)?.public_metrics?.followers_count) ?? c.followers_count,
+          verified_type: (fresh?.get(c.id)?.verified_type) ?? c.verified_type, result: res.ok ? "ok" : `HTTP ${res.status}`, pending: !!res.body?.data?.pending_follow,
           detail: res.ok ? null : extractErrorMessage(res.body), rate: res.rate };
         logKw(entry);
         return { res, entry };

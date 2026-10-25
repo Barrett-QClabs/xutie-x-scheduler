@@ -28,11 +28,12 @@ follow rules (follow-back + keyword follow share ONE daily budget)
   Daily followbackReserve keeps room for follow-backs still waiting so keyword cannot use it up:
   reserve = min(blue-V follow-back targets still waiting, 10 per 30 min until Shanghai midnight);
   0 if follow-back is off / not running. Keyword only follows when combined + reserve < 350.
-- Keyword pool: once per day keyword-candidates/YYYY-MM-DD.json, 250 accounts from X API v2 recent search
-  ("<kw> lang:zh is:verified -is:retweet") for keywords in automation.config.json (AI, 人工智能, 商业, 创业, crypto,
-  币圈, dating, 约会, 两性, 情感). Filters: blue-V/any verification, followers < 1000, not protected,
-  not already followed, not @barrett_tt, never unfollowed (log.jsonl) or followed before by any script,
-  not in an earlier day's pool. Each candidate re-checked (connection_status etc.) right before following.
+- Keyword pool: once per day keyword-candidates/YYYY-MM-DD.json, target 250 accounts from the FREE X plugin
+  (search_posts_all + author expansions → plugin-pages/keyword/*.json → write-keyword-pool.mjs).
+  Paid developer API is NOT used for search/user lookup. Categories: AI / 商业 / 两性 only.
+  Query: "<kw> lang:zh is:verified -is:retweet". Filters: blue-V, followers ≤ 100 (hard rule 2026-10-25),
+  Chinese-zone, not protected, not already followed, not @barrett_tt, never unfollowed (log.jsonl) or
+  followed before by any script. Daemon runs with NO_PAID_READS=1 (POST follow only; no paid pre-follow re-check).
 - KEYWORD FOLLOW IS CHINESE-ZONE (中文区) ONLY (rule 2026-10-24 23:11 Asia/Taipei: "250个，必须是中文区的，
   英文区的不关注"); English-zone accounts are never keyword-followed. Follow-back is NOT affected.
   Search query is "<kw> lang:zh is:verified -is:retweet" for EVERY keyword (English ones too: AI, crypto,
@@ -47,8 +48,8 @@ follow rules (follow-back + keyword follow share ONE daily budget)
   `node keywordfollow.mjs --refilter [--top-up]` (top-up = refill to 250 with lang:zh, within maxSearchPages).
 - On/off toggles + keywords: automation.config.json (editable in 序帖 → 自动化 page).
 - Never follow non-blue-V accounts (rule 2026-10-24): follow-back only targets blue-V followers;
-  keyword follow only blue-V candidates, re-checked via GET /2/users right before each follow
-  (if that re-check fails, the batch is skipped rather than followed unchecked).
+  keyword follow only blue-V candidates from the plugin-built pool (NO_PAID_READS skips paid re-check;
+  pool builder already filtered verified / followers / Chinese-zone / excluded).
 
 
 read-saving (2026-10-25, user "能不能少读呢？" + approved widget t253s889)
