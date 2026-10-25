@@ -625,9 +625,13 @@ async function unfollowOne(credentials, sourceUserId, target) {
   return res;
 }
 
-function randomPauseMs() {
-  // ~180s ± 20s
-  return 160_000 + Math.floor(Math.random() * 40_001);
+// Burst pacing (user rule 2026-10-25): per hourly run, 5 unfollows within ~3 min,
+// rest ~15 min, then 5 more within ~5 min; max 10 per hour.
+const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+function randomPauseMs(doneSoFar) {
+  if (doneSoFar === 5) return rnd(15 * 60_000, 16 * 60_000); // rest between the two bursts
+  if (doneSoFar < 5) return rnd(30_000, 42_000); // first burst: 4 gaps, <= ~3 min total
+  return rnd(55_000, 70_000); // second burst: 4 gaps, <= ~5 min total
 }
 
 const LOCK_PATH = path.join(DATA_DIR, "run.lock");
@@ -788,7 +792,7 @@ async function main() {
       }
 
       if (i < targets.length - 1 && attempts < allowed) {
-        const pause = randomPauseMs();
+        const pause = randomPauseMs(attempts);
         console.error(`[info] paused ${Math.round(pause / 1000)}s before next unfollow`);
         await sleep(pause);
       }
