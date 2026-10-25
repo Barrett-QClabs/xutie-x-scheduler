@@ -625,13 +625,18 @@ async function unfollowOne(credentials, sourceUserId, target) {
   return res;
 }
 
-// Burst pacing (user rule 2026-10-25): per hourly run, 5 unfollows within ~3 min,
-// rest ~15 min, then 5 more within ~5 min; max 10 per hour.
+// Random batch pacing (user rule 2026-10-25 14:16): within each hourly run, unfollows go out
+// in random batches of 3-5 (never more than 5 per batch), random 25-70s gaps inside a batch,
+// random 6-14 min rest between batches; at most 10 per hour (whole run fits in ~55 min).
 const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const BATCH_ENDS = (() => {
+  const ends = new Set(); let total = 0;
+  while (total < 10) { total += Math.min(rnd(3, 5), 10 - total); ends.add(total); }
+  return ends;
+})();
 function randomPauseMs(doneSoFar) {
-  if (doneSoFar === 5) return rnd(15 * 60_000, 16 * 60_000); // rest between the two bursts
-  if (doneSoFar < 5) return rnd(30_000, 42_000); // first burst: 4 gaps, <= ~3 min total
-  return rnd(55_000, 70_000); // second burst: 4 gaps, <= ~5 min total
+  if (BATCH_ENDS.has(doneSoFar)) return rnd(6 * 60_000, 14 * 60_000); // rest between batches
+  return rnd(25_000, 70_000); // gap inside a batch
 }
 
 const LOCK_PATH = path.join(DATA_DIR, "run.lock");
