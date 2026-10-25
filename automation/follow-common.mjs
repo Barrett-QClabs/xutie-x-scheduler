@@ -231,12 +231,19 @@ export async function waitForSharedWork(onWait) {
  * (ok/pending) by follow-back or keyword follow.
  */
 export function followbackTargetsFromCache() {
-  const cache = readJson(path.join(DATA_DIR, "cache.json"));
-  if (!cache?.followers) return null;
-  const gone = new Set((cache.following ?? []).map((u) => u.id));
+  // Prefer plugin-produced followback-targets.json (zero paid reads). Fall back to cache.json.
+  const gone = new Set();
   for (const id of loadAlreadyUnfollowedIds()) gone.add(id);
   for (const e of readJsonl(FB_LOG)) if (e.id && (e.result === "ok" || e.pending)) gone.add(e.id);
   for (const e of readJsonl(KW_LOG)) if (e.id && (e.result === "ok" || e.pending)) gone.add(e.id);
+  const file = readJson(path.join(DATA_DIR, "followback-targets.json"));
+  const fileList = Array.isArray(file) ? file : (Array.isArray(file?.targets) ? file.targets : null);
+  if (fileList) {
+    return fileList.filter((u) => u?.id && !gone.has(u.id) && (isBlueV(u) || u.verified_type === "blue" || u.verified === true || (!u.verified_type && !("verified" in (u ?? {}))))).length;
+  }
+  const cache = readJson(path.join(DATA_DIR, "cache.json"));
+  if (!cache?.followers) return null;
+  for (const u of cache.following ?? []) gone.add(u.id);
   return cache.followers.filter((u) => u?.id && !gone.has(u.id) && isBlueV(u)).length;
 }
 

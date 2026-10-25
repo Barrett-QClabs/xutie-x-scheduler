@@ -297,6 +297,14 @@ function rateHeaders(response) {
 }
 
 export async function xRequest(credentials, method, apiPath, query, reqBody) {
+  // Hard guard for followback (and any process that sets NO_PAID_READS=1): block all
+  // paid developer API GETs. Writes (POST follow / DELETE unfollow / posting) remain OK.
+  if (process.env.NO_PAID_READS === "1" && String(method).toUpperCase() === "GET") {
+    const err = new Error(`NO_PAID_READS: blocked paid GET ${apiPath} (use free X plugin / file targets)`);
+    err.status = 0;
+    err.code = "NO_PAID_READS";
+    throw err;
+  }
   const url = `${API_BASE}${apiPath}`;
   const header = buildAuthorizationHeader({
     method,

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Idempotent: starts the keyword auto-follow daemon unless it is already running.
+if [ -f /workspace/x-unfollow/KEYWORD_DISABLED ]; then echo "keywordfollow disabled by user (2026-10-25)"; exit 0; fi
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 cd "${X_AUTOMATION_DIR:-/workspace/x-unfollow}"
 if [ -f keywordfollow.lock ] && kill -0 "$(cat keywordfollow.lock)" 2>/dev/null; then
