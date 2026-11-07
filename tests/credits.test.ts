@@ -14,7 +14,7 @@ function connect() {
 describe("X reads only when due", () => {
   it("does not read the timeline while the next post is still in the future", async () => {
     connect();
-    const now = new Date("2026-10-25T00:00:00.000Z");
+    const now = new Date();
     importTweets({ source: "一\n二", format: "text", startAt: new Date(now.getTime() + 5 * 60_000).toISOString(), intervalMinutes: 30 });
     let reads = 0;
     const client: XClient = {
@@ -40,7 +40,7 @@ describe("402 credits depleted", () => {
 
   it("pauses ~10 min instead of failing the post", async () => {
     connect();
-    const now = new Date("2026-10-25T01:00:00.000Z");
+    const now = new Date();
     importTweets({ source: "一\n二", format: "text", startAt: new Date(now.getTime() - 1000).toISOString(), intervalMinutes: 30 });
     const result = await tick({
       now,
@@ -52,10 +52,13 @@ describe("402 credits depleted", () => {
         latestTweet: async () => null,
       },
     });
-    expect(result).toMatchObject({ action: "rate_limited" });
+    expect(result).toMatchObject({ action: "credits_waiting" });
     const until = new Date((result as { until: string }).until).getTime();
     expect(until - now.getTime()).toBe(10 * 60_000);
-    const state = getPublicState();
+    const state = getPublicState(new Date(now.getTime() + 1000));
+    expect(state.queue.lastError).toBe("credits");
+    expect(state.activity.phase).toBe("credits_waiting");
+    expect(state.activity.fault).toBe("credits");
     expect(state.tweets.filter((t) => t.status === "failed")).toHaveLength(0);
     expect(state.tweets.filter((t) => t.status === "pending")).toHaveLength(2);
   });

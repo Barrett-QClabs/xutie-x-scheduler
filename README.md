@@ -16,7 +16,7 @@ Paste or upload a batch of posts, queue them on an interval, and let a local pro
 - Irregular timing: every gap between two consecutive posts is the interval **plus** a fresh random extra delay drawn uniformly, to the second, from the min–max range. With the defaults that is anywhere from 16:00 to 17:00 (for example 16:07, 16:52, 16:23). The interval is a hard minimum: a gap is never shorter than it. The range must satisfy `0 <= min <= max < interval`; set both to 0 for a fixed grid.
 - Before each send, the scheduler reads the account's latest post on X, including posts made outside this app. If that post is newer than one interval, the due tweet moves to that post's time + interval + a random extra delay, and later pending tweets are pushed so each gap is again interval + random extra (posts are never moved earlier). A delay caused by a post this app did not send is labeled in the queue.
 - The same randomized spacing applies whenever the queue shifts: overdue posts after a restart, the wait after an X rate limit (resume at the reset time + random extra), and "reschedule pending posts".
-- State lives in SQLite, so a restart keeps unsent posts. HTTP 429 waits for `x-rate-limit-reset`. Duplicate content is marked failed and the queue continues. An auth failure pauses the queue and shows the reason. A successful post stores the tweet id and a link to `https://x.com/{handle}/status/{id}`.
+- State lives in SQLite, so a restart keeps unsent posts. HTTP 429 (rate limit) and HTTP 402 (credits or balance used up) are stored separately: 429 waits for `x-rate-limit-reset`, and 402 waits about 10 minutes. Neither marks the post failed. Duplicate content fails that one post, and later posts still go out. A 401, or a 403 about permissions, pauses the queue and shows the reason. A successful post stores the tweet id and a link to `https://x.com/{handle}/status/{id}`.
 
 ## Screenshots
 
@@ -60,7 +60,11 @@ To try the queue without calling X, set this in `.env.local`:
 X_API_MODE=mock
 ```
 
-Connection tests and posts stay local. Tweet text containing `[[duplicate]]`, `[[rate-limit]]`, `[[auth]]`, or `[[fail]]` makes the mock client return a duplicate, a 429, an auth error, or a transient error. Switch back to `X_API_MODE=live` before posting for real.
+Connection tests and posts stay local. Tweet text containing `[[duplicate]]`, `[[rate-limit]]`, `[[credits]]`, `[[auth]]`, `[[forbidden]]`, or `[[fail]]` makes the mock client return a duplicate, a 429, a 402, a 401, a 403 permission error, or a transient error. In mock mode those markers work even when no credentials are saved, and nothing is sent to X. Switch back to `X_API_MODE=live` before posting for real.
+
+`GET /api/diagnostics` reads the local queue only. It reports the service phase (empty queue, nothing waiting, paused, credits wait, rate-limit wait, auth pause, waiting for the due time, or due). `?scenario=credits` (or `rate_limit`, `auth`, `forbidden`, `duplicate`, `rejected`, `transient`) describes that built-in case and does not apply it to the queue. The response does not include saved credentials. A queue with nothing pending, including one that already has many successful posts, is reported as idle. A missing scheduler heartbeat is reported as unknown, which means this process has not recorded a check yet.
+
+The queue page and the sidebar use those phases so an empty queue, a pause, an unsaved draft, a pending post, and a successful post stay labeled differently. Text sitting in the import box or the edit dialog is a draft until it is saved into the queue.
 
 ### Tests
 
@@ -105,7 +109,8 @@ X's prices change. The figures below are from public 2026 information. **Your de
 - Before each post, 序帖 makes one extra read: `GET /2/users/:id/tweets` with `max_results=5`, `tweet.fields=created_at`, and `exclude=retweets,replies`, so it can see the time of the account's latest original post, including posts you wrote by hand. Replies (comments) and retweets don't count toward the gap. That read is billed. One response contains up to 5 posts. Public figures put a single read around $0.005; confirm the unit price on your bill. A successful result is cached for 60 seconds, and kept until the interval ends when the latest post is still inside that interval, so the wait does not re-read every 5 seconds. If the read fails, the queue is not paused: the app uses its own last send time and logs the failure.
 - A sent post therefore costs about one timeline read plus one create. If nobody posts by hand during the wait, the app reads once more when the interval is over, to confirm the gap is clear.
 - The older Basic plan (about $200 per month) and Pro remain only for accounts that already subscribe. New accounts generally cannot start them.
-- Posting too fast returns HTTP 429. 序帖 waits until `x-rate-limit-reset`, or 15 minutes if that header is missing. The tweet stays pending.
+- Posting too fast returns HTTP 429. 序帖 waits until `x-rate-limit-reset`, or 15 minutes if that header is missing, and stores the wait as `rate_limit`. The tweet stays pending.
+- Running out of API credits returns HTTP 402. 序帖 waits about 10 minutes and stores the wait as `credits`. The tweet stays pending. A 402 is not shown as a rate limit.
 - Public docs often cite about 100 creates per user per 15 minutes and 10,000 per app per 24 hours. Plans differ. The default of one post every 15 minutes is meant to look less like a burst and sits far under those numbers.
 - X rejects duplicate content. That item is marked failed and the queue continues. Edit the text and retry.
 - Posts over 280 need X Premium. If X refuses a long post (for example a 403 about length or Premium), only that post is marked failed with a readable message; the queue keeps going.
@@ -150,8 +155,8 @@ Changing `CREDENTIALS_ENCRYPTION_KEY` makes old credentials undecryptable and pa
 
 | Table | What it holds |
 | --- | --- |
-| `queue_settings` | Interval, random extra delay range (`random_min_seconds`, `random_max_seconds`, added automatically to older databases with defaults 60/120; the legacy `jitter_minutes` column is no longer used), pause, rate-limit deadline, and the last timeline read |
-| `tweets` | Text, schedule, status, tweet id, error, and whether a post made outside this app delayed it |
+| `queue_settings` | Interval, random extra delay range (`random_min_seconds`, `random_max_seconds`, added automatically to older databases with defaults 60/120; the legacy `jitter_minutes` column is no longer used), pause, wait deadline, `last_error` (`credits`, `rate_limit`, or `auth`), the last scheduler check (`last_tick_at`, `last_tick_action`), and the last timeline read. Older databases gain the new columns on startup. |
+| `tweets` | Text, schedule, status, tweet id, error, `error_kind` when this build recorded one, and whether a post made outside this app delayed it. A status other than pending, posted, or failed (for example cancelled) is left as it is. |
 | `credentials` | The four credentials, encrypted, plus the @handle from a successful test |
 
 The cipher is scrypt plus AES-256-GCM. The salt and IV are stored with the ciphertext. Without the encryption key, the credentials cannot be read back.
@@ -165,6 +170,9 @@ The cipher is scrypt plus AES-256-GCM. The salt and IV are stored with the ciphe
 - No built-in login. Do not expose it on the public internet.
 - OAuth 1.0a user context only. No OAuth 2.0 PKCE.
 - The character count approximates twitter-text v3. Complex emoji can be off by one or two.
+- A wait recorded by an older build as `last_error=rate_limit` cannot be split back into 402 and 429. New waits store `credits` and `rate_limit` separately. Opening the database does not change existing tweet statuses.
+- A 403 is auth only when the body indicates credentials or permission. Duplicate content and length or Premium refusals stay on that one post. A 403 with none of those clues fails that post and the queue continues.
+- `last_tick_at` is empty until this build has finished one scheduler check. The page calls that unknown. It does not, by itself, mean the process has stopped.
 
 ## Roadmap
 

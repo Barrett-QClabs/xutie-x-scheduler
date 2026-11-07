@@ -94,6 +94,9 @@ function migrate(db: DatabaseSync): void {
   );
   ensureColumn(db, "tweets", "delay_reason", "ALTER TABLE tweets ADD COLUMN delay_reason TEXT");
   ensureColumn(db, "tweets", "extra_json", "ALTER TABLE tweets ADD COLUMN extra_json TEXT");
+  ensureColumn(db, "tweets", "error_kind", "ALTER TABLE tweets ADD COLUMN error_kind TEXT");
+  ensureColumn(db, "queue_settings", "last_tick_at", "ALTER TABLE queue_settings ADD COLUMN last_tick_at TEXT");
+  ensureColumn(db, "queue_settings", "last_tick_action", "ALTER TABLE queue_settings ADD COLUMN last_tick_action TEXT");
   db.prepare(
     `INSERT OR IGNORE INTO queue_settings
       (id, interval_minutes, jitter_minutes, paused, updated_at)
@@ -117,6 +120,7 @@ type TweetRow = {
   posted_at: string | null;
   tweet_id: string | null;
   error_message: string | null;
+  error_kind?: string | null;
   attempt_count: number;
   sort_order: number;
   delay_reason: string | null;
@@ -180,8 +184,11 @@ export function getQueueSettings(): QueueSettings {
     pause_reason: string | null;
     rate_limit_until: string | null;
     last_error: string | null;
+    last_tick_at: string | null;
+    last_tick_action: string | null;
   }>(
-    `SELECT interval_minutes, random_min_seconds, random_max_seconds, paused, pause_reason, rate_limit_until, last_error
+    `SELECT interval_minutes, random_min_seconds, random_max_seconds, paused, pause_reason, rate_limit_until, last_error,
+            last_tick_at, last_tick_action
      FROM queue_settings WHERE id = 1`,
   );
   if (!row) {
@@ -193,6 +200,8 @@ export function getQueueSettings(): QueueSettings {
       pauseReason: null,
       rateLimitUntil: null,
       lastError: null,
+      lastTickAt: null,
+      lastTickAction: null,
     };
   }
   return {
@@ -203,6 +212,8 @@ export function getQueueSettings(): QueueSettings {
     pauseReason: row.pause_reason,
     rateLimitUntil: row.rate_limit_until,
     lastError: row.last_error,
+    lastTickAt: row.last_tick_at,
+    lastTickAction: row.last_tick_action,
   };
 }
 
@@ -215,6 +226,8 @@ export function patchQueueSettings(
     pauseReason: string | null;
     rateLimitUntil: string | null;
     lastError: string | null;
+    lastTickAt: string | null;
+    lastTickAction: string | null;
   }>,
 ): void {
   const map: Record<string, string> = {
@@ -225,6 +238,8 @@ export function patchQueueSettings(
     pauseReason: "pause_reason",
     rateLimitUntil: "rate_limit_until",
     lastError: "last_error",
+    lastTickAt: "last_tick_at",
+    lastTickAction: "last_tick_action",
   };
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -325,6 +340,7 @@ function mapTweet(row: TweetRow): Tweet {
     postedAt: row.posted_at,
     tweetId: row.tweet_id,
     errorMessage: row.error_message,
+    errorKind: row.error_kind ?? null,
     attemptCount: row.attempt_count,
     sortOrder: row.sort_order,
     delayReason: row.delay_reason === "manual" ? "manual" : null,
@@ -398,6 +414,7 @@ const TWEET_COLUMNS: Record<string, string> = {
   postedAt: "posted_at",
   tweetId: "tweet_id",
   errorMessage: "error_message",
+  errorKind: "error_kind",
   attemptCount: "attempt_count",
   sortOrder: "sort_order",
   delayReason: "delay_reason",
@@ -414,6 +431,7 @@ export function patchTweet(
     postedAt: string | null;
     tweetId: string | null;
     errorMessage: string | null;
+    errorKind: string | null;
     attemptCount: number;
     sortOrder: number;
     delayReason: DelayReason;
@@ -453,6 +471,8 @@ export function resetAllData(): void {
       pause_reason = NULL,
       rate_limit_until = NULL,
       last_error = NULL,
+      last_tick_at = NULL,
+      last_tick_action = NULL,
       lock_until = NULL,
       timeline_checked_at = NULL,
       timeline_latest_at = NULL,
