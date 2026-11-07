@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { loadInactive24hMap, recentlyFollowedIds, inactiveCfg } from "./following-activity.mjs";
 
 // Runtime data (logs, cache, locks, whitelist) live in DATA_DIR, code may live elsewhere (序帖 repo automation/).
 const DATA_DIR = process.env.X_AUTOMATION_DIR || "/workspace/x-unfollow";
@@ -46,7 +47,7 @@ const PROTECT_RECENT_N = 400;
 // Additionally, daily snapshots of following IDs are kept; anyone present now but absent
 // from the most recent snapshot of a PREVIOUS day is a new follow today -> protected.
 const SNAP_DIR = path.join(DATA_DIR, "following-snapshots");
-const DAILY_CAP = 100;    // max successful unfollows per calendar day (Asia/Shanghai)
+const DAILY_CAP = 336;    // max successful unfollows per calendar day (Asia/Shanghai)
 const CAP_TZ = "Asia/Shanghai";
 
 // --- CLI ---
@@ -168,7 +169,7 @@ export function creditsBackoffMs() {
 export async function getMe(credentials, stored = {}) {
   try {
     const cached = JSON.parse(fs.readFileSync(ME_CACHE_PATH, "utf8"));
-    if (cached?.id && cached?.username && Date.now() - Date.parse(cached.fetchedAt || 0) < 7 * 86400_000) {
+    if (cached?.id && cached?.username && (process.env.NO_PAID_READS === "1" || Date.now() - Date.parse(cached.fetchedAt || 0) < 7 * 86400_000)) {
       return { id: cached.id, username: cached.username, fromCache: true };
     }
   } catch {}
@@ -473,7 +474,10 @@ export async function fetchListsOrCache(credentials, userId, opts = {}) {
   const fullAt = cache?.fullRefreshAt ? Date.parse(cache.fullRefreshAt) : 0;
   const needFull = opts.forceFull || !cache || !cache.following?.length || !cache.followers?.length || (Date.now() - fullAt) >= FULL_REFRESH_MS;
 
-  if (needFull) {
+  if (needFull && process.env.NO_PAID_READS === "1" && cache?.following?.length && cache?.followers?.length) {
+    console.error(`[warn] NO_PAID_READS=1: full paid list refresh due (last ${cache.fullRefreshAt}) but skipped; using local delta cache`);
+    cache.cacheWarning = "full refresh skipped (NO_PAID_READS)";
+  } else if (needFull) {
     try {
       const following = await pageUsers(credentials, "following", userId);
       const followers = await pageUsers(credentials, "followers", userId);
@@ -564,12 +568,36 @@ export function protectedRecentIds(following, _newIds) {
   return new Set(following.slice(0, PROTECT_TOP_N).map((u) => u.id));
 }
 
-// Plan = (A) every non-blue-V followed account (mutual or not, recent or not)
-//      + (B) blue-V accounts that do NOT follow back, outside the first PROTECT_RECENT_N follows.
-// Blue-V mutuals never. Order: all of A oldest-first, then B oldest-first.
-function classifyNonMutual(following, followers, whitelist, skipIds, protectedTop) {
+// Plan order (2026-10-29):
+//   (0) political-unfollow.txt — bypass recent-400 / protectedTop / mutual; never whitelist
+//   (1) every non-blue-V (mutual or not, recent or not)
+//   (2) blue-V non-mutuals outside the first PROTECT_RECENT_N follows
+//   (3) inactive-24h LAST (2026-10-29 17:02) — blue-V accounts not in tiers 1-2 (mutual or recent-400)
+//       with no post/reply in 24h; EVEN MUTUAL; bypass recent-400; never whitelist; skip followed <24h
+// Blue-V mutuals never in other tiers. Accounts already in an earlier tier stay there.
+export function loadPoliticalPriority() {
+  try {
+    return new Set(fs.readFileSync(path.join(DATA_DIR, "political-unfollow.txt"), "utf8").split("\n")
+      .map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((l) => l.split(/\s+/)[0]));
+  } catch { return new Set(); }
+}
+// 2026-11-04: suspended-unfollow.txt (write-suspended.mjs, FREE lookup errors) — top tier with political
+export function loadSuspendedPriority() {
+  try {
+    return new Set(fs.readFileSync(path.join(DATA_DIR, "suspended-unfollow.txt"), "utf8").split("\n")
+      .map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((l) => l.split(/\s+/)[0]));
+  } catch { return new Set(); }
+}
+function classifyNonMutual(following, followers, whitelist, skipIds, protectedTop, opts = {}) {
+  const politicalIds = loadPoliticalPriority();
+  const suspendedIds = loadSuspendedPriority();
+  const political = [];
+  const inactive = [];
+  const inactiveSeen = new Set();
   const followerIds = new Set(followers.map((u) => u.id));
   const recentBlueGuard = new Set(following.slice(0, PROTECT_RECENT_N).map((u) => u.id));
+  const inactiveMap = opts.inactiveMap instanceof Map ? opts.inactiveMap : new Map();
+  const recentFollow = opts.recentFollowIds instanceof Set ? opts.recentFollowIds : new Set();
   const nonBlue = [];
   const blueNonMutual = [];
   let blueMutual = 0;
@@ -577,16 +605,44 @@ function classifyNonMutual(following, followers, whitelist, skipIds, protectedTo
   let whitelisted = 0;
   let mutualInPlan = 0;
   let protectedCount = 0;
+  let inactiveSkippedMutual = 0;
+  let inactiveSkippedRecentFollow = 0;
+  let inactiveSkippedWhitelist = 0;
   for (const u of following) {
     if (!u?.id) continue;
+    const uname = (u.username ?? "").toLowerCase();
+    // (0) Suspended priority — bypass recent-400 / protectedTop / mutual; whitelist still wins
+    if (suspendedIds.has(String(u.id)) && !skipIds.has(u.id) && !whitelist.has(uname)) {
+      political.push({ id: u.id, username: u.username ?? "", mutual: followerIds.has(u.id), verified: !!u.verified,
+        verified_type: u.verified_type ?? null, blueV: isBlueV(u), priority: "suspended" });
+      continue;
+    }
+    // (1) Political priority — bypass recent-400 / protectedTop / mutual; never whitelist
+    if (politicalIds.has(u.id) && !skipIds.has(u.id) && !whitelist.has(uname)) {
+      political.push({ id: u.id, username: u.username ?? "", mutual: followerIds.has(u.id), verified: !!u.verified,
+        verified_type: u.verified_type ?? null, blueV: isBlueV(u), priority: "political" });
+      continue;
+    }
     if (protectedTop.has(u.id)) { protectedCount += 1; continue; }
     if (skipIds.has(u.id)) continue; // already unfollowed per log (matters when using cache)
-    if (whitelist.has((u.username ?? "").toLowerCase())) { whitelisted += 1; continue; }
+    if (whitelist.has(uname)) { whitelisted += 1; continue; }
     const mutual = followerIds.has(u.id);
     const base = { id: u.id, username: u.username ?? "", mutual, verified: !!u.verified, verified_type: u.verified_type ?? null };
     if (isBlueV(u)) {
-      if (mutual) { blueMutual += 1; continue; }                          // blue-V mutual: NEVER
-      if (recentBlueGuard.has(u.id)) { blueRecentProtected += 1; continue; } // recent: time to follow back
+      const isInactive = inactiveMap.has(String(u.id)) || inactiveMap.has(u.id);
+      if (mutual || recentBlueGuard.has(u.id)) {
+        // (4) Inactive-24h LAST (rule 2026-10-29 17:02): even mutual; bypass recent-400; skip followed <24h
+        if (isInactive) {
+          if (recentFollow.has(String(u.id)) || recentFollow.has(u.id)) { inactiveSkippedRecentFollow += 1; continue; }
+          const info = inactiveMap.get(String(u.id)) ?? inactiveMap.get(u.id);
+          inactive.push({ ...base, blueV: true, priority: "inactive24h",
+            lastAnyAt: info?.lastAnyAt ?? null, inactiveWhy: info?.why ?? "inactive-24h" });
+          if (mutual) inactiveSkippedMutual += 0; // mutuals now allowed for this tier
+          continue;
+        }
+        if (mutual) { blueMutual += 1; continue; }                        // blue-V mutual: NEVER (other tiers)
+        blueRecentProtected += 1; continue;                               // recent: time to follow back
+      }
       blueNonMutual.push({ ...base, blueV: true });
     } else {
       if (mutual) mutualInPlan += 1;
@@ -594,10 +650,37 @@ function classifyNonMutual(following, followers, whitelist, skipIds, protectedTo
     }
   }
   // following list is reverse-chronological -> reverse for oldest-followed first
+  inactive.reverse();
   nonBlue.reverse();
   blueNonMutual.reverse();
-  return { ordered: [...nonBlue, ...blueNonMutual], nonBlueCount: nonBlue.length, blueNonMutualCount: blueNonMutual.length,
-    blueMutual, blueRecentProtected, whitelisted, mutualInPlan, protectedCount };
+  return {
+    ordered: [...political, ...nonBlue, ...blueNonMutual, ...inactive],
+    nonBlueCount: nonBlue.length,
+    blueNonMutualCount: blueNonMutual.length,
+    politicalCount: political.length,
+    inactiveCount: inactive.length,
+    inactiveSkippedMutual, inactiveSkippedRecentFollow, inactiveSkippedWhitelist,
+    blueMutual, blueRecentProtected, whitelisted, mutualInPlan, protectedCount,
+  };
+}
+
+
+// 2026-10-30 (user rule: ALL X reads must be FREE): tier-3 follow-back re-check now uses
+// followers-free-cache.json (built from the free user-X plugin get_users_me_followers by
+// write-followers-cache.mjs). Missing / stale / incomplete cache => treat every tier-3 blue-V
+// candidate as possibly mutual and SKIP it. The paid GET /2/users re-check is no longer used.
+const FREE_FOLLOWERS_CACHE = path.join(DATA_DIR, "followers-free-cache.json");
+const FREE_FOLLOWERS_MAX_AGE_H = Number(process.env.FREE_FOLLOWERS_MAX_AGE_H || 6);
+function loadFreeFollowers() {
+  try {
+    const c = JSON.parse(fs.readFileSync(FREE_FOLLOWERS_CACHE, "utf8"));
+    const ageH = (Date.now() - Date.parse(c.fetchedAt)) / 3600_000;
+    if (!c.complete) return { ok: false, reason: "free followers cache incomplete" };
+    if (!(ageH <= FREE_FOLLOWERS_MAX_AGE_H)) return { ok: false, reason: `free followers cache stale (${ageH.toFixed(1)}h > ${FREE_FOLLOWERS_MAX_AGE_H}h)` };
+    return { ok: true, ids: new Set((c.ids ?? []).map(String)), fetchedAt: c.fetchedAt, count: c.count, ageH };
+  } catch (err) {
+    return { ok: false, reason: `free followers cache missing/unreadable: ${err.code || err.message}` };
+  }
 }
 
 // Fresh connection_status for up to USER_LOOKUP_BATCH blue-V targets before DELETEs.
@@ -677,21 +760,34 @@ async function main() {
   const whitelist = loadWhitelist();
   const newToday = newTodayIds(lists.following);
   const protectedIds = protectedRecentIds(lists.following, newToday.ids);
-  const { ordered, nonBlueCount, blueNonMutualCount, blueMutual, blueRecentProtected, whitelisted, mutualInPlan, protectedCount } = classifyNonMutual(
+  let autoCfg = {};
+  try { autoCfg = JSON.parse(fs.readFileSync(path.join(DATA_DIR, "automation.config.json"), "utf8")); } catch {}
+  const iCfg = inactiveCfg(autoCfg);
+  const inactiveMap = loadInactive24hMap(autoCfg);
+  const recentFollowIds = recentlyFollowedIds(iCfg.minFollowAgeHours);
+  const {
+    ordered, nonBlueCount, blueNonMutualCount, blueMutual, blueRecentProtected, whitelisted, mutualInPlan, protectedCount,
+    politicalCount, inactiveCount, inactiveSkippedMutual, inactiveSkippedRecentFollow, inactiveSkippedWhitelist,
+  } = classifyNonMutual(
     lists.following,
     lists.followers,
     whitelist,
     loadAlreadyUnfollowedIds(),
     protectedIds,
+    { inactiveMap, recentFollowIds },
   );
 
   const todayCount = countTodayUnfollows();
   try {
-    const inPlan = nonBlueCount + blueNonMutualCount;
+    const inPlan = politicalCount + inactiveCount + nonBlueCount + blueNonMutualCount;
     fs.writeFileSync(path.join(DATA_DIR, "unfollow-plan.json"), JSON.stringify({
       updated: new Date().toISOString(),
-      rule: "all non-blue-V (mutual or not) + blue-V non-mutual outside the 400 most recent; blue-V mutual never",
+      rule: "suspended + political → non-blue-V → blue-V non-mutual outside recent 400 → inactive-24h LAST (even mutual, bypasses recent 400); blue-V mutual never otherwise; whitelist always wins",
       cacheTimestamp: lists.timestamp, following: lists.following.length, inPlan,
+      political: politicalCount, inactive24h: inactiveCount,
+      inactive24hSkippedMutual: inactiveSkippedMutual,
+      inactive24hSkippedRecentFollow: inactiveSkippedRecentFollow,
+      inactive24hSkippedWhitelist: inactiveSkippedWhitelist,
       nonBlueV: nonBlueCount, nonBlueVMutual: mutualInPlan, blueVNonMutual: blueNonMutualCount,
       mutualInPlan, blueVMutualNever: blueMutual, blueVRecentProtected: blueRecentProtected, whitelisted,
       protectedTop20: protectedCount, dailyCap: DAILY_CAP, daysAtCap: Math.ceil(inPlan / DAILY_CAP),
@@ -699,54 +795,50 @@ async function main() {
   } catch {}
   const allowed = Math.max(0, Math.min(LIMIT, DAILY_CAP - todayCount));
   // a few spares so a skipped blue-V (now follows back) doesn't shrink the run; DELETE attempts stay <= allowed
-  const targets = ordered.slice(0, allowed > 0 ? allowed + 10 : 0);
+  // 2026-11-03: drop blue-V candidates that already follow back (free followers cache) BEFORE slicing, so a stale plan head can't starve the run
+  let orderedLive = ordered;
+  try {
+    const ff0 = loadFreeFollowers();
+    if (ff0.ok) orderedLive = ordered.filter((t) => !(t.blueV && !t.priority && ff0.ids.has(String(t.id))));
+  } catch {}
+  const targets = orderedLive.slice(0, allowed > 0 ? allowed + 10 : 0);
   let attempts = 0;
   const unfollowed = [];
   const errors = [];
   let lastDeleteRate = null;
   let stoppedReason = null;
+  let freeFollowersSummary = null; let skippedPossiblyMutualCount = 0;
 
   if (!dryRun) {
-    // Prefetch blue-V re-checks in batches of USER_LOOKUP_BATCH; act at normal ~3 min pace.
-    let freshCache = new Map(); // id -> {ok, followsBack, gone, blueV}
-    let freshPrefetchIdx = 0;
-    async function ensureFresh(fromIdx) {
-      const need = [];
-      for (let j = fromIdx; j < targets.length && need.length < USER_LOOKUP_BATCH; j++) {
-        const t = targets[j];
-        if (!t.blueV) continue;
-        if (freshCache.has(t.id)) continue;
-        need.push(t.id);
-      }
-      if (!need.length) return true;
-      const batch = await freshFollowsBackBatch(credentials, need);
-      if (!batch.ok) {
-        if (batch.status === 402) {
-          const w = creditsBackoffMs();
-          console.error(`[warn] blue-V re-check 402; backing off ${Math.round(w / 1000)}s`);
-          await sleep(w);
-        }
-        return false;
-      }
-      for (const [id, v] of batch.map) freshCache.set(id, v);
-      return true;
-    }
+    const freeFollowers = loadFreeFollowers();
+    console.error(freeFollowers.ok
+      ? `[info] free follow-back check: followers-free-cache.json ${freeFollowers.count} ids, fetched ${freeFollowers.fetchedAt} (${freeFollowers.ageH.toFixed(1)}h old)`
+      : `[warn] free follow-back check unavailable (${freeFollowers.reason}); tier-3 blue-V candidates will be SKIPPED as possibly mutual`);
+    freeFollowersSummary = freeFollowers;
     for (let i = 0; i < targets.length; i++) {
       const target = targets[i];
       // Safety re-checks before every DELETE
-      if (protectedIds.has(target.id) || whitelist.has(target.username.toLowerCase()) || (target.blueV && target.mutual)) {
+      if (whitelist.has(target.username.toLowerCase())) {
+        throw new Error(`safety check refused to unfollow ${target.username} (whitelist)`);
+      }
+      // political may unfollow mutuals; inactive24h and default must not
+      if (!target.priority && (protectedIds.has(target.id) || (target.blueV && target.mutual))) {
         throw new Error(`safety check refused to unfollow ${target.username}`);
+      }
+      if (target.priority === "inactive24h" && recentFollowIds.has(String(target.id))) {
+        throw new Error(`safety check refused to unfollow ${target.username} (followed <24h)`);
       }
       if (attempts >= allowed) break;
       if (countTodayUnfollows() >= DAILY_CAP) { stoppedReason = "daily_cap_reached"; break; }
-      if (target.blueV) {
-        if (!freshCache.has(target.id)) {
-          const ok = await ensureFresh(i);
-          if (!ok) { stoppedReason = "recheck_failed"; break; }
+      // Re-check blue-V follow-back for default + inactive24h (political skips: user ordered them gone)
+      if (target.blueV && !target.priority) {
+        if (!freeFollowers.ok) {
+          skippedPossiblyMutualCount += 1;
+          console.error(`[info] skip blue-V ${target.username}: possibly mutual (${freeFollowers.reason})`);
+          continue;
         }
-        const fresh = freshCache.get(target.id);
-        if (!fresh || fresh.followsBack || fresh.gone) {
-          console.error(`[info] skip blue-V ${target.username}: ${!fresh ? "re-check missing" : fresh.gone ? "gone" : "now follows back"}`);
+        if (freeFollowers.ids.has(String(target.id))) {
+          console.error(`[info] skip blue-V ${target.username}: now follows back (free followers cache)`);
           continue;
         }
       }
@@ -759,16 +851,20 @@ async function main() {
         id: target.id,
         blueV: target.blueV,
         mutual: !!target.mutual,
-        result: res.ok ? "ok" : `HTTP ${res.status}`,
+        // suspended: a failed DELETE (non 401/402/429) is logged as done so it is never retried
+        result: res.ok ? "ok" : (target.priority === "suspended" && ![401, 402, 429].includes(res.status) ? "ok" : `HTTP ${res.status}`),
+        ...(target.priority === "suspended" ? { priority: "suspended", httpStatus: res.status } : {}),
         detail: res.ok ? null : extractErrorMessage(res.body),
         rate: res.rate,
       };
       appendLog(entry);
-      console.error(`[${entry.time}] ${target.username} -> ${entry.result} (rate remaining ${res.rate.remaining}/${res.rate.limit}, reset ${res.rate.reset})`);
+      console.error(`[${entry.time}] ${target.username} -> ${entry.result}${res.ok ? "" : ` code=${res.status} detail=${JSON.stringify(entry.detail)} body=${JSON.stringify(res.body).slice(0, 400)}`} (rate remaining ${res.rate.remaining}/${res.rate.limit}, reset ${res.rate.reset})`);
 
       if (res.ok) {
         // DELETE following returns { data: { following: false } } on success
         unfollowed.push({ username: target.username, id: target.id, blueV: target.blueV, mutual: target.mutual });
+      } else if (target.priority === "suspended" && ![401, 402, 429].includes(res.status)) {
+        console.error(`[info] suspended ${target.username}: DELETE HTTP ${res.status} treated as done (logged, not retried)`);
       } else if (res.status === 401 || res.status === 403 || res.status === 429) {
         errors.push({
           username: target.username,
@@ -822,12 +918,16 @@ async function main() {
     counts: {
       following: lists.following.length,
       followers: lists.followers.length,
-      planTotal: nonBlueCount + blueNonMutualCount,
+      planTotal: politicalCount + inactiveCount + nonBlueCount + blueNonMutualCount,
+      planPolitical: politicalCount,
+      planInactive24h: inactiveCount,
       planNonBlueV: nonBlueCount,
       planNonBlueVMutual: mutualInPlan,
       planBlueVNonMutual: blueNonMutualCount,
       blueVMutual_neverUnfollowed: blueMutual,
       blueVNonMutual_recent400Protected: blueRecentProtected,
+      inactive24hSkippedMutual: inactiveSkippedMutual,
+      inactive24hSkippedRecentFollow: inactiveSkippedRecentFollow,
       whitelisted,
       protectedTop20: protectedCount,
       whitelistSize: whitelist.size,
@@ -841,8 +941,11 @@ async function main() {
       id: t.id,
       blueV: t.blueV,
       mutual: !!t.mutual,
+      priority: t.priority ?? null,
     })),
     unfollowedThisRun: unfollowed,
+    freeFollowBackCheck: dryRun ? null : { cacheOk: freeFollowersSummary?.ok ?? null, reason: freeFollowersSummary?.reason ?? null, fetchedAt: freeFollowersSummary?.fetchedAt ?? null, skippedPossiblyMutual: skippedPossiblyMutualCount },
+    noPaidReads: process.env.NO_PAID_READS === "1",
     errors,
     stoppedReason,
     deleteRateLimit: lastDeleteRate,
@@ -870,6 +973,7 @@ if (isMain) main().catch((err) => {
     fatal: true,
     error: err.message,
     status: err.status ?? null,
+    code: err.code ?? null,
     rate: err.rate ?? null,
   };
   console.log(JSON.stringify(summary, null, 2));

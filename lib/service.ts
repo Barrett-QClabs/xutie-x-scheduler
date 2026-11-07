@@ -322,6 +322,18 @@ export function pendingInOrder(): Tweet[] {
     .sort(compareTweets);
 }
 
+/** After a duplicate-content failure, fill that slot with the next pending tweet. */
+export function promoteNextPendingToSlot(slot: Date): string | null {
+  const next = pendingInOrder()[0];
+  if (!next) return null;
+  const current = new Date(next.scheduledAt).getTime();
+  const target = slot.getTime();
+  if (Number.isNaN(current) || Number.isNaN(target)) return null;
+  if (current <= target) return next.id;
+  patchTweet(next.id, { scheduledAt: slot.toISOString(), delayReason: null });
+  return next.id;
+}
+
 export function reorderTweet(id: string, direction: "up" | "down"): { ok: true; moved: boolean } {
   if (direction !== "up" && direction !== "down") {
     throw new AppError("invalid_status", "只能上移或下移。");

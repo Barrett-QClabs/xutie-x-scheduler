@@ -26,7 +26,7 @@ import {
 import {
   DATA_DIR, KW_LOG, KW_STATUS, FB_LOG, loadConfig, readJsonl, readJson, followCountsToday,
   withFollowMutex, waitForWindow, stopFlagToday, setStopFlag, msUntilNextShanghaiMidnight, POOL_DIR, followbackReserve, followbackYieldsSlot,
-  sharedPace, waitForSharedWork, beginSharedRest, PACE_CYCLE, PACE_GAP_MS, chineseZoneCheck,
+  sharedPace, waitForSharedWork, beginSharedRest, BACKOFF_429_MS, PACE_CYCLE, PACE_GAP_MS, chineseZoneCheck, politicalCheck,
 } from "./follow-common.mjs";
 
 const LOCK = path.join(DATA_DIR, "keywordfollow.lock");
@@ -227,7 +227,7 @@ async function buildPool(credentials, userId, username, base = null) {
         if ((u.public_metrics?.followers_count ?? Infinity) > cfg.maxFollowers) { rejected.tooManyFollowers++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
         if (u.protected) { rejected.protected++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
         if (u.username?.toLowerCase() === username.toLowerCase()) { rejected.excluded++; continue; }
-        const zh = chineseZoneCheck({ tweetLang: t.lang, name: u.name, bio: u.description, tweetText: t.text });
+        const zh = chineseZoneCheck({ tweetLang: t.lang, username: u.username, name: u.name, bio: u.description, tweetText: t.text });
         if (!zh.ok) { rejected.notChinese++; rememberRejected(rejectedAuthors, u.id); exclude.add(u.id); continue; }
         candidates.set(u.id, { id: u.id, username: u.username, name: u.name, followers_count: u.public_metrics.followers_count,
           verified: u.verified === true, verified_type: u.verified_type ?? null, keyword: kw, tweet_id: t.id, tweet_at: t.created_at,
@@ -281,7 +281,7 @@ async function refilterPool(credentials, userId, pool) {
   for (const c of todo) {
     const t = tweets.get(c.tweet_id), u = users.get(c.id);
     const zh = !u ? { ok: false, why: "user not found" }
-      : chineseZoneCheck({ tweetLang: t?.lang ?? (t ? null : "deleted"), name: u.name, bio: u.description, tweetText: t?.text ?? c.text });
+      : chineseZoneCheck({ tweetLang: t?.lang ?? (t ? null : "deleted"), username: u.username, name: u.name, bio: u.description, tweetText: t?.text ?? c.text });
     c.tweet_lang = t?.lang ?? null; c.bio = (u?.description ?? "").replace(/\s+/g, " ").slice(0, 160);
     c.zh_ok = zh.ok; c.zh_why = zh.why;
     if (!zh.ok) dropped.push(c);
@@ -472,6 +472,9 @@ async function main() {
       if (pace.phase !== "work" || pace.remaining <= 0) break;
       if (!followbackYieldsSlot().ok) break; // follow-back wants the slot again
       if (excludedIds(userId).has(c.id)) { skip.add(c.id); continue; }
+      { const pol = politicalCheck({ name: c.name, bio: c.bio, tweetText: c.text });
+        if (!pol.ok) { skip.add(c.id); const rj = loadRejectedAuthors(); rememberRejected(rj, c.id); saveRejectedAuthors(rj);
+          logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: pol.why }); continue; } }
       if (!noPaid) {
         const u = fresh?.get(c.id);
         if (!u) { skip.add(c.id); logKw({ time: ts(), day, username: c.username, id: c.id, result: "skipped", detail: "not found/suspended" }); continue; }
@@ -479,7 +482,7 @@ async function main() {
         const bad = cs.includes("following") ? "already following" : cs.includes("follow_request_sent") ? "request pending"
           : u.protected ? "protected" : !isBlueV(u) ? "no longer verified"
           : (u.public_metrics?.followers_count ?? 0) > cfg.keywordfollow.maxFollowers ? "followers > max" : null;
-        const zh = bad ? null : chineseZoneCheck({ tweetLang: c.tweet_lang, name: u.name, bio: u.description, tweetText: c.text });
+        const zh = bad ? null : chineseZoneCheck({ tweetLang: c.tweet_lang, username: u.username, name: u.name, bio: u.description, tweetText: c.text });
         if (zh && !zh.ok) {
           skip.add(c.id);
           const rj = loadRejectedAuthors(); rememberRejected(rj, c.id); saveRejectedAuthors(rj);
@@ -520,7 +523,8 @@ async function main() {
       say(`follow @${c.username} [${c.keyword}] -> ${entry.result} (rate ${res.rate.remaining}/${res.rate.limit}, pace ${sharedPace().used}/${PACE_CYCLE})`);
       if (res.ok) { took += 1; consecutive403 = 0; }
       else if (res.status === 429) {
-        const wait = Math.max(60_000, Number(res.rate.reset) * 1000 - Date.now() + 5_000 || 15 * 60_000);
+        const wait0 = Math.max(60_000, Number(res.rate.reset) * 1000 - Date.now() + 5_000 || 15 * 60_000);
+        const wait = Math.max(wait0, beginSharedRest("429", BACKOFF_429_MS()).ms);
         writeStatus({ state: "rate_limited", resumeAt: new Date(Date.now() + wait).toISOString() });
         say(`429; sleeping ${Math.round(wait / 1000)}s`); await sleep(wait); break;
       } else if (res.status === 402) {

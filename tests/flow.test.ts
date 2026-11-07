@@ -187,6 +187,34 @@ describe("import, queue, and mocked posting", () => {
     expect(retried).toMatchObject({ action: "posted", tweetId: "retried" });
   });
 
+  it("on duplicate content, moves the next pending tweet to that slot", async () => {
+    const slot = new Date();
+    importTweets({
+      source: "重复这条\n补位这条",
+      format: "text",
+      startAt: new Date(slot.getTime() - 60_000).toISOString(),
+      intervalMinutes: 25,
+    });
+    const duplicate = await tick({
+      now: slot,
+      client: client(async () => {
+        throw new XApiError("You are not allowed to create a Tweet with duplicate content.", "duplicate", 403);
+      }),
+    });
+    expect(duplicate.action).toBe("failed");
+    const state = getPublicState();
+    expect(state.tweets.find((tweet) => tweet.text === "重复这条")?.status).toBe("failed");
+    const next = state.tweets.find((tweet) => tweet.text === "补位这条");
+    expect(next?.status).toBe("pending");
+    expect(new Date(next!.scheduledAt).getTime()).toBe(slot.getTime());
+    const filled = await tick({
+      now: new Date(slot.getTime() + 5_000),
+      client: client(async () => ({ id: "filled-slot" })),
+    });
+    expect(filled).toMatchObject({ action: "posted", tweetId: "filled-slot" });
+    expect(getPublicState().tweets.find((tweet) => tweet.text === "补位这条")?.status).toBe("posted");
+  });
+
   it("retries transient errors and then marks the post failed", async () => {
     queueDue("不稳定");
     let cursor = new Date();

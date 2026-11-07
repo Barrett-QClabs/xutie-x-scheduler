@@ -22,7 +22,7 @@ import {
   latestLocalPost,
   nextDueTweet,
   pauseQueue,
-  pendingInOrder,
+  promoteNextPendingToSlot,
   readCredentials,
   reanchorPendingToManual,
 } from "@/lib/service";
@@ -202,7 +202,21 @@ async function executeTick(now: Date, options?: { now?: Date; client?: XClient; 
         });
         return { action: "retry_later", id: due.id };
       }
-      // Duplicate content and other rejections fail this row only. Later pending posts still go out.
+      if (error.kind === "duplicate") {
+        patchTweet(due.id, {
+          status: "failed",
+          errorMessage: error.message,
+          errorKind: "duplicate",
+          attemptCount: due.attemptCount + 1,
+        });
+        // Pull only the next pending row forward. Cancelled or other statuses stay where they are.
+        const promoted = promoteNextPendingToSlot(now);
+        if (promoted) {
+          console.log("[序帖] 内容重复，下一条已补到这个时间点", promoted, now.toISOString());
+        }
+        return { action: "failed", id: due.id };
+      }
+      // Other rejections fail this row only. Later pending posts still go out on their own schedule.
       patchTweet(due.id, {
         status: "failed",
         errorMessage: error.message,

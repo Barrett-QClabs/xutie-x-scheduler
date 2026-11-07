@@ -298,11 +298,12 @@ describe("scheduler stores 402 and 429 separately and keeps later posts moving",
     expect(duplicate?.status).toBe("failed");
     expect(duplicate?.failureClass).toBe("duplicate");
     expect(next?.status).toBe("pending");
+    expect(new Date(next!.scheduledAt).getTime()).toBe(now.getTime());
     expect(mid.queue.paused).toBe(false);
     expect(mid.queue.lastError).toBeNull();
     expect(mid.activity.failureKinds.duplicate).toBe(1);
 
-    const posted = await tick({ now: new Date(next!.scheduledAt), random: () => 0 });
+    const posted = await tick({ now: new Date(now.getTime() + 5_000), random: () => 0 });
     expect(posted).toMatchObject({ action: "posted" });
     const done = getPublicState();
     expect(done.tweets.find((tweet) => tweet.id === duplicate?.id)?.status).toBe("failed");

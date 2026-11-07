@@ -45,9 +45,9 @@ const args = process.argv.slice(2).filter((a, i, arr) => {
 });
 
 const CATEGORY_KEYWORDS = {
-  AI: ["AI", "人工智能", "ChatGPT", "大模型", "AIGC", "Claude", "Midjourney", "提示词", "GPT"],
-  商业: ["商业", "创业", "赚钱", "副业", "投资", "电商", "引流", "私域", "搞钱", "盈利"],
-  两性: ["两性", "恋爱", "婚姻", "情感", "男女", "约会", "脱单", "相亲", "恋爱脑", "婚姻观"],
+  AI: ["AI", "人工智能", "ChatGPT", "大模型", "AIGC", "Claude", "Midjourney", "提示词", "GPT", "智能体", "Agent", "AI工具", "Prompt", "Sora", "DeepSeek", "Grok", "机器学习", "编程"],
+  商业: ["商业", "创业", "赚钱", "副业", "投资", "电商", "引流", "私域", "搞钱", "盈利", "创业者", "流量", "营销", "自媒体", "跨境电商", "理财", "财富自由", "商业思维"],
+  两性: ["两性", "恋爱", "婚姻", "情感", "男女", "约会", "脱单", "相亲", "恋爱脑", "婚姻观", "情侣", "婚恋", "情感咨询", "女性成长", "男性成长", "亲密关系"],
 };
 
 function categoryOfKeyword(kw) {
@@ -56,9 +56,9 @@ function categoryOfKeyword(kw) {
   }
   // filename / free-form fallbacks
   const s = String(kw);
-  if (/AI|人工|ChatGPT|大模型|AIGC|Claude|GPT|提示/i.test(s)) return "AI";
-  if (/商业|创业|赚钱|副业|投资|电商|引流|私域|搞钱|盈利|crypto|币圈/i.test(s)) return "商业";
-  if (/两性|恋爱|婚姻|情感|男女|约会|脱单|相亲|dating/i.test(s)) return "两性";
+  if (/AI|人工|ChatGPT|大模型|AIGC|Claude|GPT|提示|智能体|Agent|Prompt|Sora|Midjourney|DeepSeek|Grok|机器学习|编程/i.test(s)) return "AI";
+  if (/商业|创业|赚钱|副业|投资|电商|引流|私域|搞钱|盈利|流量|营销|自媒体|理财|财富自由|crypto|币圈/i.test(s)) return "商业";
+  if (/两性|恋爱|婚姻|情感|男女|约会|脱单|相亲|情侣|婚恋|女性成长|男性成长|亲密关系|dating/i.test(s)) return "两性";
   return null;
 }
 
@@ -194,7 +194,7 @@ for (const file of files) {
     if (u.protected) { rejected.protected++; continue; }
     if ((u.username ?? "").toLowerCase() === (me.username ?? "").toLowerCase()) { rejected.excluded++; continue; }
     if (whitelist.has((u.username ?? "").toLowerCase())) { rejected.whitelist++; continue; }
-    const zh = chineseZoneCheck({ tweetLang: t.lang, name: u.name, bio: u.description, tweetText: t.text });
+    const zh = chineseZoneCheck({ tweetLang: t.lang, username: u.username, name: u.name, bio: u.description, tweetText: t.text });
     if (!zh.ok) { rejected.notChinese++; continue; }
     const keyword = fileMeta.keyword || kwKey;
     const category = fileMeta.category || categoryOfKeyword(keyword);

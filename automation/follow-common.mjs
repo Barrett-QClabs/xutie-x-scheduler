@@ -35,10 +35,10 @@ export const DEFAULT_CONFIG = {
     keywords: ["AI", "人工智能", "ChatGPT", "大模型", "AIGC", "Claude", "商业", "创业", "赚钱", "副业", "投资", "电商", "两性", "恋爱", "婚姻", "情感", "男女", "约会"],
     categories: ["AI", "商业", "两性"],
     poolSize: 250,
-    maxFollowers: 1000, // inclusive: followers_count ≤ maxFollowers (user rule 2026-10-25)
+    maxFollowers: 20000, // inclusive: followers_count ≤ maxFollowers (user rule 2026-10-29 19:07 Asia/Taipei, raised from 10000; earlier 5000/1000)
     maxSearchPages: 40,
   },
-  combinedFollowDailyCap: 350,
+  combinedFollowDailyCap: 380,
 };
 
 export function loadConfig() {
@@ -140,9 +140,10 @@ export async function waitForWindow(onWait) {
 //   rest: PACE_REST_MIN–PACE_REST_MAX minutes with ZERO follows of any kind, then repeat
 // Follow-back reserves daily room via followbackReserve so keyword cannot starve pending follow-backs.
 // ---------------------------------------------------------------------------------------------
-export const PACE_CYCLE = 10;
-export const PACE_REST_MS = () => 10 * 60_000 + Math.floor(Math.random() * 5 * 60_000); // 10–15 min
-export const PACE_GAP_MS = () => 75_000 + Math.floor(Math.random() * 30_001); // ~90s ±15s
+export const BACKOFF_429_MS = () => 30 * 60_000 + Math.floor(Math.random() * 15 * 60_000); // 30–45 min shared pause after a follow 429
+export const PACE_CYCLE = 10; // user 2026-11-03 14:26: 10 follows per 15 min, then rest 15 min
+export const PACE_REST_MS = () => 15 * 60_000; // 15 min rest (user 2026-11-03)
+export const PACE_GAP_MS = () => 85_000 + Math.floor(Math.random() * 10_001); // 85–95s → 10 follows ≈ 15 min
 export const FB_PACE_MS = 30 * 60_000; // for daily followbackReserve time budget (~10 / 30 min)
 export const POOL_DIR = path.join(DATA_DIR, "keyword-candidates");
 const PACE_FILE = path.join(DATA_DIR, "follow-pace.json");
@@ -185,8 +186,14 @@ export function sharedPace() {
 }
 
 /** Start the shared rest (10–15 min). Idempotent if already resting. */
-export function beginSharedRest(by = "unknown") {
+export function beginSharedRest(by = "unknown", forceMs = 0) {
   const cur = readJson(PACE_FILE) || {};
+  if (forceMs > 0) {
+    const until = Math.max(Date.now() + forceMs, cur.restUntil ? Date.parse(cur.restUntil) : 0);
+    const restUntil = new Date(until).toISOString();
+    writePace({ workStartedAt: cur.workStartedAt ?? null, restUntil, restStartedAt: new Date().toISOString(), restMs: until - Date.now(), by });
+    return { restUntil, ms: until - Date.now() };
+  }
   if (cur.restUntil && Date.parse(cur.restUntil) > Date.now()) {
     return { restUntil: cur.restUntil, ms: Date.parse(cur.restUntil) - Date.now() };
   }
@@ -319,7 +326,9 @@ export function isChineseText(s, minHan = 2) {
   return han >= minHan && kana * 2 < han;
 }
 /** @returns {{ ok: boolean, why: string }} */
-export function chineseZoneCheck({ tweetLang, name, bio, tweetText }) {
+export function chineseZoneCheck({ tweetLang, name, bio, tweetText, username }) {
+  const pol = politicalCheck({ name, bio, tweetText, username });
+  if (!pol.ok) return pol;
   if (tweetLang !== "zh") return { ok: false, why: `tweet lang ${tweetLang ?? "unknown"} != zh` };
   if (isChineseText(name)) return { ok: true, why: "name chinese" };
   if (isChineseText(bio)) return { ok: true, why: "bio chinese" };
@@ -327,4 +336,35 @@ export function chineseZoneCheck({ tweetLang, name, bio, tweetText }) {
   if (n.han + b.han + n.kana + b.kana > 0) return { ok: false, why: "name/bio CJK/kana but not chinese (japanese)" };
   if (isChineseText(tweetText, 4)) return { ok: true, why: "tweet text chinese (name/bio no CJK)" };
   return { ok: false, why: "no chinese in name/bio/tweet" };
+}
+
+// ---------------------------------------------------------------------------------------------
+// NO ANTI-CCP POLITICAL ACCOUNTS (rule 2026-10-29 00:52 Asia/Taipei: "千万不要关注反共的政治账户").
+// Applies to keyword follow AND follow-back. Matches name / bio / sample tweet text.
+// Conservative on purpose: a false positive just skips one candidate.
+// ---------------------------------------------------------------------------------------------
+const POLITICAL_TERMS = [
+  "反共", "灭共", "剿共", "共匪", "赤匪", "共狗", "共产党", "中共", "共党", "中国共产党", "党国", "支那", "强国人",
+  "习近平", "习主席", "习总", "习大大", "习皇", "习帝", "习包子", "包子帝", "刁近平", "近平", "维尼熊", "小熊维尼", "庆丰",
+  "胡锦涛", "江泽民", "李克强", "毛泽东", "毛贼", "太子党", "红二代",
+  "六四", "64天安门", "天安门", "坦克人", "八九民运", "89民运", "民运", "民主运动", "民主中国", "自由中国", "中国民主", "宪政",
+  "极权", "独裁", "暴政", "专制", "威权", "政治犯", "维权", "人权律师", "翻墙", "墙国", "防火长城", "言论自由", "新闻自由",
+  "推翻", "退党", "三退", "法轮", "大法弟子", "大纪元", "新唐人", "希望之声", "神韵", "真善忍", "明慧",
+  "自由亚洲", "美国之音", "VOA", "RFA", "看中国", "新中国联邦", "灭共联盟", "郭文贵", "文贵", "爆料革命", "喜马拉雅", "GTV",
+  "光复香港", "时代革命", "港独", "藏独", "疆独", "台独", "东突", "维吾尔", "新疆集中营", "再教育营", "西藏流亡",
+  "五毛", "粉红", "小粉红", "50cent", "大外宣", "统战", "国安", "政法委", "清零", "白纸运动", "白纸革命", "四通桥", "彭载舟",
+  "文革", "大饥荒", "反贼", "润学", "政治", "时政", "政论", "民主", "自由派", "公知",
+  "CCP", "anti-CCP", "AntiCCP", "CPC", "XiJinping", "Xi Jinping", "Winnie", "Tiananmen", "June4", "Falun", "Uyghur", "Uighur",
+  "FreeHongKong", "StandWithHongKong", "FreeTibet", "Tibet", "Takedown", "TakeDownCCP", "ChinaVirus", "CCPVirus", "Chinazi",
+  "regime", "dictator", "totalitarian", "authoritarian", "human rights", "democracy", "politic",
+];
+const POLITICAL_RE = new RegExp(
+  POLITICAL_TERMS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s*")).join("|"), "i");
+/** @returns {{ ok: boolean, why: string }} ok=false when name/bio/tweet looks like anti-CCP / political content */
+export function politicalCheck({ name, bio, tweetText, username }) {
+  for (const [field, v] of [["username", username], ["name", name], ["bio", bio], ["tweet", tweetText]]) {
+    const m = String(v ?? "").match(POLITICAL_RE);
+    if (m) return { ok: false, why: `political (${field}: ${m[0]})` };
+  }
+  return { ok: true, why: "not political" };
 }

@@ -1,17 +1,23 @@
 x-unfollow rules (@barrett_tt)
 - Untouchable: whitelist.txt only. Top-20 protection removed 2026-10-24.
-- Unfollow plan (rules 2026-10-24):
-  (1) ALL non-blue-V accounts the user follows — mutual or not, recent or not.
-  (2) Blue-V accounts that do NOT follow back, EXCEPT the first 400 of the following list (most recent
-      follows get time to follow back). Each blue-V target is re-checked (connection_status) right
-      before the unfollow and skipped if it now follows back.
-  Blue-V mutuals are NEVER unfollowed.
-- Order: all non-blue-V first (oldest-followed first), then blue-V non-mutuals (oldest first). ~3 min gap (160-200s). Max 10/run (hourly), 100/day (Asia/Shanghai).
+- Unfollow plan (rules 2026-10-24 + order fix 2026-10-29 17:02 「1.政治号2.普通非蓝v3.非互关蓝v4.不活跃号（即便互关也要取关）」):
+  (1) political-unfollow.txt first (explicit user order; bypasses recent-400 / mutual; never whitelist).
+  (2) ALL non-blue-V accounts the user follows — mutual or not, recent or not.
+  (3) Blue-V accounts that do NOT follow back, EXCEPT the first 400 of the following list (most recent
+      follows get time to follow back). Each blue-V target (and inactive-24h blue-V) is re-checked
+      (connection_status) right before the unfollow and skipped if it now follows back.
+  (4) inactive-24h LAST: remaining accounts (blue-V mutuals + recent-400 blue-V) with no post/reply in
+      the last 24h (FREE reads → following-activity.json). EVEN IF MUTUAL; bypasses recent-400; no
+      follow-back re-check; never whitelist; skip if followed < 24h ago.
+  Blue-V mutuals are NEVER unfollowed in other tiers (only political or inactive-24h).
+- Order: political → non-blue-V (oldest first) → blue-V non-mutuals (oldest first) → inactive-24h
+  (oldest first). Pacing per hourly run: random batches of 3-5 (max 5 per batch), 25-70s gaps inside a
+  batch, random 6-14 min rest between batches. Max 10/hour, 100/day (Asia/Shanghai). Window 08:00–22:00.
 - Each unfollow logged to log.jsonl; never re-unfollow ids already in log, and never re-follow them
   (follow-back + keyword follow both skip every id in log.jsonl).
 
 follow rules (follow-back + keyword follow share ONE daily budget)
-- Combined follows (followback.jsonl + keywordfollow.jsonl, result ok, Asia/Shanghai day) <= 350/day
+- Combined follows (followback.jsonl + keywordfollow.jsonl, result ok, Asia/Shanghai day) <= 380/day
   (automation.config.json combinedFollowDailyCap). Both daemons check it inside a shared mutex
   (follow.mutex) right before every POST /2/users/:id/following.
 - Shared 15-min window: <= 45 follow POSTs per 15 min across both daemons (X limit 50); 429 -> sleep to reset.
@@ -24,14 +30,14 @@ follow rules (follow-back + keyword follow share ONE daily budget)
 - FOLLOW-BACK PRIORITY within each work window (swapped 2026-10-24 21:04 Asia/Taipei; before that keyword
   went first): follow-back of blue-V followers I don't follow yet takes slots first; keyword follow of NEW
   people fills the remaining slots in the SAME window (followbackYieldsSlot / follow-back window_yield/idle).
-  Follow-back has no daily reserve limit beyond the combined 350 cap.
+  Follow-back has no daily reserve limit beyond the combined 380 cap.
   Daily followbackReserve keeps room for follow-backs still waiting so keyword cannot use it up:
   reserve = min(blue-V follow-back targets still waiting, 10 per 30 min until Shanghai midnight);
-  0 if follow-back is off / not running. Keyword only follows when combined + reserve < 350.
+  0 if follow-back is off / not running. Keyword only follows when combined + reserve < 380.
 - Keyword pool: once per day keyword-candidates/YYYY-MM-DD.json, target 250 accounts from the FREE X plugin
   (search_posts_all + author expansions → plugin-pages/keyword/*.json → write-keyword-pool.mjs).
   Paid developer API is NOT used for search/user lookup. Categories: AI / 商业 / 两性 only.
-  Query: "<kw> lang:zh is:verified -is:retweet". Filters: blue-V, followers ≤ 1000 inclusive (hard rule 2026-10-25, raised from 100),
+  Query: "<kw> lang:zh is:verified -is:retweet" (+ " -is:reply" for top-ups since 2026-10-27). Filters: blue-V, followers ≤ 5000 inclusive (hard rule 2026-10-28, raised from 1000; earlier 100),
   Chinese-zone, not protected, not already followed, not @barrett_tt, never unfollowed (log.jsonl) or
   followed before by any script. Daemon runs with NO_PAID_READS=1 (POST follow only; no paid pre-follow re-check).
 - KEYWORD FOLLOW IS CHINESE-ZONE (中文区) ONLY (rule 2026-10-24 23:11 Asia/Taipei: "250个，必须是中文区的，
@@ -50,6 +56,24 @@ follow rules (follow-back + keyword follow share ONE daily budget)
 - Never follow non-blue-V accounts (rule 2026-10-24): follow-back only targets blue-V followers;
   keyword follow only blue-V candidates from the plugin-built pool (NO_PAID_READS skips paid re-check;
   pool builder already filtered verified / followers / Chinese-zone / excluded).
+- KEYWORD FOLLOW = RECENTLY ACTIVE ONLY (rule 2026-10-27 16:30 Asia/Taipei, user 「省得取关麻烦」):
+  only follow a candidate whose newest ORIGINAL post (own tweet; replies and retweets do NOT count,
+  quote tweets do) is within the last 12 h AT FOLLOW TIME (automation.config.json
+  keywordfollow.activeWithinHours = 12). Stored per candidate in the pool as last_post_at
+  (a pool tweet_at only counts when tweet_original == true).
+  Evidence comes ONLY from FREE reads (x MCP / user-X plugin), never the paid API:
+    node write-last-post.mjs --plan  → x.get_users_by_usernames (≤100/batch,
+      expansions=most_recent_tweet_id, post.fields=created_at,referenced_tweets,in_reply_to_user_id);
+      if the newest post is a recent reply/RT → x.search_posts_all "(from:a OR …) -is:reply -is:retweet",
+      start_time = now-12h, follow next_token until empty.
+    --save lookup|search <file> → plugin-pages/active/;  --apply → folds into the pool;  --report → counts.
+  States: active (original post ≤12h) → followed most-recent-first (1h, 2h … 12h);
+    inactive (checked ≤ activeCheckMaxAgeMinutes = 120 min ago, no original post ≤12h) → logged
+    keywordfollow.jsonl result "skipped" reason "inactive", not retried today (may return tomorrow
+    if re-checked active); unchecked / stale check → waits (status waiting_for_activity_check), never followed.
+  Re-checked right before each follow (inside follow.mutex) against the 12h window.
+  Top-up searches add `-is:reply` and start_time = now-12h; write-keyword-pool.mjs marks tweet_original and
+  ranks active > unchecked > inactive when trimming. Caps, pace, categories and all other filters unchanged.
 
 
 read-saving (2026-10-25, user "能不能少读呢？" + approved widget t253s889)
@@ -69,3 +93,34 @@ read-saving (2026-10-25, user "能不能少读呢？" + approved widget t253s889
 - 序帖 timeline: one fresh read when a post is due (no 20-min watch polling). Stats: past UTC days cached
   permanently after the day ends; today TTL 60 min; panel auto-poll 30 min.
 - Post interval: 30 min base + random jitter 0–300 s (queue_settings.random_min/max_seconds).
+- 2026-10-29 00:52: 绝不关注反共/政治类账号（name/bio/推文命中政治词即跳过，关键词关注+候选池生效）
+
+INACTIVE-24H UNFOLLOW (rule 2026-10-29 16:55 Asia/Taipei, user 「连续24小时没有发帖和评论的也加入取关池」):
+- Accounts I follow with NOTHING in the last 24 consecutive hours (no original posts AND no replies)
+  are added to the unfollow pool. Evidence = FREE reads only (x MCP / user-X plugin), never paid API.
+  Tooling: node write-following-activity.mjs --plan|--save lookup|--apply|--report
+    x.get_users_by_usernames ≤25/batch, expansions=most_recent_tweet_id,
+    post.fields=created_at,referenced_tweets,in_reply_to_user_id.
+  most_recent tweet of any kind (original / reply / quote / retweet) within 24h → active;
+  older or missing → inactive-24h. State: following-activity.json (incremental; oldest-checked first;
+  prefer non-mutuals; ~checksPerDay=300 → ~12 free reads/day; staleHours=72).
+- Unfollow plan ORDER (2026-10-29 17:02): (1) political-unfollow.txt, (2) non-blue-V, (3) blue-V non-mutual
+  outside the recent-400, (4) inactive-24h LAST. inactive-24h BYPASSES the recent-400 guard and IS
+  unfollowed even if mutual. Whitelist always wins. Do not unfollow accounts I followed less than 24h ago (followback.jsonl + keywordfollow.jsonl).
+- Caps / pacing unchanged: batches 3–5, 25–70s gaps, 6–14 min rests, ≤10/hour, ≤100/day, 08:00–22:00.
+
+FREE FOLLOW-BACK RE-CHECK (2026-10-30 11:50 Asia/Taipei, user 「当然是免费的好，请免费读取」; LOCKED: all X reads FREE only, paid API = writes only):
+- The tier-3 (blue-V non-mutual) re-check no longer calls paid GET /2/users (connection_status). It now checks
+  followers-free-cache.json, built from the FREE user-X plugin get_users_me_followers
+  (max_results=1000, user.fields=username,verified,verified_type,connection_status, page with next_token until absent),
+  saved to plugin-pages/followers-full/YYYYMMDD-pN.json, then:  node write-followers-cache.mjs <all pages in order>
+- Candidate id in the cache → "now follows back" → skipped. Cache missing / incomplete / older than 6h
+  (FREE_FOLLOWERS_MAX_AGE_H) → every tier-3 candidate is treated as possibly mutual and SKIPPED (logged).
+  Tiers 1 (political), 2 (non-blue-V), 4 (inactive-24h) never had this re-check and are unchanged.
+- run.sh runs unfollow.mjs with NO_PAID_READS=1: any paid GET is blocked; me-cache.json is reused even when
+  older than 7 days; the 7-day full paid list refresh is skipped (local delta cache.json is used instead).
+- Failed DELETEs log code=<HTTP status> detail=... body=... in run.out; fatal summary includes status + code.
+- REFRESH the free followers cache before each hourly run (≤6h old) or tier-3 unfollows pause.
+- write-followback-targets.mjs and write-followers-cache.mjs reject unknown flags (e.g. --help) with exit 2 and
+  write nothing; write-followback-targets.mjs also refuses to overwrite when 0 users were scanned.
+- Order, caps (≤10/run, ≤100/day Asia/Shanghai, 08:00–22:00), pacing, whitelist, recent-400 and <24h guards unchanged.
