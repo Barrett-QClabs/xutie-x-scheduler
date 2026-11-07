@@ -5,6 +5,8 @@ import { usePathname } from "next/navigation";
 import { FileUp, ListOrdered, Settings, UserPlus } from "lucide-react";
 import { useAppState } from "@/components/app-state";
 import { useI18n } from "@/components/i18n-provider";
+import type { MessageKey } from "@/lib/messages";
+import type { ServicePhase } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const links = [
@@ -22,6 +24,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const connection = state?.account
     ? t("connectedAs", { handle: state.account.username })
     : t("notConnected");
+  const service = state?.activity ? t("serviceLabel", { phase: t(servicePhaseKey(state.activity.phase)) }) : null;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -57,6 +60,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             })}
           </nav>
           <div className="mt-auto space-y-3">
+            {service ? <p className="text-xs leading-5 text-muted-foreground">{service}</p> : null}
             <p className="text-xs leading-5 text-muted-foreground">{connection}</p>
             <p className="text-xs leading-5 text-muted-foreground">{t("footerNote")}</p>
             <LocaleSwitch locale={locale} setLocale={setLocale} />
@@ -68,7 +72,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <span className="grid size-8 place-items-center rounded-md bg-primary text-sm text-primary-foreground">序</span>
               <span className="font-heading text-lg">{t("appName")}</span>
             </Link>
-            <LocaleSwitch locale={locale} setLocale={setLocale} />
+            <div className="flex items-center gap-3">
+              {service ? <p className="text-xs text-muted-foreground">{service}</p> : null}
+              <LocaleSwitch locale={locale} setLocale={setLocale} />
+            </div>
           </header>
           <main className="px-4 py-6 pb-24 md:px-8 md:py-8 md:pb-10">{children}</main>
         </div>
@@ -94,6 +101,18 @@ export function Shell({ children }: { children: React.ReactNode }) {
       </nav>
     </div>
   );
+}
+
+function servicePhaseKey(phase: ServicePhase): MessageKey {
+  if (phase === "empty") return "servicePhaseEmpty";
+  if (phase === "idle") return "servicePhaseIdle";
+  if (phase === "paused") return "servicePhasePaused";
+  if (phase === "no_credentials") return "servicePhaseNoCredentials";
+  if (phase === "auth_blocked") return "servicePhaseAuth";
+  if (phase === "credits_waiting") return "servicePhaseCredits";
+  if (phase === "rate_limited") return "servicePhaseRate";
+  if (phase === "scheduled") return "servicePhaseScheduled";
+  return "servicePhaseDue";
 }
 
 function LocaleSwitch({

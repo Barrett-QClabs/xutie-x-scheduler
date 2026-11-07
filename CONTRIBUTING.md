@@ -40,7 +40,7 @@ npm test
 npm run lint
 ```
 
-`npm test` uses Vitest and a mocked X client. It does not call X and does not need real credentials. Please add or update a test when you change scheduling, import rules, credential handling, or the X client. Keep existing tests passing.
+`npm test` uses Vitest and a mocked X client. It does not call X and does not need real credentials. Please add or update a test when you change scheduling, import rules, credential handling, error classification, or the X client. Diagnostics tests must stay offline. Keep existing tests passing.
 
 User-facing copy lives in `lib/messages.ts`. Add both the Simplified Chinese string and the English string.
 

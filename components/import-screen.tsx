@@ -169,6 +169,7 @@ export function ImportScreen() {
       <div className="space-y-2">
         <Label htmlFor="posts">{t("pasteLabel")}</Label>
         <Textarea id="posts" value={source} onChange={(event) => setSource(event.target.value)} rows={12} className="min-h-64" />
+        {source.trim() ? <p className="text-sm text-muted-foreground">{t("draftImport")}</p> : null}
       </div>
 
       <div className="space-y-2">

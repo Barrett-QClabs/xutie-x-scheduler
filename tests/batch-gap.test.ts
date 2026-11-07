@@ -248,8 +248,8 @@ describe("random extra delay when the queue shifts", () => {
 
   it("after a manual post on X, moves the queue to that post + interval + 1–2 random minutes", async () => {
     connect();
-    const now = new Date("2026-10-18T08:00:00.400Z");
-    const manualAt = new Date("2026-10-18T07:55:00.000Z");
+    const now = new Date(Math.floor(Date.now() / 1000) * 1000 + 400);
+    const manualAt = new Date(Math.floor(now.getTime() / 1000) * 1000 - 5 * 60_000);
     const imported = queue("甲\n乙\n丙\n丁", new Date(now.getTime() - 1000).toISOString());
     // Squeeze the batch so every post has to move.
     imported.queued.forEach((tweet, index) => {
@@ -280,7 +280,7 @@ describe("random extra delay when the queue shifts", () => {
 
   it("spaces out overdue posts with interval + random extra instead of a fixed interval", async () => {
     connect();
-    const now = new Date("2026-10-18T08:00:00.000Z");
+    const now = new Date(Math.ceil(Date.now() / 1000) * 1000);
     queue("一\n二\n三\n四", new Date(now.getTime() - 3 * 60 * 60_000).toISOString());
     const values = [0, 0.999_999, 0.25];
     let index = 0;

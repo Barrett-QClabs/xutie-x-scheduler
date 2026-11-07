@@ -1,6 +1,9 @@
 /** Maximum number of valid posts accepted from one import. */
 export const MAX_IMPORT_BATCH = 50;
 
+/** A recorded scheduler check older than this is shown as stale. Missing checks stay unknown. */
+export const SCHEDULER_STALE_MS = 30_000;
+
 /**
  * How long a successful or failed timeline read can be reused.
  * While the cached post is still inside the interval, the read is reused

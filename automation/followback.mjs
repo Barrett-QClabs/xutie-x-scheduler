@@ -19,7 +19,7 @@ import {
 import {
   DATA_DIR, loadConfig, followCountsToday, withFollowMutex, waitForWindow, stopFlagToday, setStopFlag,
   msUntilNextShanghaiMidnight as msToMidnight, followbackReserve,
-  sharedPace, waitForSharedWork, beginSharedRest, PACE_CYCLE, PACE_GAP_MS,
+  sharedPace, waitForSharedWork, beginSharedRest, BACKOFF_429_MS, PACE_CYCLE, PACE_GAP_MS,
 } from "./follow-common.mjs";
 
 const FB_LOG = path.join(DATA_DIR, "followback.jsonl");
@@ -267,7 +267,8 @@ async function main() {
       if (res.ok) { extraFollowed.add(t.id); consecutive403 = 0; }
       else if (res.status === 429) {
         const reset = Number(res.rate.reset) * 1000;
-        const wait = Math.max(60_000, (Number.isFinite(reset) ? reset - Date.now() : 15 * 60_000) + 5_000);
+        const wait0 = Math.max(60_000, (Number.isFinite(reset) ? reset - Date.now() : 15 * 60_000) + 5_000);
+        const wait = Math.max(wait0, beginSharedRest("429", BACKOFF_429_MS()).ms);
         say(`429 rate limit; waiting ${Math.round(wait / 1000)}s until reset`);
         writeStatus({ state: "rate_limited", resumeAt: new Date(Date.now() + wait).toISOString() });
         await sleep(wait); break;

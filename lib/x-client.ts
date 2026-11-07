@@ -35,6 +35,17 @@ export function isMockMode(): boolean {
   return process.env.X_API_MODE === "mock";
 }
 
+/**
+ * Placeholder accepted only by the in-process mock client.
+ * Live mode never uses it, and the mock client never sends it to X.
+ */
+export const MOCK_DIAGNOSTIC_CREDENTIALS: Credentials = {
+  apiKey: "mock-diagnostic",
+  apiSecret: "mock-diagnostic",
+  accessToken: "mock-diagnostic",
+  accessTokenSecret: "mock-diagnostic",
+};
+
 export function createXClient(credentials: Credentials): XClient {
   return isMockMode() ? createMockXClient(credentials) : createLiveXClient(credentials);
 }
@@ -84,12 +95,18 @@ export function createMockXClient(credentials: Credentials): XClient {
       if (text.includes("[[auth]]")) {
         throw new XApiError("Invalid or expired token", "auth", 401);
       }
+      if (text.includes("[[forbidden]]")) {
+        throw new XApiError("Forbidden: your token does not have permission to post.", "auth", 403);
+      }
       if (text.includes("[[duplicate]]")) {
         throw new XApiError(
           "You are not allowed to create a Tweet with duplicate content.",
           "duplicate",
           403,
         );
+      }
+      if (text.includes("[[credits]]")) {
+        throw new XApiError("Credits depleted. Your account does not have enough balance.", "credits", 402);
       }
       if (text.includes("[[rate-limit]]")) {
         throw new XApiError("Rate limit exceeded", "rate_limit", 429, new Date(Date.now() + 15 * 60_000));
@@ -561,17 +578,17 @@ export function isLengthRejection(blob: string): boolean {
 }
 
 export function classifyStatus(status: number, message: string, body: unknown): XErrorKind {
+  // Status code wins. A 402 that mentions "rate limit", or a 429 that mentions credits, stays what the code says.
   if (status === 429) return "rate_limit";
-  // 402: the X API account is out of credits. Not the post's fault: pause and retry later.
   if (status === 402) return "credits";
+  if (status === 401) return "auth";
   const blob = `${message} ${JSON.stringify(body ?? {})}`.toLowerCase();
   if (blob.includes("duplicate")) return "duplicate";
   // A long post refused for length / missing Premium fails on its own; never treat it as an auth problem.
   if ((status === 400 || status === 403) && isLengthRejection(blob)) return "rejected";
-  if (status === 401) return "auth";
   if (
     status === 403 &&
-    /authentic|oauth|token|credential|not authorized|unauthorized|permission/.test(blob)
+    /authentic|oauth|token|credential|not authorized|unauthorized|permission|forbidden|not permitted/.test(blob)
   ) {
     return "auth";
   }

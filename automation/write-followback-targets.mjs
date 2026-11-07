@@ -26,6 +26,12 @@ const OUT = path.join(DATA_DIR, "followback-targets.json");
 const PAGES_DIR = path.join(DATA_DIR, "plugin-pages");
 const merge = process.argv.includes("--merge");
 const args = process.argv.slice(2).filter((a) => a !== "--merge");
+// 2026-10-30: reject unknown flags (a stray --help once emptied followback-targets.json).
+const badFlags = process.argv.slice(2).filter((a) => a.startsWith("-") && a !== "--merge");
+if (badFlags.length) {
+  console.error(`unknown flag(s): ${badFlags.join(" ")}. Usage: node write-followback-targets.mjs [--merge] [page.json ...]. Nothing written.`);
+  process.exit(2);
+}
 
 function isBlue(u) {
   const vt = (u.verified_type ?? "").toLowerCase();
@@ -109,6 +115,10 @@ const ids = merge
   : order;
 const targets = ids.map((id) => byId.get(id)).filter(Boolean).reverse();
 
+if (scanned === 0) {
+  console.error("no users scanned from page files; refusing to overwrite", OUT);
+  process.exit(3);
+}
 fs.writeFileSync(OUT, JSON.stringify(targets, null, 2));
 console.log(JSON.stringify({
   ok: true, out: OUT, files: files.length, scanned, mutual,

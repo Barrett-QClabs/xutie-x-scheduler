@@ -16,6 +16,7 @@ import {
   upsertCredentials,
 } from "@/lib/db";
 import { MAX_IMPORT_BATCH, MAX_IMPORT_SOURCE_CHARS } from "@/lib/constants";
+import { buildActivity, classifyStoredFailure } from "@/lib/diagnostics";
 import { AppError } from "@/lib/errors";
 import { parseImport } from "@/lib/parse-import";
 import {
@@ -127,14 +128,16 @@ function toPublicTweet(tweet: Tweet, username: string | null): PublicTweet {
         ? `https://x.com/${username}/status/${tweet.tweetId}`
         : `https://x.com/i/web/status/${tweet.tweetId}`
       : null,
+    failureClass:
+      tweet.errorMessage || tweet.errorKind ? classifyStoredFailure(tweet.errorKind, tweet.errorMessage) : null,
   };
 }
 
-export function getPublicState(): PublicState {
+export function getPublicState(now = new Date()): PublicState {
   const row = getCredentialsRow();
   const tweets = listTweets();
-  const counts = { pending: 0, posted: 0, failed: 0 };
-  for (const tweet of tweets) counts[tweet.status] += 1;
+  const queue = getQueueSettings();
+  const activity = buildActivity({ now, queue, tweets });
   return {
     mockMode: isMockMode(),
     credentialsConfigured: Boolean(row),
@@ -146,8 +149,9 @@ export function getPublicState(): PublicState {
             userId: row.user_id,
           }
         : null,
-    queue: getQueueSettings(),
-    counts,
+    queue,
+    counts: { pending: activity.pending, posted: activity.posted, failed: activity.failed },
+    activity,
     tweets: tweets.map((tweet) => toPublicTweet(tweet, row?.username ?? null)),
   };
 }
@@ -219,6 +223,7 @@ export function importTweets(input: {
     postedAt: null,
     tweetId: null,
     errorMessage: null,
+    errorKind: null,
     attemptCount: 0,
     sortOrder: order++,
     delayReason: null,
@@ -279,6 +284,7 @@ export function retryTweet(id: string, now = new Date()): PublicTweet {
     status: "pending",
     scheduledAt: now.toISOString(),
     errorMessage: null,
+    errorKind: null,
     attemptCount: 0,
   });
   const updated = getTweet(id);
@@ -303,6 +309,7 @@ export function retryAllFailed(now = new Date(), random = Math.random): { ok: tr
       status: "pending",
       scheduledAt: times[index].toISOString(),
       errorMessage: null,
+      errorKind: null,
       attemptCount: 0,
     });
   });
@@ -313,6 +320,18 @@ export function pendingInOrder(): Tweet[] {
   return listTweets()
     .filter((tweet) => tweet.status === "pending")
     .sort(compareTweets);
+}
+
+/** After a duplicate-content failure, fill that slot with the next pending tweet. */
+export function promoteNextPendingToSlot(slot: Date): string | null {
+  const next = pendingInOrder()[0];
+  if (!next) return null;
+  const current = new Date(next.scheduledAt).getTime();
+  const target = slot.getTime();
+  if (Number.isNaN(current) || Number.isNaN(target)) return null;
+  if (current <= target) return next.id;
+  patchTweet(next.id, { scheduledAt: slot.toISOString(), delayReason: null });
+  return next.id;
 }
 
 export function reorderTweet(id: string, direction: "up" | "down"): { ok: true; moved: boolean } {
@@ -337,7 +356,14 @@ export function pauseQueue(reason = "manual"): { ok: true } {
 }
 
 export function resumeQueue(): { ok: true } {
-  patchQueueSettings({ paused: false, pauseReason: null });
+  const current = getQueueSettings();
+  patchQueueSettings({
+    paused: false,
+    pauseReason: null,
+    // A manual resume clears an auth stop. It does not clear a credits or rate-limit wait,
+    // and it does not change failed or cancelled rows.
+    ...(current.lastError === "auth" ? { lastError: null } : {}),
+  });
   return { ok: true };
 }
 
@@ -513,6 +539,7 @@ export function queueThread(input: { posts: unknown; startAt: string }): { ok: t
     postedAt: null,
     tweetId: null,
     errorMessage: null,
+    errorKind: null,
     attemptCount: 0,
     sortOrder: nextSortOrder(),
     delayReason: null,

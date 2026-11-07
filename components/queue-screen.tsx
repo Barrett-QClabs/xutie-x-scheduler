@@ -21,9 +21,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { SCHEDULER_STALE_MS } from "@/lib/constants";
 import { formatMinSec, formatStamp } from "@/lib/datetime";
 import { explainError } from "@/lib/explain-error";
-import type { PublicTweet } from "@/lib/types";
+import type { MessageKey } from "@/lib/messages";
+import type { ActivityReport, FailureClass, PublicTweet } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { inspectTweet } from "@/lib/weighted-length";
 
@@ -83,7 +85,6 @@ export function QueueScreen() {
   if (!state) return null;
 
   const next = state.tweets.find((tweet) => tweet.status === "pending");
-  const rateLimited = state.queue.rateLimitUntil && new Date(state.queue.rateLimitUntil).getTime() > Date.now();
 
   return (
     <div className="space-y-6">
@@ -119,16 +120,12 @@ export function QueueScreen() {
       </header>
 
       {state.mockMode ? <Notice>{t("mockBanner")}</Notice> : null}
-      {!state.credentialsConfigured ? <Notice>{t("needCreds")}</Notice> : null}
+      {!state.credentialsConfigured && !state.mockMode ? <Notice>{t("needCreds")}</Notice> : null}
       {state.queue.paused ? <Notice tone="warn">{pauseCopy(state.queue.pauseReason, t)}</Notice> : null}
       {state.tweets.some((tweet) => tweet.status === "pending" && tweet.delayReason === "manual") ? (
         <Notice tone="warn">{t("manualDelayBanner")}</Notice>
       ) : null}
-      {rateLimited ? (
-        <Notice tone="warn">
-          <RateNotice iso={state.queue.rateLimitUntil!} locale={locale} />
-        </Notice>
-      ) : null}
+      {state.activity ? <ActivityPanel activity={state.activity} locale={locale} /> : null}
       {error ? <Notice tone="bad">{error}</Notice> : null}
 
       <div className="grid grid-cols-3 gap-3">
@@ -225,6 +222,9 @@ export function QueueScreen() {
                   <div className="flex flex-wrap items-center gap-2">
                     <ClientTime iso={tweet.scheduledAt} locale={locale} />
                     <StatusBadge status={tweet.status} label={t(statusKey(tweet.status))} />
+                    {tweet.failureClass && tweet.status !== "posted" ? (
+                      <Badge variant="outline">{t(failureKey(tweet.failureClass))}</Badge>
+                    ) : null}
                     {tweet.isLong ? (
                       <Badge variant="outline" className="bg-amber-100 text-amber-950">
                         {t("longPost")}
@@ -337,6 +337,7 @@ export function QueueScreen() {
           <DialogHeader>
             <DialogTitle>{t("editTitle")}</DialogTitle>
             <DialogDescription>{t("editHelp")}</DialogDescription>
+            <p className="text-sm text-muted-foreground">{t("draftEdit")}</p>
           </DialogHeader>
           <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={6} />
           <div className="flex items-center justify-between">
@@ -442,13 +443,98 @@ function NextPost({ iso, locale }: { iso: string; locale: "zh" | "en" }) {
   return <>{text || "—"}</>;
 }
 
-function RateNotice({ iso, locale }: { iso: string; locale: "zh" | "en" }) {
+function failureKey(kind: FailureClass): MessageKey {
+  if (kind === "credits") return "failureCredits";
+  if (kind === "rate_limit") return "failureRate";
+  if (kind === "auth") return "failureAuth";
+  if (kind === "duplicate") return "failureDuplicate";
+  return "failureOther";
+}
+
+function tickKey(action: string | null): MessageKey | null {
+  if (action === "paused") return "tickPaused";
+  if (action === "rate_limited") return "tickRate";
+  if (action === "credits_waiting") return "tickCredits";
+  if (action === "busy") return "tickBusy";
+  if (action === "idle") return "tickIdle";
+  if (action === "no_credentials") return "tickNoCredentials";
+  if (action === "posted") return "tickPosted";
+  if (action === "failed") return "tickFailed";
+  if (action === "auth_paused") return "tickAuth";
+  if (action === "retry_later") return "tickRetry";
+  if (action === "deferred") return "tickDeferred";
+  return null;
+}
+
+function ActivityPanel({ activity, locale }: { activity: ActivityReport; locale: "zh" | "en" }) {
   const { t } = useI18n();
-  const [text, setText] = useState("");
+  const [blockTime, setBlockTime] = useState("");
+  const [tickTime, setTickTime] = useState("");
+  const [successTime, setSuccessTime] = useState("");
+  const [nextTime, setNextTime] = useState("");
   useEffect(() => {
-    setText(t("rateBanner", { time: formatStamp(iso, locale) }));
-  }, [iso, locale, t]);
-  return <>{text || "—"}</>;
+    setBlockTime(activity.blockUntil ? formatStamp(activity.blockUntil, locale) : "");
+    setTickTime(activity.lastTickAt ? formatStamp(activity.lastTickAt, locale) : "");
+    setSuccessTime(activity.lastSuccessAt ? formatStamp(activity.lastSuccessAt, locale) : "");
+    setNextTime(activity.nextScheduledAt ? formatStamp(activity.nextScheduledAt, locale) : "");
+  }, [activity, locale]);
+
+  const actionKey = tickKey(activity.lastTickAction);
+  const actionLabel = actionKey ? t(actionKey) : activity.lastTickAction || "";
+  const phase = phaseText(activity, { blockTime, nextTime }, t);
+  const extraBlock =
+    activity.blockUntil && activity.phase !== "credits_waiting" && activity.phase !== "rate_limited"
+      ? t("phaseBlockedToo", {
+          time: blockTime || "—",
+          reason: t(activity.lastError === "credits" ? "failureCredits" : "failureRate"),
+        })
+      : null;
+
+  return (
+    <section className="space-y-2 rounded-xl bg-card px-4 py-3 ring-1 ring-foreground/10" aria-label={t("activityTitle")}>
+      <h2 className="text-sm font-medium">{t("activityTitle")}</h2>
+      <p className="text-sm leading-6">{phase}</p>
+      {extraBlock ? <p className="text-sm leading-6">{extraBlock}</p> : null}
+      <p className="text-sm leading-6 text-muted-foreground">
+        {activity.scheduler === "unknown"
+          ? t("schedulerUnknown")
+          : activity.scheduler === "stale"
+            ? t("schedulerStale", { time: tickTime || "—", seconds: Math.round(SCHEDULER_STALE_MS / 1000) })
+            : t("schedulerRecent", { time: tickTime || "—", action: actionLabel })}
+      </p>
+      <p className="text-sm leading-6 text-muted-foreground">
+        {activity.lastSuccessAt ? t("lastSuccess", { time: successTime || "—" }) : t("noSuccessYet")}
+      </p>
+      {activity.failed > 0 ? (
+        <p className="text-sm leading-6 text-muted-foreground">
+          {t("failureBreakdown", {
+            duplicate: activity.failureKinds.duplicate,
+            auth: activity.failureKinds.auth,
+            credits: activity.failureKinds.credits,
+            rateLimit: activity.failureKinds.rate_limit,
+            other: activity.failureKinds.other,
+          })}
+        </p>
+      ) : null}
+      {activity.other > 0 ? <p className="text-sm leading-6 text-muted-foreground">{t("otherRows", { count: activity.other })}</p> : null}
+    </section>
+  );
+}
+
+function phaseText(
+  activity: ActivityReport,
+  times: { blockTime: string; nextTime: string },
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
+) {
+  if (activity.phase === "empty") return t("phaseEmpty");
+  if (activity.phase === "idle") return t("phaseIdle", { posted: activity.posted, failed: activity.failed });
+  if (activity.phase === "paused") return t("phasePaused");
+  if (activity.phase === "no_credentials") return t("phaseNoCredentials");
+  if (activity.phase === "auth_blocked") return t("phaseAuth");
+  if (activity.phase === "credits_waiting") return t("phaseCredits", { time: times.blockTime || "—" });
+  if (activity.phase === "rate_limited") return t("phaseRate", { time: times.blockTime || "—" });
+  if (activity.phase === "scheduled") return t("phaseScheduled", { count: activity.pending, time: times.nextTime || "—" });
+  return t("phaseDue", { count: activity.dueCount });
 }
 
 function relative(

@@ -13,6 +13,7 @@ import {
   tryAcquireLock,
   updateAccount,
 } from "@/lib/db";
+import { isTemporaryBlock } from "@/lib/diagnostics";
 import { AppError } from "@/lib/errors";
 import {
   delayPendingForRateLimit,
@@ -21,18 +22,19 @@ import {
   latestLocalPost,
   nextDueTweet,
   pauseQueue,
-  pendingInOrder,
+  promoteNextPendingToSlot,
   readCredentials,
   reanchorPendingToManual,
 } from "@/lib/service";
 import { shouldReuseTimelineCache } from "@/lib/timeline";
 import type { Tweet, TweetExtra } from "@/lib/types";
 import type { XClient, XTimelineTweet } from "@/lib/x-client";
-import { createXClient, XApiError } from "@/lib/x-client";
+import { createMockXClient, createXClient, isMockMode, MOCK_DIAGNOSTIC_CREDENTIALS, XApiError } from "@/lib/x-client";
 
 export type TickResult =
   | { action: "paused" }
   | { action: "rate_limited"; until: string }
+  | { action: "credits_waiting"; until: string }
   | { action: "busy" }
   | { action: "idle" }
   | { action: "no_credentials" }
@@ -69,14 +71,25 @@ export function tick(options?: { now?: Date; client?: XClient; random?: () => nu
 
 async function tickOnce(options?: { now?: Date; client?: XClient; random?: () => number }): Promise<TickResult> {
   const now = options?.now ?? new Date();
+  const result = await executeTick(now, options);
+  patchQueueSettings({ lastTickAt: now.toISOString(), lastTickAction: result.action });
+  return result;
+}
+
+async function executeTick(now: Date, options?: { now?: Date; client?: XClient; random?: () => number }): Promise<TickResult> {
   const settings = getQueueSettings();
   if (settings.rateLimitUntil && new Date(settings.rateLimitUntil).getTime() <= now.getTime()) {
-    patchQueueSettings({ rateLimitUntil: null, lastError: settings.lastError === "rate_limit" ? null : settings.lastError });
+    patchQueueSettings({
+      rateLimitUntil: null,
+      lastError: isTemporaryBlock(settings.lastError) ? null : settings.lastError,
+    });
   }
   const fresh = getQueueSettings();
   if (fresh.paused) return { action: "paused" };
   if (fresh.rateLimitUntil && new Date(fresh.rateLimitUntil).getTime() > now.getTime()) {
-    return { action: "rate_limited", until: fresh.rateLimitUntil };
+    return fresh.lastError === "credits"
+      ? { action: "credits_waiting", until: fresh.rateLimitUntil }
+      : { action: "rate_limited", until: fresh.rateLimitUntil };
   }
   if (!tryAcquireLock(now)) return { action: "busy" };
   try {
@@ -98,10 +111,16 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
         throw error;
       }
       if (!credentials) {
-        pauseQueue("missing_credentials");
-        return { action: "no_credentials" };
+        // Offline diagnosis can run the mock client with a placeholder. Live mode still pauses.
+        if (isMockMode()) {
+          client = createMockXClient(MOCK_DIAGNOSTIC_CREDENTIALS);
+        } else {
+          pauseQueue("missing_credentials");
+          return { action: "no_credentials" };
+        }
+      } else {
+        client = createXClient(credentials);
       }
-      client = createXClient(credentials);
     }
 
     // Right before posting, always read X fresh so a manual post from seconds ago is seen.
@@ -128,6 +147,7 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
         postedAt: now.toISOString(),
         tweetId: posted.id,
         errorMessage: null,
+        errorKind: null,
         delayReason: null,
       });
       patchQueueSettings({ rateLimitUntil: null, lastError: null });
@@ -141,41 +161,66 @@ async function tickOnce(options?: { now?: Date; client?: XClient; random?: () =>
     } catch (error) {
       if (!(error instanceof XApiError)) {
         const message = error instanceof Error ? error.message : "未知错误";
-        patchTweet(due.id, { status: "failed", errorMessage: message, attemptCount: due.attemptCount + 1 });
+        patchTweet(due.id, { status: "failed", errorMessage: message, errorKind: "other", attemptCount: due.attemptCount + 1 });
         return { action: "failed", id: due.id };
       }
-      if (error.kind === "rate_limit" || error.kind === "credits") {
-        // 402 (API credits used up): pause ~10 min instead of marking the post failed.
-        const until =
-          error.kind === "credits"
-            ? new Date(now.getTime() + 10 * 60_000)
-            : (error.resetAt ?? new Date(now.getTime() + 15 * 60_000));
-        patchQueueSettings({ rateLimitUntil: until.toISOString(), lastError: "rate_limit" });
+      if (error.kind === "credits" || error.kind === "rate_limit") {
+        // 402 waits about 10 minutes. 429 waits for x-rate-limit-reset, or 15 minutes.
+        // The post stays pending. The two cases are stored under different lastError codes.
+        const credits = error.kind === "credits";
+        const until = credits
+          ? new Date(now.getTime() + 10 * 60_000)
+          : (error.resetAt ?? new Date(now.getTime() + 15 * 60_000));
+        patchQueueSettings({
+          rateLimitUntil: until.toISOString(),
+          lastError: credits ? "credits" : "rate_limit",
+        });
+        patchTweet(due.id, { errorMessage: error.message, errorKind: error.kind });
         delayPendingForRateLimit(until, options?.random);
-        return { action: "rate_limited", until: until.toISOString() };
+        return credits
+          ? { action: "credits_waiting", until: until.toISOString() }
+          : { action: "rate_limited", until: until.toISOString() };
       }
       if (error.kind === "auth") {
         pauseQueue(error.message);
-        patchTweet(due.id, { errorMessage: error.message });
+        patchQueueSettings({ lastError: "auth" });
+        patchTweet(due.id, { errorMessage: error.message, errorKind: "auth" });
         return { action: "auth_paused", id: due.id };
       }
       if (error.kind === "transient") {
         const attempts = due.attemptCount + 1;
         if (attempts >= 5) {
-          patchTweet(due.id, { status: "failed", errorMessage: error.message, attemptCount: attempts });
+          patchTweet(due.id, { status: "failed", errorMessage: error.message, errorKind: "transient", attemptCount: attempts });
           return { action: "failed", id: due.id };
         }
         const backoff = Math.min(15 * 60_000, 30_000 * 2 ** (attempts - 1));
         patchTweet(due.id, {
           scheduledAt: new Date(now.getTime() + backoff).toISOString(),
           errorMessage: error.message,
+          errorKind: "transient",
           attemptCount: attempts,
         });
         return { action: "retry_later", id: due.id };
       }
+      if (error.kind === "duplicate") {
+        patchTweet(due.id, {
+          status: "failed",
+          errorMessage: error.message,
+          errorKind: "duplicate",
+          attemptCount: due.attemptCount + 1,
+        });
+        // Pull only the next pending row forward. Cancelled or other statuses stay where they are.
+        const promoted = promoteNextPendingToSlot(now);
+        if (promoted) {
+          console.log("[序帖] 内容重复，下一条已补到这个时间点", promoted, now.toISOString());
+        }
+        return { action: "failed", id: due.id };
+      }
+      // Other rejections fail this row only. Later pending posts still go out on their own schedule.
       patchTweet(due.id, {
         status: "failed",
         errorMessage: error.message,
+        errorKind: error.kind,
         attemptCount: due.attemptCount + 1,
       });
       return { action: "failed", id: due.id };

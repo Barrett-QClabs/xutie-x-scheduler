@@ -4,8 +4,9 @@ unset NPM_CONFIG_PREFIX
 export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh" >/dev/null; nvm use 22 >/dev/null
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 cd "${X_AUTOMATION_DIR:-/workspace/x-unfollow}"
+# 2026-10-30: all X reads FREE only; paid API = DELETE writes only (follow-back re-check via followers-free-cache.json)
 # honour the on/off toggle in automation.config.json (序帖 → 自动化)
 if node -e 'try{const c=JSON.parse(require("fs").readFileSync("automation.config.json","utf8"));process.exit(c.unfollow&&c.unfollow.enabled===false?0:1)}catch{process.exit(1)}'; then
   echo "[$(date -u +%FT%TZ)] unfollow disabled in automation.config.json; skipping" >> run.out; exit 0
 fi
-node --no-warnings "$HERE/unfollow.mjs" "${1:-10}" >> run.out 2>&1
+NO_PAID_READS=1 node --no-warnings "$HERE/unfollow.mjs" "${1:-10}" >> run.out 2>&1
