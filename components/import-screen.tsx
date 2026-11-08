@@ -42,7 +42,14 @@ export function ImportScreen() {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!state || scheduleSynced) return;
+    setScheduleSynced(false);
+    setSource("");
+    setError(null);
+    setNotice(null);
+  }, [accountId]);
+
+  useEffect(() => {
+    if (!state || state.accountId !== accountId || scheduleSynced) return;
     const pending = state.tweets.filter((tweet) => tweet.status === "pending");
     if (pending.length > 0) {
       const last = pending[pending.length - 1];
@@ -63,7 +70,7 @@ export function ImportScreen() {
     setRandomMinSeconds(String(state.queue.randomMinSeconds));
     setRandomMaxSeconds(String(state.queue.randomMaxSeconds));
     setScheduleSynced(true);
-  }, [state, scheduleSynced]);
+  }, [state, scheduleSynced, accountId]);
 
   const preview = useMemo(() => {
     const parsed = parseImport(source, format);
@@ -91,6 +98,8 @@ export function ImportScreen() {
   }
 
   async function submit() {
+    const target = accountId;
+    const text = source;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -100,8 +109,8 @@ export function ImportScreen() {
         {
         method: "POST",
         body: JSON.stringify({
-          accountId,
-          source,
+          accountId: target,
+          source: text,
           format,
           startAt: new Date(startAt).toISOString(),
           intervalMinutes: Number(intervalMinutes),
@@ -142,7 +151,7 @@ export function ImportScreen() {
     <div className="space-y-6">
       <header>
         <h1 className="font-heading text-3xl tracking-wide">{t("importTitle")}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{state?.accountLabel ?? (accountId === 1 ? "账号1" : "账号2")}</p>
+        <p className="mt-1 text-sm text-muted-foreground">{accountId === 1 ? "账号1" : "账号2"}</p>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">{t("importSubtitle")}</p>
       </header>
 

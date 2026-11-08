@@ -91,7 +91,7 @@ export function QueueScreen() {
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="font-heading text-3xl tracking-wide">{t("queueTitle")}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{state.accountLabel}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{accountId === 1 ? "账号1" : "账号2"}</p>
           <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{t("queueSubtitle")}</p>
         </div>
         <div className="flex flex-wrap gap-2">

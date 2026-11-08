@@ -52,6 +52,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               ]).map((slot) => (
                 <button
                   key={slot.id}
+                  data-testid={`nav-slot-${slot.id}`}
                   type="button"
                   onClick={() => setAccountId(slot.id)}
                   className={cn(

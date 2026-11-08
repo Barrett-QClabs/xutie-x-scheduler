@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { POST as testCredentialsRoute } from "@/app/api/credentials/test/route";
+import { PUT as saveCredentialsRoute } from "@/app/api/credentials/route";
 import { parseAccountId } from "@/lib/account";
 import { decryptString, encryptString } from "@/lib/crypto";
-import { getCredentialsRow, getQueueSettings, listTweets, reopenDatabase } from "@/lib/db";
+import { getCredentialsRow, getQueueSettings, listTweets, reopenDatabase, updateAccount } from "@/lib/db";
 import { buildAuthorizationHeader } from "@/lib/oauth";
 import { tick } from "@/lib/scheduler";
 import {
@@ -50,6 +52,65 @@ function recordingClient(seen: string[]): XClient {
     },
   };
 }
+
+function request(path: string, body: Record<string, unknown>) {
+  return new Request(`http://local${path}`, { method: "POST", body: JSON.stringify(body) });
+}
+
+describe("credential identity scope", () => {
+  it("keeps account 1 when account 2 is saved and its verify fails", async () => {
+    saveCredentials(1, creds("alpha-key"));
+    updateAccount(1, { username: "kept_handle", displayName: "Kept", userId: "111" });
+    const ciphertext = getCredentialsRow(1)?.ciphertext;
+
+    const saved = await saveCredentialsRoute(
+      new Request("http://local/api/credentials", {
+        method: "PUT",
+        body: JSON.stringify({ accountId: 2, ...creds("invalid") }),
+      }),
+    );
+    expect(saved.status).toBe(200);
+    const rejected = await testCredentialsRoute(request("/api/credentials/test", { accountId: 2 }));
+    expect(rejected.status).toBe(400);
+    const error = await rejected.json();
+    expect(error.code).toBe("x_auth");
+    expect(JSON.stringify(error)).not.toContain("invalid-secret");
+
+    expect(getPublicState(new Date(), 1).account).toEqual({
+      username: "kept_handle",
+      displayName: "Kept",
+      userId: "111",
+    });
+    expect(getCredentialsRow(1)?.ciphertext).toBe(ciphertext);
+    const second = getPublicState(new Date(), 2);
+    expect(second.credentialsConfigured).toBe(true);
+    expect(second.account).toBeNull();
+    expect(second.queue.paused).toBe(true);
+  });
+
+  it("clears only the saved account's identity until that account verifies again", async () => {
+    saveCredentials(1, creds("alpha-key"));
+    updateAccount(1, { username: "kept_handle", displayName: "Kept", userId: "111" });
+    saveCredentials(2, creds("beta-key"));
+    updateAccount(2, { username: "other_handle", displayName: "Other", userId: "222" });
+
+    const saved = await saveCredentialsRoute(
+      new Request("http://local/api/credentials", {
+        method: "PUT",
+        body: JSON.stringify({ accountId: 1, ...creds("invalid") }),
+      }),
+    );
+    expect(saved.status).toBe(200);
+    expect(getPublicState(new Date(), 1).credentialsConfigured).toBe(true);
+    expect(getPublicState(new Date(), 1).account).toBeNull();
+    expect(getPublicState(new Date(), 2).account?.username).toBe("other_handle");
+
+    const rejected = await testCredentialsRoute(request("/api/credentials/test", { accountId: 1 }));
+    expect(rejected.status).toBe(400);
+    expect(getPublicState(new Date(), 1).account).toBeNull();
+    expect(readCredentials(2)?.apiKey).toBe("beta-key");
+  });
+});
 
 describe("two X accounts stay isolated", () => {
   it("rejects a missing account instead of choosing one", () => {
