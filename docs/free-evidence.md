@@ -42,7 +42,7 @@
 }
 ```
 
-`source_namespace` 只能是 `user-X` 或 `x-public`。`source_tool` 只能是 `get_users_me`、`get_users_me_followers`、`get_users_me_following`、`get_users_posts`、`get_user`。`account_id` 必须等于该槽已授权的用户 id。账号2的信封不能写进账号1。
+`source_namespace` 按实际值保存：中文插件 `user-X`，英文插件 `user-X--english`，公共读 `x`。旧名 `x-public` 仍可收，规范化来源记为 `public`，插件记为 `user-plugin`。`source_tool` 原样保存，包括 `get_posts_by_ids` 和 `search_posts_all`，不会改写成 `get_users_posts`。`user-X` 只接受账号1的 id，`user-X--english` 只接受账号2的 id。搜索词里的 `lang:en` 不是帖子的 `lang`。这两种抽样工具即使声明 `activity_window_complete`，入库后的有效完整标记仍是 false。
 
 `GET /api/evidence?accountId=1` 返回最近页面的 `observedAt`、`expiresAt`、`fresh`、`paginationComplete`、`nextToken`、`activityWindowComplete`、`subjectCount`、`errors`，以及 `userDeveloperGets: 0`。
 

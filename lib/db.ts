@@ -226,6 +226,11 @@ function ensureAutomationTables(db: DatabaseSync): void {
       finished_at TEXT,
       PRIMARY KEY (account_id, slot)
     );
+    CREATE TABLE IF NOT EXISTS follow_account_config (
+      account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
+      keywords_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS follow_control (
       account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
       paused INTEGER NOT NULL DEFAULT 1,
@@ -266,10 +271,13 @@ function ensureAutomationTables(db: DatabaseSync): void {
       observed_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       source_namespace TEXT NOT NULL,
+      actual_source_namespace TEXT NOT NULL,
+      normalized_source TEXT NOT NULL,
       source_tool TEXT NOT NULL,
       pagination_complete INTEGER NOT NULL,
       next_token TEXT,
       activity_window_complete INTEGER NOT NULL,
+      claimed_activity_window_complete INTEGER NOT NULL,
       errors_json TEXT NOT NULL,
       verified INTEGER,
       verified_type TEXT,
@@ -289,12 +297,15 @@ function ensureAutomationTables(db: DatabaseSync): void {
       account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
       source_user_id TEXT NOT NULL,
       source_namespace TEXT NOT NULL,
+      actual_source_namespace TEXT NOT NULL,
+      normalized_source TEXT NOT NULL,
       source_tool TEXT NOT NULL,
       observed_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       pagination_complete INTEGER NOT NULL,
       next_token TEXT,
       activity_window_complete INTEGER NOT NULL,
+      claimed_activity_window_complete INTEGER NOT NULL,
       subject_count INTEGER NOT NULL,
       errors_json TEXT NOT NULL,
       request_fields TEXT NOT NULL,
@@ -311,6 +322,12 @@ function ensureAutomationTables(db: DatabaseSync): void {
       PRIMARY KEY (account_id, target_user_id)
     );
   `);
+  ensureColumn(db, "evidence_subjects", "actual_source_namespace", "ALTER TABLE evidence_subjects ADD COLUMN actual_source_namespace TEXT");
+  ensureColumn(db, "evidence_subjects", "normalized_source", "ALTER TABLE evidence_subjects ADD COLUMN normalized_source TEXT");
+  ensureColumn(db, "evidence_subjects", "claimed_activity_window_complete", "ALTER TABLE evidence_subjects ADD COLUMN claimed_activity_window_complete INTEGER");
+  ensureColumn(db, "evidence_pages", "actual_source_namespace", "ALTER TABLE evidence_pages ADD COLUMN actual_source_namespace TEXT");
+  ensureColumn(db, "evidence_pages", "normalized_source", "ALTER TABLE evidence_pages ADD COLUMN normalized_source TEXT");
+  ensureColumn(db, "evidence_pages", "claimed_activity_window_complete", "ALTER TABLE evidence_pages ADD COLUMN claimed_activity_window_complete INTEGER");
   const now = new Date().toISOString();
   for (const id of [1, 2]) {
     db.prepare(

@@ -147,7 +147,7 @@ describe("free evidence contract", () => {
         observed_at: "2026-11-08T08:10:00.000Z",
         expires_at: "2026-11-08T09:00:00.000Z",
         source_tool: "get_users_posts",
-        coverage: { pagination_complete: true, next_token: null, activity_window_complete: true, excluded: [] },
+        coverage: { pagination_complete: true, next_token: null, activity_window_complete: true, excluded: [], window: { from: "2026-11-06T00:00:00.000Z", to: "2026-11-08T08:20:00.000Z" } },
         subjects: [{
           id: "558",
           verified: true,

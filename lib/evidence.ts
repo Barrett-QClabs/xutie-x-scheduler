@@ -6,14 +6,17 @@ import type { FollowProfile } from "@/lib/follow-queue";
 import type { FreshProfile } from "@/lib/unfollow-queue";
 
 export const EVIDENCE_SCHEMA_VERSION = 1;
-const ALLOWED_NAMESPACES = new Set(["user-X", "x-public"]);
+const ALLOWED_NAMESPACES = new Set(["user-X", "user-X--english", "x", "x-public"]);
 const ALLOWED_TOOLS = new Set([
   "get_users_me",
   "get_users_me_followers",
   "get_users_me_following",
   "get_users_posts",
   "get_user",
+  "get_posts_by_ids",
+  "search_posts_all",
 ]);
+const SAMPLE_POST_TOOLS = new Set(["get_posts_by_ids", "search_posts_all"]);
 
 export type EvidenceSubjectView = {
   targetUserId: string;
@@ -72,6 +75,12 @@ function blueFrom(verified: unknown, verifiedType: unknown): { known: boolean; b
   return { known: true, blue, verifiedFlag: flag ? 1 : 0, verifiedType: type };
 }
 
+function namespaceFitsAccount(namespace: string, sourceUserId: string): boolean {
+  if (namespace === "user-X") return sourceUserId === ACCOUNT_USER_ID[1];
+  if (namespace === "user-X--english") return sourceUserId === ACCOUNT_USER_ID[2];
+  return namespace === "x" || namespace === "x-public";
+}
+
 function newestPost(posts: unknown): { at: string | null; lang: string | null; text: string | null } {
   if (!Array.isArray(posts)) return { at: null, lang: null, text: null };
   let at: string | null = null;
@@ -97,12 +106,13 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
   const namespace = text(envelope.source_namespace);
   const tool = text(envelope.source_tool);
   if (!namespace || !ALLOWED_NAMESPACES.has(namespace) || !tool || !ALLOWED_TOOLS.has(tool)) {
-    throw new AppError("invalid_evidence", "证据来源必须是 user-X 或 x-public 的已列出工具。");
+    throw new AppError("invalid_evidence", "证据来源必须是 user-X、user-X--english、x 或 x-public，工具名必须原样匹配已支持的免费读取。");
   }
   const sourceUserId = text(envelope.account_id);
-  if (sourceUserId !== ACCOUNT_USER_ID[slot]) {
-    throw new AppError("evidence_account_mismatch", "证据里的账号 id 不属于这个槽。", 403);
+  if (sourceUserId !== ACCOUNT_USER_ID[slot] || !namespaceFitsAccount(namespace, sourceUserId)) {
+    throw new AppError("evidence_account_mismatch", "证据里的账号 id 或来源命名空间不属于这个槽。", 403);
   }
+  const normalizedSource = namespace === "x" || namespace === "x-public" ? "public" : "user-plugin";
   const observedAt = text(envelope.observed_at);
   const expiresAt = text(envelope.expires_at);
   if (!observedAt || Number.isNaN(Date.parse(observedAt)) || !expiresAt || Number.isNaN(Date.parse(expiresAt))) {
@@ -121,19 +131,30 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
   if (!Array.isArray(envelope.errors) || !Array.isArray(envelope.subjects)) {
     throw new AppError("invalid_evidence", "errors 和 subjects 必须是数组。");
   }
-  const activityWindowComplete = coverage.activity_window_complete === true && coverage.pagination_complete === true && envelope.errors.length === 0 && (!Array.isArray(coverage.excluded) || coverage.excluded.length === 0);
+  const claimedActivityWindowComplete = coverage.activity_window_complete === true;
+  const windowRecord = asRecord(coverage.window);
+  const windowFrom = text(windowRecord?.from);
+  const windowTo = text(windowRecord?.to);
+  const windowCovers48h = Boolean(windowFrom && windowTo && Date.parse(windowTo) - Date.parse(windowFrom) >= 48 * 60 * 60 * 1000);
+  const activityWindowComplete = claimedActivityWindowComplete
+    && tool === "get_users_posts"
+    && !SAMPLE_POST_TOOLS.has(tool)
+    && coverage.pagination_complete === true
+    && envelope.errors.length === 0
+    && (!Array.isArray(coverage.excluded) || coverage.excluded.length === 0)
+    && windowCovers48h;
   const paginationComplete = coverage.pagination_complete === true;
   const nextToken = text(coverage.next_token);
   const db = getDb();
   const insertPage = db.prepare(
     `INSERT OR REPLACE INTO evidence_pages
-      (account_id, source_user_id, source_namespace, source_tool, observed_at, expires_at, pagination_complete, next_token, activity_window_complete, subject_count, errors_json, request_fields)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (account_id, source_user_id, source_namespace, actual_source_namespace, normalized_source, source_tool, observed_at, expires_at, pagination_complete, next_token, activity_window_complete, claimed_activity_window_complete, subject_count, errors_json, request_fields)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertSubject = db.prepare(
     `INSERT OR REPLACE INTO evidence_subjects
-      (account_id, source_user_id, target_user_id, observed_at, expires_at, source_namespace, source_tool, pagination_complete, next_token, activity_window_complete, errors_json, verified, verified_type, connection_status_json, connection_explicit, followers_count, last_post_at, tweet_lang, name, bio, username, tweet_text, raw_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (account_id, source_user_id, target_user_id, observed_at, expires_at, source_namespace, actual_source_namespace, normalized_source, source_tool, pagination_complete, next_token, activity_window_complete, claimed_activity_window_complete, errors_json, verified, verified_type, connection_status_json, connection_explicit, followers_count, last_post_at, tweet_lang, name, bio, username, tweet_text, raw_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const stored = getCredentialsRow(slot);
   let identityUpdated = false;
@@ -155,10 +176,13 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
       observedAt,
       expiresAt,
       namespace,
+      namespace,
+      normalizedSource,
       tool,
       paginationComplete ? 1 : 0,
       nextToken,
       activityWindowComplete ? 1 : 0,
+      claimedActivityWindowComplete ? 1 : 0,
       JSON.stringify(envelope.errors),
       blue.verifiedFlag,
       blue.verifiedType,
@@ -185,12 +209,15 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
     slot,
     sourceUserId,
     namespace,
+    namespace,
+    normalizedSource,
     tool,
     observedAt,
     expiresAt,
     paginationComplete ? 1 : 0,
     nextToken,
     activityWindowComplete ? 1 : 0,
+    claimedActivityWindowComplete ? 1 : 0,
     accepted.length,
     JSON.stringify(envelope.errors),
     JSON.stringify(envelope.request_fields),
@@ -200,11 +227,14 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
     accountId: slot,
     sourceUserId,
     sourceTool: tool,
+    actualSourceNamespace: namespace,
+    normalizedSource,
     accepted,
     identityUpdated,
     userDeveloperGets: 0,
     paginationComplete,
     nextToken,
+    claimedActivityWindowComplete,
     activityWindowComplete,
   };
 }
@@ -321,16 +351,20 @@ export function evidenceUnfollowProfile(slot: AccountId, targetUserId: string, n
 export function evidenceCoverage(slot: AccountId, now = new Date()) {
   const rows = getDb()
     .prepare(
-      `SELECT source_tool, observed_at, expires_at, pagination_complete, next_token, activity_window_complete, subject_count, errors_json
+      `SELECT source_tool, source_namespace, actual_source_namespace, normalized_source, observed_at, expires_at, pagination_complete, next_token, activity_window_complete, claimed_activity_window_complete, subject_count, errors_json
        FROM evidence_pages WHERE account_id = ? AND source_user_id = ? ORDER BY observed_at DESC LIMIT 20`,
     )
     .all(slot, ACCOUNT_USER_ID[slot]) as Array<{
     source_tool: string;
+    source_namespace: string;
+    actual_source_namespace: string | null;
+    normalized_source: string | null;
     observed_at: string;
     expires_at: string;
     pagination_complete: number;
     next_token: string | null;
     activity_window_complete: number;
+    claimed_activity_window_complete: number | null;
     subject_count: number;
     errors_json: string;
   }>;
@@ -342,12 +376,15 @@ export function evidenceCoverage(slot: AccountId, now = new Date()) {
     supplierLimits: { perMinute: 30, perDay: 1000, enforcedHere: false },
     pages: rows.map((row) => ({
       sourceTool: row.source_tool,
+      actualSourceNamespace: row.actual_source_namespace ?? row.source_namespace,
+      normalizedSource: row.normalized_source,
       observedAt: row.observed_at,
       expiresAt: row.expires_at,
       fresh: Date.parse(row.expires_at) > now.getTime(),
       paginationComplete: row.pagination_complete === 1,
       nextToken: row.next_token,
       activityWindowComplete: row.activity_window_complete === 1,
+      claimedActivityWindowComplete: row.claimed_activity_window_complete === 1,
       subjectCount: row.subject_count,
       errors: JSON.parse(row.errors_json) as unknown[],
     })),
