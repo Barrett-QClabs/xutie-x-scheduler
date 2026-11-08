@@ -68,40 +68,26 @@ curl -sS 'http://127.0.0.1:3847/api/state?accountId=2'
 
 关注自动化页在 supervisor 关闭时不提供启动按钮。`POST /api/automation/start` 返回 403，代码 `automation_disabled`。
 
-## 账号1自动取关
+## 分账号关注与取关
 
-`XUTIE_AUTOMATION_SUPERVISOR` 保持 `off`。不要为了取关把它打开，那会尝试启动回关和关键词关注。没有新增自动关注。账号2的取关请求返回 403 `account_forbidden`。
+`XUTIE_AUTOMATION_SUPERVISOR` 保持 `off`。不要启动 `automation/*.mjs`。四个开关各自默认 `off`：`XUTIE_ACCOUNT1_UNFOLLOW`、`XUTIE_ACCOUNT2_UNFOLLOW`、`XUTIE_ACCOUNT1_FOLLOW`、`XUTIE_ACCOUNT2_FOLLOW`。模拟模式不调用 `xGet`、`xDelete`、`xPost`。正式执行还要该号已 resume，并且库里的 `user_id` 分别是账号1 `1933586991612080128`、账号2 `1468479269701820422`。这些接口不改发帖队列。
 
-模拟模式（`X_API_MODE` 不是精确的 `live`）下，批次不调用 `xGet` / `xDelete`，也不会打开到 `api.x.com` 的连接。返回 `executed: false`、`reason: "mock_mode"`。正式执行要四项同时成立：`X_API_MODE=live`、`XUTIE_ACCOUNT1_UNFOLLOW=on`、取关控制已 resume、账号1的 `user_id` 是 `1933586991612080128`。任一不成立就关闭这一次，不取关。
+时区是 `Europe/London`，含夏令时。取关从当天 00:15 起每 30 分钟最多 10 人，00:00–00:14 不执行。关注从 00:00 起以 45 分钟为一轮：前 15 分钟最多 10 人，随后休息 30 分钟。每个号自己的新关注加回关，每天最多 380，伦敦零点清零。同一伦敦槽重复调用只回放原结果。
 
-动作前的官方读取和写入，都用账号1自己的 OAuth 1.0a 用户上下文：
+取关资格是或关系，未知不算满足：确证非蓝 V，或 `followedAt` 起已满 72 小时且确证未回关，或最新公开帖严格早于 48 小时。`firstRecordedAt` 只留档，不能当成关注时间。公开帖包含回复和转帖，请求不带 `exclude`。账号1白名单仍是原来的 7 个数字 id。账号2白名单是空的，不会抄账号1。
 
-- `GET https://api.x.com/2/users?ids={target}&user.fields=connection_status,verified,verified_type`
-- `GET https://api.x.com/2/users/{target}/tweets?max_results=5&tweet.fields=created_at&exclude=retweets,replies`
+账号2名单库是储备，不是关注记录。`POST /api/follow/reserve` 正文 `{"accountId":2,"checkedAt":"<ISO>","candidates":[{"targetUserId":"123","kind":"followback"|"new"}]}`。`checkedAt` 超过 45 分钟视为陈旧，不能拿来关注。`GET /api/follow?accountId=2` 的 `reserve` 给出 `updatedAt`、`available`、`followbackAvailable`、`newAvailable`、`stale`、`gap`、`constraint`。`constraint` 可以是 `disabled`、`identity_unconfirmed`、`paused`、`rest`、`daily_cap`、`stale_reserve`、`insufficient_candidates`。人数不够时 `gap` 大于 0，本批不凑数，也不放宽蓝 V。回关储备排在新关注前面。动作前重新核验蓝 V、关系和当日剩余额度。实际成功只写在 `follow_success` 和 `GET /api/follow/batches`。储备分页是 `GET /api/follow/reserve`。
+
+新关注在核验时还要满足：账号1为中文（推文 `lang=zh` 且名字、简介或正文符合中文规则），账号2为英文（`lang=en`），粉丝数不超过 20000，最近公开帖在 12 小时内，不是已关注，也不是明显诈骗文案。回关只要求确证蓝 V 且对方已关注自己。非蓝或未知不关注，未知结果不再进入下一批。
+
+取关导入是 `POST /api/unfollow`，正文带 `accountId` 和 `candidates`。`targetUserId` 是数字字符串，`tier` 只能是 `non_blue`、`no_followback_72h`、`inactive_48h`。`followedAt` 才是真实关注时间，可省略；省略时 72 小时那条不成立。`firstRecordedAt` 可以同时留下，但不会被抄进 `followedAt`。批次是 `POST /api/unfollow/batches`，正文只有 `{"accountId":1}` 或 `{"accountId":2}`。幂等键是伦敦槽，例如 `2026-11-08T00:15`。`submitted` 是本批纳入人数，`unfollowed` 只数成功。门没过时 HTTP 200，`executed: false`，`reason` 依次是 `disabled`、`mock_mode`、`outside_window`、`identity_unconfirmed`、`paused`、`verifier_unavailable`，重叠时是 `overlap`。暂停和恢复是 `POST /api/unfollow/pause` 与 `/resume`，只影响该号的取关控制。状态和审计是 `GET /api/unfollow` 与 `GET /api/unfollow/batches`。关注的实际批次是 `POST /api/follow/batches`，`followed` 才是成功人数。
+
+官方调用，每个号只用自己的 OAuth 1.0a：
+
+- `GET https://api.x.com/2/users?ids={target}&user.fields=connection_status,verified,verified_type,public_metrics,description,name,username`
+- `GET https://api.x.com/2/users/{target}/tweets?max_results=5&tweet.fields=created_at,lang,text`
+- `POST https://api.x.com/2/users/{source}/following`，正文 `{"target_user_id":"{target}"}`
 - `DELETE https://api.x.com/2/users/{source}/following/{target}`
-
-`connection_status` 缺数组时关系是未知，不取关，该行记成 `unknown`，下一半点不再选。`DELETE` 失败记成 `failed`，也不再选。
-
-导入是 `POST /api/unfollow`，正文 `{"accountId":1,"candidates":[...]}`。每个对象：
-
-| 字段 | 要求 |
-| --- | --- |
-| `targetUserId` | 字符串，只含数字 |
-| `tier` | `non_blue`、`no_followback_72h`、`inactive_48h` 三者之一。`inactive_36h` 拒绝 |
-| `username` | 可省略。有则截到 64 字 |
-| `firstRecordedAt` | `no_followback_72h` 必填，且 `Date.parse` 成功。另外两层可省略 |
-
-导入不向 X 取证。72 小时从 `firstRecordedAt` 起算，动作时再看 `followed_by`。未活跃只在动作时看推文 `created_at`，必须严格大于 48 小时。白名单在导入时拒绝；库里已有的白名单行在选批时丢掉，不调用 X。
-
-批次是 `POST /api/unfollow/batches`，正文只有 `{"accountId":1}`。没有客户端幂等令牌。幂等键是台北时间半点槽 `YYYY-MM-DDTHH:00` 或 `YYYY-MM-DDTHH:30`。同一槽再调用返回 `replay: true` 和原结果，不再 `DELETE`。每批最多 14。服务自己不补跑错过的槽。
-
-`submitted` 是本批实际纳入人数。`unfollowed` 只数 `result: "success"`。门没过时 HTTP 200，`executed: false`，`reason` 按这个顺序判断：`disabled`、`mock_mode`、`identity_unconfirmed`、`paused`、`verifier_unavailable`。已经有一批在跑时再调用，`reason` 是 `overlap`。账号2仍是 403，不走这套 reason。
-
-暂停是 `POST /api/unfollow/pause`，正文 `{"accountId":1}`，返回 `{ok:true,paused:true}`。它不暂停发帖。已经跑进循环的一批会在下一个目标之前停住，还没处理的人保持 `candidate`。恢复是 `POST /api/unfollow/resume`，同样只带 `{"accountId":1}`。
-
-状态是 `GET /api/unfollow?accountId=1`。字段：`accountId`、`enabled`、`paused`、`pauseReason`、`batchSize`、`inactiveAfterMs`、`counts`、`lastBatch`、`whitelistSize`、`apiMode`、`identityConfirmed`。`lastBatch` 使用库里的 `slot`、`status`、`submitted`、`unfollowed`、`started_at`、`finished_at`。
-
-审计分页是 `GET /api/unfollow/batches?accountId=1&limit=20&before={slot}`。`limit` 缺省 20，允许 1 到 50。`before` 缺省时从最新槽开始，有值时必须是半点槽，返回更早的页。响应是 `{accountId, limit, batches, nextBefore}`。`batches[]` 含 `slot`、`status`、`submitted`、`unfollowed`、`startedAt`、`finishedAt`、`results`。没有下一页时 `nextBefore` 为 null。
 
 ## English
 

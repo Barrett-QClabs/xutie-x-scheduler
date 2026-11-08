@@ -1,8 +1,8 @@
 import { accountIdFrom } from "@/lib/account";
 import { apiMode } from "@/lib/deployment";
 import { handle, readJson } from "@/lib/http";
-import { account1LiveHooks } from "@/lib/unfollow-live";
-import { listUnfollowAudit, requireUnfollowAccount, submitUnfollowBatch, type UnfollowHooks } from "@/lib/unfollow-queue";
+import { liveUnfollowHooks } from "@/lib/unfollow-live";
+import { listUnfollowAudit, submitUnfollowBatch, type UnfollowHooks } from "@/lib/unfollow-queue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,22 +21,17 @@ function auditQuery(request: Request): { limit?: number; before: string | null }
   };
 }
 
-/** Read batch audit pages. Does not call X. */
 export function GET(request: Request) {
-  return handle(() => {
-    requireUnfollowAccount(accountIdFrom(request));
-    return listUnfollowAudit(auditQuery(request));
-  });
+  return handle(() => listUnfollowAudit(accountIdFrom(request), auditQuery(request)));
 }
 
-/** One half-hour batch for account 1. Does not import candidates and does not touch the post queue. */
 export async function POST(request: Request) {
   return handle(async () => {
     const body = await readJson(request);
-    requireUnfollowAccount(accountIdFrom(request, body));
+    const accountId = accountIdFrom(request, body);
     const injected = process.env.VITEST ? testHooks() : undefined;
-    if (injected) return submitUnfollowBatch({ hooks: injected });
-    if (apiMode() !== "live") return submitUnfollowBatch();
-    return submitUnfollowBatch({ hooks: account1LiveHooks() });
+    if (injected) return submitUnfollowBatch({ accountId, hooks: injected });
+    if (apiMode() !== "live") return submitUnfollowBatch({ accountId });
+    return submitUnfollowBatch({ accountId, hooks: liveUnfollowHooks(accountId) });
   });
 }

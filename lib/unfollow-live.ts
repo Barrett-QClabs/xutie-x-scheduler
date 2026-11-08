@@ -1,7 +1,8 @@
+import type { AccountId } from "@/lib/account";
+import { ACCOUNT_USER_ID } from "@/lib/automation-account";
 import { getCredentialsRow } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { readCredentials } from "@/lib/service";
-import { ACCOUNT1_UNFOLLOW_USER_ID } from "@/lib/unfollow-policy";
 import type { FreshProfile, UnfollowHooks } from "@/lib/unfollow-queue";
 import { xDelete, xGet } from "@/lib/x-client";
 
@@ -45,19 +46,19 @@ const unknownProfile = (): FreshProfile => ({
 });
 
 /** Live hooks only. Mock mode returns nothing, so the batch cannot call X. */
-export function account1LiveHooks(): UnfollowHooks | undefined {
+export function liveUnfollowHooks(accountId: AccountId): UnfollowHooks | undefined {
   if (apiMode() !== "live") return undefined;
-  const sourceUserId = getCredentialsRow(1)?.user_id;
-  if (sourceUserId !== ACCOUNT1_UNFOLLOW_USER_ID) return undefined;
+  const sourceUserId = getCredentialsRow(accountId)?.user_id;
+  if (sourceUserId !== ACCOUNT_USER_ID[accountId]) return undefined;
   return {
-    inspect: (targetUserId) => inspectTarget(sourceUserId, targetUserId),
-    unfollow: (targetUserId) => unfollowTarget(sourceUserId, targetUserId),
+    inspect: (targetUserId) => inspectTarget(accountId, sourceUserId, targetUserId),
+    unfollow: (targetUserId) => unfollowTarget(accountId, sourceUserId, targetUserId),
   };
 }
 
-export async function inspectTarget(sourceUserId: string, targetUserId: string): Promise<FreshProfile> {
+export async function inspectTarget(accountId: AccountId, sourceUserId: string, targetUserId: string): Promise<FreshProfile> {
   if (apiMode() !== "live") return unknownProfile();
-  const credentials = readCredentials(1);
+  const credentials = readCredentials(accountId);
   if (!credentials) return unknownProfile();
   try {
     const users = await xGet(credentials, "/2/users", {
@@ -71,7 +72,6 @@ export async function inspectTarget(sourceUserId: string, targetUserId: string):
       tweets = await xGet(credentials, `/2/users/${encodeURIComponent(targetUserId)}/tweets`, {
         max_results: "5",
         "tweet.fields": "created_at",
-        exclude: "retweets,replies",
       });
     } catch {
       tweets = null;
@@ -82,9 +82,9 @@ export async function inspectTarget(sourceUserId: string, targetUserId: string):
   }
 }
 
-export async function unfollowTarget(sourceUserId: string, targetUserId: string): Promise<void> {
+export async function unfollowTarget(accountId: AccountId, sourceUserId: string, targetUserId: string): Promise<void> {
   if (apiMode() !== "live") throw new Error("mock mode does not unfollow");
-  const credentials = readCredentials(1);
+  const credentials = readCredentials(accountId);
   if (!credentials) throw new Error("missing account 1 credentials");
   await xDelete(
     credentials,

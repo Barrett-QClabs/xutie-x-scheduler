@@ -101,43 +101,8 @@ function migrate(db: DatabaseSync): void {
   widenAccountTables(db);
   ensureColumn(db, "tweets", "account_id", "ALTER TABLE tweets ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1");
   db.exec("CREATE INDEX IF NOT EXISTS idx_tweets_account_sched ON tweets(account_id, status, scheduled_at)");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS unfollow_control (
-      account_id INTEGER PRIMARY KEY CHECK (account_id = 1),
-      paused INTEGER NOT NULL DEFAULT 1,
-      pause_reason TEXT,
-      updated_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS unfollow_candidates (
-      account_id INTEGER NOT NULL CHECK (account_id = 1),
-      target_user_id TEXT NOT NULL,
-      username TEXT,
-      tier TEXT NOT NULL,
-      first_recorded_at TEXT,
-      status TEXT NOT NULL,
-      batch_slot TEXT,
-      result TEXT,
-      reason TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (account_id, target_user_id)
-    );
-    CREATE TABLE IF NOT EXISTS unfollow_batches (
-      slot TEXT PRIMARY KEY,
-      account_id INTEGER NOT NULL CHECK (account_id = 1),
-      status TEXT NOT NULL,
-      submitted INTEGER NOT NULL DEFAULT 0,
-      unfollowed INTEGER NOT NULL DEFAULT 0,
-      results_json TEXT,
-      started_at TEXT NOT NULL,
-      finished_at TEXT
-    );
-  `);
+  ensureAutomationTables(db);
   const now = new Date().toISOString();
-  db.prepare(
-    `INSERT OR IGNORE INTO unfollow_control (account_id, paused, pause_reason, updated_at)
-     VALUES (1, 1, 'safe_start', ?)`,
-  ).run(now);
   for (const id of ACCOUNT_IDS) {
     db.prepare(
       `INSERT OR IGNORE INTO queue_settings
@@ -172,6 +137,146 @@ type TweetRow = {
   created_at: string;
   updated_at: string;
 };
+
+function ensureAutomationTables(db: DatabaseSync): void {
+  const legacy = tableSql(db, "unfollow_batches");
+  if (legacy && !/IN \(1,\s*2\)/i.test(legacy)) {
+    db.exec(`
+      CREATE TABLE unfollow_control_new (
+        account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
+        paused INTEGER NOT NULL DEFAULT 1,
+        pause_reason TEXT,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO unfollow_control_new (account_id, paused, pause_reason, updated_at)
+      SELECT account_id, paused, pause_reason, updated_at FROM unfollow_control;
+      DROP TABLE unfollow_control;
+      ALTER TABLE unfollow_control_new RENAME TO unfollow_control;
+
+      CREATE TABLE unfollow_candidates_new (
+        account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+        target_user_id TEXT NOT NULL,
+        username TEXT,
+        tier TEXT NOT NULL,
+        first_recorded_at TEXT,
+        followed_at TEXT,
+        status TEXT NOT NULL,
+        batch_slot TEXT,
+        result TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, target_user_id)
+      );
+      INSERT INTO unfollow_candidates_new
+        (account_id, target_user_id, username, tier, first_recorded_at, followed_at, status, batch_slot, result, reason, created_at, updated_at)
+      SELECT account_id, target_user_id, username, tier, first_recorded_at, NULL, status, batch_slot, result, reason, created_at, updated_at
+      FROM unfollow_candidates;
+      DROP TABLE unfollow_candidates;
+      ALTER TABLE unfollow_candidates_new RENAME TO unfollow_candidates;
+
+      CREATE TABLE unfollow_batches_new (
+        account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+        slot TEXT NOT NULL,
+        status TEXT NOT NULL,
+        submitted INTEGER NOT NULL DEFAULT 0,
+        unfollowed INTEGER NOT NULL DEFAULT 0,
+        results_json TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        PRIMARY KEY (account_id, slot)
+      );
+      INSERT INTO unfollow_batches_new
+        (account_id, slot, status, submitted, unfollowed, results_json, started_at, finished_at)
+      SELECT account_id, slot, status, submitted, unfollowed, results_json, started_at, finished_at FROM unfollow_batches;
+      DROP TABLE unfollow_batches;
+      ALTER TABLE unfollow_batches_new RENAME TO unfollow_batches;
+    `);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS unfollow_control (
+      account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
+      paused INTEGER NOT NULL DEFAULT 1,
+      pause_reason TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS unfollow_candidates (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      target_user_id TEXT NOT NULL,
+      username TEXT,
+      tier TEXT NOT NULL,
+      first_recorded_at TEXT,
+      followed_at TEXT,
+      status TEXT NOT NULL,
+      batch_slot TEXT,
+      result TEXT,
+      reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+    CREATE TABLE IF NOT EXISTS unfollow_batches (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      slot TEXT NOT NULL,
+      status TEXT NOT NULL,
+      submitted INTEGER NOT NULL DEFAULT 0,
+      unfollowed INTEGER NOT NULL DEFAULT 0,
+      results_json TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      PRIMARY KEY (account_id, slot)
+    );
+    CREATE TABLE IF NOT EXISTS follow_control (
+      account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
+      paused INTEGER NOT NULL DEFAULT 1,
+      pause_reason TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS follow_reserve (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      target_user_id TEXT NOT NULL,
+      username TEXT,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      checked_at TEXT NOT NULL,
+      result TEXT,
+      reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+    CREATE TABLE IF NOT EXISTS follow_batches (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      slot TEXT NOT NULL,
+      status TEXT NOT NULL,
+      submitted INTEGER NOT NULL DEFAULT 0,
+      followed INTEGER NOT NULL DEFAULT 0,
+      results_json TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      PRIMARY KEY (account_id, slot)
+    );
+    CREATE TABLE IF NOT EXISTS follow_success (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      target_user_id TEXT NOT NULL,
+      username TEXT,
+      kind TEXT NOT NULL,
+      succeeded_at TEXT NOT NULL,
+      slot TEXT NOT NULL,
+      london_day TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+  `);
+  const now = new Date().toISOString();
+  for (const id of [1, 2]) {
+    db.prepare(
+      `INSERT OR IGNORE INTO unfollow_control (account_id, paused, pause_reason, updated_at) VALUES (?, 1, 'safe_start', ?)`,
+    ).run(id, now);
+    db.prepare(
+      `INSERT OR IGNORE INTO follow_control (account_id, paused, pause_reason, updated_at) VALUES (?, 1, 'safe_start', ?)`,
+    ).run(id, now);
+  }
+}
 
 function tableSql(db: DatabaseSync, name: string): string {
   const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
@@ -580,10 +685,17 @@ export function deleteTweet(id: string, accountId: AccountId): boolean {
 export function resetAllData(): void {
   const db = getDb();
   const now = new Date().toISOString();
-  db.exec("DELETE FROM tweets; DELETE FROM credentials; DELETE FROM unfollow_candidates; DELETE FROM unfollow_batches;");
-  db.prepare(
-    `UPDATE unfollow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ? WHERE account_id = 1`,
-  ).run(now);
+  db.exec(`
+    DELETE FROM tweets;
+    DELETE FROM credentials;
+    DELETE FROM unfollow_candidates;
+    DELETE FROM unfollow_batches;
+    DELETE FROM follow_reserve;
+    DELETE FROM follow_batches;
+    DELETE FROM follow_success;
+  `);
+  db.prepare(`UPDATE unfollow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
+  db.prepare(`UPDATE follow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
   const reset = (accountId: AccountId, paused: number, reason: string | null) => {
     db.prepare(
       `UPDATE queue_settings SET

@@ -491,20 +491,29 @@ async function xUploadV1GetStatus(credentials: Credentials, mediaId: string): Pr
 }
 
 export async function xDelete(credentials: Credentials, path: string): Promise<Record<string, unknown>> {
-  assertLiveReadOrDelete();
+  assertLiveNetwork();
   return (await xRequest(credentials, "DELETE", path)) as Record<string, unknown>;
 }
 
 /** Read-only GET with the user's OAuth 1.0a keys (used by daily stats). */
 export async function xGet(credentials: Credentials, path: string, query?: Record<string, string>): Promise<Record<string, unknown>> {
-  assertLiveReadOrDelete();
+  assertLiveNetwork();
   return (await xRequest(credentials, "GET", path, query)) as Record<string, unknown>;
 }
 
-function assertLiveReadOrDelete(): void {
+function assertLiveNetwork(): void {
   if (apiMode() !== "live") {
     throw new XApiError("模拟模式不会请求 X。", "rejected", 0);
   }
+}
+
+export async function xPost(
+  credentials: Credentials,
+  path: string,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  assertLiveNetwork();
+  return (await xRequest(credentials, "POST", path, undefined, body)) as Record<string, unknown>;
 }
 
 async function xRequest(

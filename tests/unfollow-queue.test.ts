@@ -7,9 +7,9 @@ import { getDb, getQueueSettings, updateAccount } from "@/lib/db";
 import { profileFromLookup } from "@/lib/unfollow-live";
 import { UNFOLLOW_WHITELIST } from "@/lib/unfollow-policy";
 import { xDelete, xGet } from "@/lib/x-client";
+import { londonUnfollowSlot } from "@/lib/london";
 import {
   classifyAction,
-  halfHourSlot,
   importUnfollowCandidates,
   setUnfollowPaused,
   submitUnfollowBatch,
@@ -29,7 +29,7 @@ function enable() {
     accessTokenSecret: "acctoneA-token-secret",
   });
   updateAccount(1, { username: "barrett_tt", displayName: "Barrett", userId: "1933586991612080128" });
-  setUnfollowPaused(false, "test");
+  setUnfollowPaused(1, false, "test");
 }
 
 const confirmed: FreshProfile = {
@@ -57,7 +57,7 @@ afterEach(() => {
 describe("account 1 unfollow batch", () => {
   it("does not report execution while the switch is off", async () => {
     const calls: string[] = [];
-    const result = await submitUnfollowBatch({ hooks: hooks({}, calls) });
+    const result = await submitUnfollowBatch({ accountId: 1,  hooks: hooks({}, calls) });
     expect(result.executed).toBe(false);
     expect(result.reason).toBe("disabled");
     expect(result.unfollowed).toBe(0);
@@ -82,8 +82,9 @@ describe("account 1 unfollow batch", () => {
           body: JSON.stringify({ accountId: 2 }),
         }),
       ).then((response) => response.status),
-    ).resolves.toBe(403);
-    const imported = importUnfollowCandidates({
+    ).resolves.toBe(200);
+    expect(getQueueSettings(1).paused).toBe(before.paused);
+    const imported = importUnfollowCandidates(1, {
       candidates: [
         { targetUserId: "25073877", tier: "non_blue" },
         { targetUserId: "555", tier: "non_blue" },
@@ -92,7 +93,7 @@ describe("account 1 unfollow batch", () => {
     });
     expect(imported.rejected.map((item) => item.reason)).toContain("whitelist");
     expect(imported.accepted).toEqual(["555"]);
-    expect(imported.existing).toEqual(["555"]);
+    expect(imported.reopened).toEqual(["555"]);
     expect(getPublicState().tweets[0].text).toBe("把我取关的人，不要和我说话");
     expect(getPublicState().tweets[0].scheduledAt).toBe(posted.queued[0].scheduledAt);
     expect(getQueueSettings(1).paused).toBe(before.paused);
@@ -102,7 +103,7 @@ describe("account 1 unfollow batch", () => {
   it("unfollows only a fresh confirmed non-blue, fourteen at a time, without replay or overlap", async () => {
     enable();
     const ids = Array.from({ length: 16 }, (_, index) => String(1000 + index));
-    importUnfollowCandidates({
+    importUnfollowCandidates(1, {
       candidates: [
         ...ids.map((id) => ({ targetUserId: id, tier: "non_blue" as const })),
         { targetUserId: "2000", tier: "inactive_48h" as const },
@@ -119,24 +120,23 @@ describe("account 1 unfollow batch", () => {
     fresh["2000"] = { ...confirmed, lastPostAt: new Date().toISOString() };
     fresh["3000"] = confirmed;
     const now = new Date("2026-11-08T04:00:00.000Z");
-    const first = await submitUnfollowBatch({ now, hooks: hooks(fresh, calls) });
-    expect(halfHourSlot(now)).toBe("2026-11-08T12:00");
+    const first = await submitUnfollowBatch({ accountId: 1,  now, hooks: hooks(fresh, calls) });
+    expect(londonUnfollowSlot(now)).toBe("2026-11-08T03:45");
     expect(first.executed).toBe(true);
-    expect(first.submitted).toBe(14);
-    expect(first.unfollowed).toBe(14);
+    expect(first.submitted).toBe(10);
+    expect(first.unfollowed).toBe(10);
     expect(first.results.every((item) => item.tier === "non_blue" && item.result === "success")).toBe(true);
-    expect(calls).toHaveLength(14);
+    expect(calls).toHaveLength(10);
 
-    const replay = await submitUnfollowBatch({ now, hooks: hooks(fresh, calls) });
+    const replay = await submitUnfollowBatch({ accountId: 1,  now, hooks: hooks(fresh, calls) });
     expect(replay.replay).toBe(true);
-    expect(calls).toHaveLength(14);
+    expect(calls).toHaveLength(10);
 
-    const later = await submitUnfollowBatch({ now: new Date("2026-11-08T04:30:00.000Z"), hooks: hooks(fresh, calls) });
-    expect(later.slot).toBe("2026-11-08T12:30");
-    expect(later.submitted).toBe(3);
-    expect(later.results.map((item) => item.result).sort()).toEqual(["skipped", "success", "success"]);
-    expect(later.unfollowed).toBe(2);
-    expect(calls).toHaveLength(16);
+    const later = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-08T04:30:00.000Z"), hooks: hooks(fresh, calls) });
+    expect(later.slot).toBe("2026-11-08T04:15");
+    expect(later.submitted).toBe(8);
+    expect(later.unfollowed).toBe(8);
+    expect(calls).toHaveLength(18);
     expect(JSON.stringify(later)).not.toContain(SECRET);
   });
 
@@ -144,14 +144,14 @@ describe("account 1 unfollow batch", () => {
     enable();
     const now = new Date("2026-11-08T08:00:00.000Z");
     const hour = 60 * 60 * 1000;
-    importUnfollowCandidates({
+    importUnfollowCandidates(1, {
       candidates: [
         { targetUserId: "41", tier: "inactive_48h" },
         { targetUserId: "42", tier: "inactive_48h" },
         { targetUserId: "43", tier: "non_blue" },
       ],
     });
-    expect(importUnfollowCandidates({ candidates: [{ targetUserId: "99", tier: "inactive_36h" }] }).rejected[0].reason).toBe(
+    expect(importUnfollowCandidates(1, { candidates: [{ targetUserId: "99", tier: "inactive_36h" }] }).rejected[0].reason).toBe(
       "invalid_tier",
     );
     const stamp = now.toISOString();
@@ -164,20 +164,20 @@ describe("account 1 unfollow batch", () => {
       .run(stamp, stamp);
     const calls: string[] = [];
     const at = (ms: number) => new Date(now.getTime() - ms).toISOString();
-    const result = await submitUnfollowBatch({
+    const result = await submitUnfollowBatch({ accountId: 1, 
       now,
       hooks: hooks(
         {
-          "41": { ...confirmed, lastPostAt: at(48 * hour) },
-          "42": { ...confirmed, lastPostAt: at(48 * hour + 1) },
+          "41": { ...confirmed, blue: true, followsBack: true, lastPostAt: at(48 * hour) },
+          "42": { ...confirmed, blue: true, followsBack: true, lastPostAt: at(48 * hour + 1) },
           "43": { ...confirmed, lastPostAt: at(hour) },
-          "44": { ...confirmed, lastPostAt: at(40 * hour) },
+          "44": { ...confirmed, blue: true, followsBack: true, lastPostAt: at(40 * hour) },
         },
         calls,
       ),
     });
-    expect(result.results.find((item) => item.targetUserId === "41")?.reason).toBe("not_older_than_48h");
-    expect(result.results.find((item) => item.targetUserId === "44")?.reason).toBe("not_older_than_48h");
+    expect(result.results.find((item) => item.targetUserId === "41")?.reason).toBe("not_qualified");
+    expect(result.results.find((item) => item.targetUserId === "44")?.reason).toBe("not_qualified");
     expect(result.results.find((item) => item.targetUserId === "42")?.result).toBe("success");
     expect(result.results.find((item) => item.targetUserId === "43")?.result).toBe("success");
     expect(calls.sort()).toEqual(["42", "43"]);
@@ -185,7 +185,7 @@ describe("account 1 unfollow batch", () => {
 
   it("does not act when following, blue, or the last post is unknown", async () => {
     enable();
-    importUnfollowCandidates({
+    importUnfollowCandidates(1, {
       candidates: [
         { targetUserId: "11", tier: "non_blue" },
         { targetUserId: "12", tier: "non_blue" },
@@ -193,13 +193,13 @@ describe("account 1 unfollow batch", () => {
       ],
     });
     const calls: string[] = [];
-    const result = await submitUnfollowBatch({
+    const result = await submitUnfollowBatch({ accountId: 1, 
       now: new Date("2026-11-08T05:00:00.000Z"),
       hooks: hooks(
         {
           "11": { following: null, blue: false, followsBack: false, lastPostAt: null, lastPostKnown: true },
           "12": { following: false, blue: false, followsBack: false, lastPostAt: null, lastPostKnown: true },
-          "13": { following: true, blue: false, followsBack: false, lastPostAt: null, lastPostKnown: false },
+          "13": { following: true, blue: true, followsBack: true, lastPostAt: null, lastPostKnown: false },
         },
         calls,
       ),
@@ -212,7 +212,7 @@ describe("account 1 unfollow batch", () => {
 
   it("returns overlap instead of a second execution", async () => {
     enable();
-    importUnfollowCandidates({ candidates: [{ targetUserId: "77", tier: "non_blue" }] });
+    importUnfollowCandidates(1, { candidates: [{ targetUserId: "77", tier: "non_blue" }] });
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -225,9 +225,9 @@ describe("account 1 unfollow batch", () => {
       unfollow: async () => undefined,
     };
     const now = new Date("2026-11-08T06:00:00.000Z");
-    const running = submitUnfollowBatch({ now, hooks: slow });
+    const running = submitUnfollowBatch({ accountId: 1,  now, hooks: slow });
     await new Promise((resolve) => setTimeout(resolve, 20));
-    const second = await submitUnfollowBatch({ now, hooks: slow });
+    const second = await submitUnfollowBatch({ accountId: 1,  now, hooks: slow });
     expect(second.executed).toBe(false);
     expect(second.reason).toBe("overlap");
     release();
@@ -244,10 +244,10 @@ describe("account 1 unfollow batch", () => {
       accessTokenSecret: "acctoneA-token-secret",
     });
     updateAccount(1, { username: "other_user", displayName: "Other", userId: "1468479269701820422" });
-    setUnfollowPaused(false, "test");
-    importUnfollowCandidates({ candidates: [{ targetUserId: "11", tier: "non_blue" }] });
+    setUnfollowPaused(1, false, "test");
+    importUnfollowCandidates(1, { candidates: [{ targetUserId: "11", tier: "non_blue" }] });
     const calls: string[] = [];
-    const result = await submitUnfollowBatch({ now: new Date("2026-11-08T07:00:00.000Z"), hooks: hooks({ "11": confirmed }, calls) });
+    const result = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-08T07:00:00.000Z"), hooks: hooks({ "11": confirmed }, calls) });
     expect(result.executed).toBe(false);
     expect(result.reason).toBe("identity_unconfirmed");
     expect(result.unfollowed).toBe(0);
@@ -259,7 +259,8 @@ describe("account 1 unfollow batch", () => {
       method: "POST",
       body: JSON.stringify({ accountId: 2 }),
     }));
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(200);
+    expect((await response.json()).reason).toBe("disabled");
     const disabled = await submitBatch(new Request("http://local/api/unfollow/batches", {
       method: "POST",
       body: JSON.stringify({ accountId: 1 }),
@@ -273,7 +274,7 @@ describe("account 1 unfollow batch", () => {
 
   it("does not retry an unknown lookup or a failed delete on the next slot", async () => {
     enable();
-    importUnfollowCandidates({
+    importUnfollowCandidates(1, {
       candidates: [
         { targetUserId: "11", tier: "non_blue" },
         { targetUserId: "12", tier: "non_blue" },
@@ -287,12 +288,12 @@ describe("account 1 unfollow batch", () => {
         throw new Error("delete failed");
       },
     };
-    const first = await submitUnfollowBatch({ now: new Date("2026-11-08T05:00:00.000Z"), hooks: failing });
+    const first = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-08T05:00:00.000Z"), hooks: failing });
     expect(first.submitted).toBe(2);
     expect(first.unfollowed).toBe(0);
     expect(first.results.map((item) => item.result)).toEqual(["unknown", "failed"]);
     expect(calls).toEqual(["12"]);
-    const second = await submitUnfollowBatch({ now: new Date("2026-11-08T05:30:00.000Z"), hooks: failing });
+    const second = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-08T05:30:00.000Z"), hooks: failing });
     expect(second.executed).toBe(true);
     expect(second.submitted).toBe(0);
     expect(second.unfollowed).toBe(0);
@@ -311,7 +312,7 @@ describe("account 1 unfollow batch", () => {
       )
       .run(stamp, stamp);
     const calls: string[] = [];
-    const result = await submitUnfollowBatch({
+    const result = await submitUnfollowBatch({ accountId: 1, 
       now: new Date("2026-11-08T09:00:00.000Z"),
       hooks: hooks({ "25073877": confirmed }, calls),
     });
@@ -324,20 +325,20 @@ describe("account 1 unfollow batch", () => {
 
   it("stops before the next target when pause arrives mid-batch", async () => {
     enable();
-    importUnfollowCandidates({
+    importUnfollowCandidates(1, {
       candidates: [
         { targetUserId: "81", tier: "non_blue" },
         { targetUserId: "82", tier: "non_blue" },
       ],
     });
     const calls: string[] = [];
-    const result = await submitUnfollowBatch({
+    const result = await submitUnfollowBatch({ accountId: 1, 
       now: new Date("2026-11-08T10:00:00.000Z"),
       hooks: {
         inspect: async () => confirmed,
         unfollow: async (id) => {
           calls.push(id);
-          setUnfollowPaused(true, "manual");
+          setUnfollowPaused(1, true, "manual");
         },
       },
     });
@@ -366,7 +367,7 @@ describe("unfollow network gate", () => {
     };
     try {
       enable();
-      importUnfollowCandidates({ candidates: [{ targetUserId: "555", tier: "non_blue" }] });
+      importUnfollowCandidates(1, { candidates: [{ targetUserId: "555", tier: "non_blue" }] });
       const response = await submitBatch(new Request("http://local/api/unfollow/batches", {
         method: "POST",
         body: JSON.stringify({ accountId: 1 }),
@@ -386,7 +387,7 @@ describe("unfollow network gate", () => {
       expect(state.enabled).toBe(true);
       expect(state.paused).toBe(false);
       expect(state.identityConfirmed).toBe(true);
-      expect(state.batchSize).toBe(14);
+      expect(state.batchSize).toBe(10);
       expect(state.inactiveAfterMs).toBe(48 * 60 * 60 * 1000);
     } finally {
       globalThis.fetch = original;
@@ -403,6 +404,7 @@ describe("unfollow network gate", () => {
       const method = init?.method ?? "GET";
       calls.push(`${method} ${url}`);
       expect(url.startsWith("https://api.x.com/")).toBe(true);
+      expect(url.includes("exclude=")).toBe(false);
       if (method === "DELETE") return new Response(JSON.stringify({ data: { following: false } }), { status: 200 });
       if (url.includes("/tweets")) return new Response(JSON.stringify({ data: [] }), { status: 200 });
       return new Response(JSON.stringify({
@@ -410,7 +412,7 @@ describe("unfollow network gate", () => {
       }), { status: 200 });
     };
     try {
-      importUnfollowCandidates({ candidates: [{ targetUserId: "555", tier: "non_blue" }] });
+      importUnfollowCandidates(1, { candidates: [{ targetUserId: "555", tier: "non_blue" }] });
       const blocked = await submitBatch(new Request("http://local/api/unfollow/batches", {
         method: "POST",
         body: JSON.stringify({ accountId: 1 }),
@@ -421,14 +423,14 @@ describe("unfollow network gate", () => {
       process.env.XUTIE_ACCOUNT1_UNFOLLOW = "on";
       saveCredentials(1, dummyCredentials);
       updateAccount(1, { username: "other_user", displayName: "Other", userId: "1468479269701820422" });
-      setUnfollowPaused(false, "test");
+      setUnfollowPaused(1, false, "test");
       const wrong = await submitBatch(new Request("http://local/api/unfollow/batches", {
         method: "POST",
         body: JSON.stringify({ accountId: 1 }),
       }));
       expect((await wrong.json()).reason).toBe("identity_unconfirmed");
       expect(calls).toEqual([]);
-      setUnfollowPaused(true, "test");
+      setUnfollowPaused(1, true, "test");
       updateAccount(1, { username: "barrett_tt", displayName: "Barrett", userId: "1933586991612080128" });
       const paused = await submitBatch(new Request("http://local/api/unfollow/batches", {
         method: "POST",
@@ -451,7 +453,7 @@ describe("unfollow network gate", () => {
       expect(body.replay).toBe(false);
       expect(body.submitted).toBe(1);
       expect(body.unfollowed).toBe(1);
-      expect(body.results).toEqual([{ targetUserId: "555", tier: "non_blue", result: "success", reason: "confirmed" }]);
+      expect(body.results).toEqual([{ targetUserId: "555", tier: "non_blue", result: "success", reason: "non_blue" }]);
       expect(calls.filter((item) => item.startsWith("DELETE"))).toHaveLength(1);
       const replay = await submitBatch(new Request("http://local/api/unfollow/batches", {
         method: "POST",
@@ -479,7 +481,7 @@ describe("unfollow network gate", () => {
     };
     try {
       enable();
-      importUnfollowCandidates({ candidates: [{ targetUserId: "555", tier: "non_blue" }] });
+      importUnfollowCandidates(1, { candidates: [{ targetUserId: "555", tier: "non_blue" }] });
       const response = await submitBatch(new Request("http://local/api/unfollow/batches", {
         method: "POST",
         body: JSON.stringify({ accountId: 1 }),
@@ -489,7 +491,7 @@ describe("unfollow network gate", () => {
       expect(body.unfollowed).toBe(0);
       expect(body.results[0]).toMatchObject({ result: "unknown", reason: "following_unconfirmed" });
       expect(calls.some((item) => item.startsWith("DELETE"))).toBe(false);
-      const later = await submitUnfollowBatch({
+      const later = await submitUnfollowBatch({ accountId: 1, 
         now: new Date(Date.now() + 60 * 60 * 1000),
         hooks: hooks({ "555": confirmed }, []),
       });
@@ -522,22 +524,21 @@ describe("unfollow contract routes", () => {
       }),
     }));
     const body = await imported.json();
-    expect(body.accepted).toEqual(["555", "556", "557"]);
+    expect(body.accepted).toEqual(["555", "556", "557", "558"]);
     expect(body.rejected).toEqual([
-      { targetUserId: "558", reason: "first_recorded_required" },
       { targetUserId: "abc", reason: "invalid_id" },
       { targetUserId: "25073877", reason: "whitelist" },
       { targetUserId: "559", reason: "invalid_tier" },
     ]);
     const now = new Date("2026-11-08T04:00:00.000Z");
-    const first = await submitUnfollowBatch({
+    const first = await submitUnfollowBatch({ accountId: 1, 
       now,
-      hooks: hooks({ "555": confirmed, "556": confirmed, "557": { ...confirmed, lastPostAt: now.toISOString() } }, []),
+      hooks: hooks({ "555": confirmed, "556": { ...confirmed, blue: true, followsBack: true, lastPostAt: now.toISOString() }, "557": { ...confirmed, blue: true, followsBack: true, lastPostAt: now.toISOString() }, "558": { ...confirmed, blue: true, followsBack: false, lastPostAt: now.toISOString() } }, []),
     });
-    expect(first.submitted).toBe(3);
-    expect(first.unfollowed).toBe(2);
-    importUnfollowCandidates({ candidates: [{ targetUserId: "560", tier: "non_blue" }] });
-    await submitUnfollowBatch({
+    expect(first.submitted).toBe(4);
+    expect(first.unfollowed).toBe(1);
+    importUnfollowCandidates(1, { candidates: [{ targetUserId: "560", tier: "non_blue" }] });
+    await submitUnfollowBatch({ accountId: 1, 
       now: new Date("2026-11-08T04:30:00.000Z"),
       hooks: hooks({ "560": confirmed }, []),
     });
@@ -545,27 +546,29 @@ describe("unfollow contract routes", () => {
     const audit = await page.json();
     expect(audit.limit).toBe(1);
     expect(audit.batches).toHaveLength(1);
-    expect(audit.batches[0].slot).toBe("2026-11-08T12:30");
+    expect(audit.batches[0].slot).toBe("2026-11-08T04:15");
     expect(audit.batches[0].unfollowed).toBe(1);
-    expect(audit.nextBefore).toBe("2026-11-08T12:30");
-    const older = await readAudit(new Request("http://local/api/unfollow/batches?accountId=1&limit=1&before=2026-11-08T12:30"));
+    expect(audit.nextBefore).toBe("2026-11-08T04:15");
+    const older = await readAudit(new Request("http://local/api/unfollow/batches?accountId=1&limit=1&before=2026-11-08T04:15"));
     const olderBody = await older.json();
-    expect(olderBody.batches[0].slot).toBe("2026-11-08T12:00");
-    expect(olderBody.batches[0].submitted).toBe(3);
-    expect(olderBody.batches[0].unfollowed).toBe(2);
+    expect(olderBody.batches[0].slot).toBe("2026-11-08T03:45");
+    expect(olderBody.batches[0].submitted).toBe(4);
+    expect(olderBody.batches[0].unfollowed).toBe(1);
     expect(olderBody.nextBefore).toBeNull();
     const account2 = await readAudit(new Request("http://local/api/unfollow/batches?accountId=2"));
-    expect(account2.status).toBe(403);
+    expect(account2.status).toBe(200);
     const resume2 = await resumeUnfollow(new Request("http://local/api/unfollow/resume", {
       method: "POST",
       body: JSON.stringify({ accountId: 2 }),
     }));
-    expect(resume2.status).toBe(403);
+    expect(resume2.status).toBe(200);
     const import2 = await postUnfollow(new Request("http://local/api/unfollow", {
       method: "POST",
-      body: JSON.stringify({ accountId: 2, candidates: [{ targetUserId: "555", tier: "non_blue" }] }),
+      body: JSON.stringify({ accountId: 2, candidates: [{ targetUserId: "25073877", tier: "non_blue" }] }),
     }));
-    expect(import2.status).toBe(403);
+    expect(import2.status).toBe(200);
+    expect((await import2.json()).accepted).toEqual(["25073877"]);
+    expect(getQueueSettings(1).paused).toBe(false);
   });
 });
 
@@ -576,8 +579,7 @@ describe("fresh profile parsing", () => {
     expect(profile.blue).toBeNull();
     expect(profile.lastPostKnown).toBe(true);
     const decision = classifyAction({
-      tier: "non_blue",
-      firstRecordedAt: null,
+      followedAt: null,
       fresh: { ...confirmed, ...profile, following: null },
       now: new Date(),
       whitelisted: false,
