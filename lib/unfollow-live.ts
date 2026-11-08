@@ -3,8 +3,9 @@ import { ACCOUNT_USER_ID } from "@/lib/automation-account";
 import { getCredentialsRow } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { readCredentials } from "@/lib/service";
+import { evidenceUnfollowProfile } from "@/lib/evidence";
 import type { FreshProfile, UnfollowHooks } from "@/lib/unfollow-queue";
-import { xDelete, xGet } from "@/lib/x-client";
+import { xDelete } from "@/lib/x-client";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -51,35 +52,13 @@ export function liveUnfollowHooks(accountId: AccountId): UnfollowHooks | undefin
   const sourceUserId = getCredentialsRow(accountId)?.user_id;
   if (sourceUserId !== ACCOUNT_USER_ID[accountId]) return undefined;
   return {
-    inspect: (targetUserId) => inspectTarget(accountId, sourceUserId, targetUserId),
+    inspect: async (targetUserId) => evidenceUnfollowProfile(accountId, targetUserId),
     unfollow: (targetUserId) => unfollowTarget(accountId, sourceUserId, targetUserId),
   };
 }
 
-export async function inspectTarget(accountId: AccountId, sourceUserId: string, targetUserId: string): Promise<FreshProfile> {
-  if (apiMode() !== "live") return unknownProfile();
-  const credentials = readCredentials(accountId);
-  if (!credentials) return unknownProfile();
-  try {
-    const users = await xGet(credentials, "/2/users", {
-      ids: targetUserId,
-      "user.fields": "connection_status,verified,verified_type",
-    });
-    const list = Array.isArray(users.data) ? users.data : [];
-    const user = list.map(asRecord).find((item) => item?.id === targetUserId) ?? null;
-    let tweets: Record<string, unknown> | null = null;
-    try {
-      tweets = await xGet(credentials, `/2/users/${encodeURIComponent(targetUserId)}/tweets`, {
-        max_results: "5",
-        "tweet.fields": "created_at",
-      });
-    } catch {
-      tweets = null;
-    }
-    return profileFromLookup(user, tweets);
-  } catch {
-    return unknownProfile();
-  }
+export async function inspectTarget(): Promise<FreshProfile> {
+  return unknownProfile();
 }
 
 export async function unfollowTarget(accountId: AccountId, sourceUserId: string, targetUserId: string): Promise<void> {

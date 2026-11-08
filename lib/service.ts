@@ -99,6 +99,23 @@ export async function testCredentials(accountId: AccountId, input?: Partial<Cred
   if (!credentials) {
     throw new AppError("credentials_missing", "还没有保存凭据。");
   }
+  if (!isMockMode()) {
+    const stored = getCredentialsRow(accountId);
+    if (usingStored && stored?.user_id && stored.username) {
+      return {
+        ok: true,
+        username: stored.username,
+        displayName: stored.display_name || stored.username,
+        userId: stored.user_id,
+        saved: false,
+      };
+    }
+    throw new AppError(
+      "identity_reconfirm_blocked",
+      "不能用用户自己的 X 读额度重新确认身份。请由免费供给写入身份证据；本次不会改已保存的身份。",
+      409,
+    );
+  }
   try {
     const user = await createXClient(credentials).verify();
     if (usingStored) {

@@ -4,6 +4,7 @@ import { POST as pauseUnfollow } from "@/app/api/unfollow/pause/route";
 import { POST as resumeUnfollow } from "@/app/api/unfollow/resume/route";
 import { GET as readUnfollow, POST as postUnfollow } from "@/app/api/unfollow/route";
 import { getDb, getQueueSettings, updateAccount } from "@/lib/db";
+import { importEvidence } from "@/lib/evidence";
 import { profileFromLookup } from "@/lib/unfollow-live";
 import { UNFOLLOW_WHITELIST } from "@/lib/unfollow-policy";
 import { xDelete, xGet } from "@/lib/x-client";
@@ -444,6 +445,20 @@ describe("unfollow network gate", () => {
         body: JSON.stringify({ accountId: 1 }),
       }));
       expect(await resumed.json()).toMatchObject({ ok: true, paused: false });
+      const now = new Date();
+      importEvidence(1, {
+        schema_version: 1,
+        account_id: "1933586991612080128",
+        source_namespace: "user-X",
+        source_tool: "get_users_me_following",
+        observed_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
+        request_fields: ["verified", "verified_type", "connection_status"],
+        coverage: { pagination_complete: true, next_token: null, activity_window_complete: false, excluded: [] },
+        errors: [],
+        evidence_refs: [],
+        subjects: [{ id: "555", verified: false, verified_type: "none", connection_status: ["following"] }],
+      });
       const done = await submitBatch(new Request("http://local/api/unfollow/batches", {
         method: "POST",
         body: JSON.stringify({ accountId: 1 }),

@@ -316,9 +316,13 @@ describe("live X client", () => {
     const x = createLiveXClient(credentials);
     const original = global.fetch;
 
-    global.fetch = async () =>
-      new Response(JSON.stringify({ data: { id: "99", name: "Ada", username: "ada" } }), { status: 200 });
-    await expect(x.verify()).resolves.toMatchObject({ username: "ada", id: "99" });
+    let reads = 0;
+    global.fetch = async () => {
+      reads += 1;
+      return new Response(JSON.stringify({ data: { id: "99", name: "Ada", username: "ada" } }), { status: 200 });
+    };
+    await expect(x.verify()).rejects.toThrow(/读额度已关闭/);
+    expect(reads).toBe(0);
 
     global.fetch = async (_url, init) => {
       const header = new Headers(init?.headers).get("authorization") ?? "";

@@ -3,8 +3,9 @@ import { ACCOUNT_USER_ID } from "@/lib/automation-account";
 import { getCredentialsRow } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { readCredentials } from "@/lib/service";
+import { evidenceFollowProfile } from "@/lib/evidence";
 import type { FollowHooks, FollowProfile } from "@/lib/follow-queue";
-import { xGet, xPost } from "@/lib/x-client";
+import { xPost } from "@/lib/x-client";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -71,35 +72,13 @@ export function liveFollowHooks(accountId: AccountId): FollowHooks | undefined {
   const sourceUserId = getCredentialsRow(accountId)?.user_id;
   if (sourceUserId !== ACCOUNT_USER_ID[accountId]) return undefined;
   return {
-    inspect: (targetUserId) => inspectFollowTarget(accountId, targetUserId),
+    inspect: async (targetUserId) => evidenceFollowProfile(accountId, targetUserId),
     follow: (targetUserId) => followTarget(accountId, sourceUserId, targetUserId),
   };
 }
 
-export async function inspectFollowTarget(accountId: AccountId, targetUserId: string): Promise<FollowProfile> {
-  if (apiMode() !== "live") return unknownProfile();
-  const credentials = readCredentials(accountId);
-  if (!credentials) return unknownProfile();
-  try {
-    const users = await xGet(credentials, "/2/users", {
-      ids: targetUserId,
-      "user.fields": "connection_status,verified,verified_type,public_metrics,description,name,username",
-    });
-    const list = Array.isArray(users.data) ? users.data : [];
-    const user = list.map(asRecord).find((item) => item?.id === targetUserId) ?? null;
-    let tweets: Record<string, unknown> | null = null;
-    try {
-      tweets = await xGet(credentials, `/2/users/${encodeURIComponent(targetUserId)}/tweets`, {
-        max_results: "5",
-        "tweet.fields": "created_at,lang,text",
-      });
-    } catch {
-      tweets = null;
-    }
-    return profileFromFollowLookup(user, tweets);
-  } catch {
-    return unknownProfile();
-  }
+export async function inspectFollowTarget(): Promise<FollowProfile> {
+  return unknownProfile();
 }
 
 export async function followTarget(accountId: AccountId, sourceUserId: string, targetUserId: string): Promise<void> {

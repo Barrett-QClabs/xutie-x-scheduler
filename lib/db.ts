@@ -239,6 +239,9 @@ function ensureAutomationTables(db: DatabaseSync): void {
       kind TEXT NOT NULL,
       status TEXT NOT NULL,
       checked_at TEXT NOT NULL,
+      followers_count INTEGER,
+      last_post_at TEXT,
+      prefer_flb INTEGER,
       result TEXT,
       reason TEXT,
       created_at TEXT NOT NULL,
@@ -255,6 +258,47 @@ function ensureAutomationTables(db: DatabaseSync): void {
       started_at TEXT NOT NULL,
       finished_at TEXT,
       PRIMARY KEY (account_id, slot)
+    );
+    CREATE TABLE IF NOT EXISTS evidence_subjects (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      source_user_id TEXT NOT NULL,
+      target_user_id TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      source_namespace TEXT NOT NULL,
+      source_tool TEXT NOT NULL,
+      pagination_complete INTEGER NOT NULL,
+      next_token TEXT,
+      activity_window_complete INTEGER NOT NULL,
+      errors_json TEXT NOT NULL,
+      verified INTEGER,
+      verified_type TEXT,
+      connection_status_json TEXT,
+      connection_explicit INTEGER NOT NULL,
+      followers_count INTEGER,
+      last_post_at TEXT,
+      tweet_lang TEXT,
+      name TEXT,
+      bio TEXT,
+      username TEXT,
+      tweet_text TEXT,
+      raw_json TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id, source_tool, observed_at)
+    );
+    CREATE TABLE IF NOT EXISTS evidence_pages (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      source_user_id TEXT NOT NULL,
+      source_namespace TEXT NOT NULL,
+      source_tool TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      pagination_complete INTEGER NOT NULL,
+      next_token TEXT,
+      activity_window_complete INTEGER NOT NULL,
+      subject_count INTEGER NOT NULL,
+      errors_json TEXT NOT NULL,
+      request_fields TEXT NOT NULL,
+      PRIMARY KEY (account_id, source_tool, observed_at)
     );
     CREATE TABLE IF NOT EXISTS follow_success (
       account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
@@ -693,6 +737,8 @@ export function resetAllData(): void {
     DELETE FROM follow_reserve;
     DELETE FROM follow_batches;
     DELETE FROM follow_success;
+    DELETE FROM evidence_subjects;
+    DELETE FROM evidence_pages;
   `);
   db.prepare(`UPDATE unfollow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
   db.prepare(`UPDATE follow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);

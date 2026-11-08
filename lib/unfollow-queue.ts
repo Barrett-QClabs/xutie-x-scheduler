@@ -3,7 +3,9 @@ import { ACCOUNT_USER_ID, unfollowEnabled, unfollowWhitelist } from "@/lib/autom
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
+import { evidenceUnfollowProfile } from "@/lib/evidence";
 import { londonUnfollowSlot } from "@/lib/london";
+import { unfollowTarget } from "@/lib/unfollow-live";
 import { INACTIVE_AFTER_MS, UNFOLLOW_BATCH_LIMIT } from "@/lib/unfollow-policy";
 
 export type UnfollowTier = "non_blue" | "no_followback_72h" | "inactive_48h";
@@ -324,8 +326,11 @@ export async function submitUnfollowBatch(input: {
     return emptyResult(accountId, slot, "identity_unconfirmed");
   }
   if (controlPaused(accountId)) return emptyResult(accountId, slot, "paused");
-  const hooks = input.hooks;
-  if (!hooks) return emptyResult(accountId, slot, "verifier_unavailable");
+  const sourceUserId = getCredentialsRow(accountId)?.user_id ?? "";
+  const hooks = input.hooks ?? {
+    inspect: async (targetUserId: string) => evidenceUnfollowProfile(accountId, targetUserId, now),
+    unfollow: (targetUserId: string) => unfollowTarget(accountId, sourceUserId, targetUserId),
+  };
 
   const db = getDb();
   const existing = one<{ status: string; submitted: number; unfollowed: number; results_json: string | null }>(

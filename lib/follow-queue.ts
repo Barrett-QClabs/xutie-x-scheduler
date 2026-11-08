@@ -1,11 +1,13 @@
 import type { AccountId } from "@/lib/account";
 import { audienceMatch, preferFlb, spamText } from "@/lib/audience";
+import { evidenceFollowProfile } from "@/lib/evidence";
+import { followTarget } from "@/lib/follow-live";
 import { ACCOUNT_USER_ID, audienceFor, followEnabled } from "@/lib/automation-account";
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
 import { londonClock, londonFollowSlot } from "@/lib/london";
-import { FOLLOW_BATCH_LIMIT, FOLLOW_DAILY_CAP, MAX_FOLLOWERS, RECENT_ACTIVITY_MS, RESERVE_FRESH_MS } from "@/lib/unfollow-policy";
+import { FOLLOW_BATCH_LIMIT, FOLLOW_DAILY_CAP, MAX_FOLLOWERS, RESERVE_FRESH_MS } from "@/lib/unfollow-policy";
 
 export type FollowKind = "followback" | "new";
 export type FollowOutcome = "success" | "failed" | "skipped" | "unknown";
@@ -183,7 +185,18 @@ export function setFollowPaused(accountId: AccountId, paused: boolean, reason: s
 
 export function stockFollowReserve(
   accountId: AccountId,
-  input: { checkedAt?: unknown; candidates: Array<{ targetUserId?: unknown; username?: unknown; kind?: unknown; checkedAt?: unknown }> },
+  input: {
+    checkedAt?: unknown;
+    candidates: Array<{
+      targetUserId?: unknown;
+      username?: unknown;
+      kind?: unknown;
+      checkedAt?: unknown;
+      followersCount?: unknown;
+      lastPostAt?: unknown;
+      flb?: unknown;
+    }>;
+  },
 ): { accepted: string[]; refreshed: string[]; existing: string[]; rejected: Array<{ targetUserId: string; reason: string }> } {
   const fallback = realTime(input.checkedAt);
   if (input.checkedAt !== undefined && !fallback) {
@@ -196,12 +209,13 @@ export function stockFollowReserve(
   const now = new Date().toISOString();
   const insert = getDb().prepare(
     `INSERT INTO follow_reserve
-      (account_id, target_user_id, username, kind, status, checked_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?)`,
+      (account_id, target_user_id, username, kind, status, checked_at, followers_count, last_post_at, prefer_flb, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?)`,
   );
   const refresh = getDb().prepare(
     `UPDATE follow_reserve
-     SET username = ?, kind = ?, status = 'reserved', checked_at = ?, result = NULL, reason = NULL, updated_at = ?
+     SET username = ?, kind = ?, status = 'reserved', checked_at = ?, followers_count = ?, last_post_at = ?, prefer_flb = ?,
+         result = NULL, reason = NULL, updated_at = ?
      WHERE account_id = ? AND target_user_id = ?`,
   );
   for (const raw of input.candidates) {
@@ -236,16 +250,19 @@ export function stockFollowReserve(
       id,
     );
     const username = typeof raw.username === "string" ? raw.username.slice(0, 64) : null;
+    const followers = typeof raw.followersCount === "number" && Number.isFinite(raw.followersCount) ? Math.trunc(raw.followersCount) : null;
+    const lastPostAt = realTime(raw.lastPostAt);
+    const flb = raw.flb === true ? 1 : 0;
     if (found && NO_RETRY.has(found.status)) {
       existing.push(id);
       continue;
     }
     if (found) {
-      refresh.run(username, kind, checked, now, accountId, id);
+      refresh.run(username, kind, checked, followers, lastPostAt, flb, now, accountId, id);
       refreshed.push(id);
       continue;
     }
-    insert.run(accountId, id, username, kind, checked, now, now);
+    insert.run(accountId, id, username, kind, checked, followers, lastPostAt, flb, now, now);
     accepted.push(id);
   }
   return { accepted, refreshed, existing, rejected };
@@ -296,13 +313,21 @@ export function listFollowReserve(accountId: AccountId, input?: { limit?: number
   };
 }
 
-type ReserveRow = { target_user_id: string; username: string | null; kind: string; checked_at: string };
+type ReserveRow = {
+  target_user_id: string;
+  username: string | null;
+  kind: string;
+  checked_at: string;
+  followers_count: number | null;
+  last_post_at: string | null;
+  prefer_flb: number | null;
+};
 
 function selectReserve(accountId: AccountId, now: Date, limit: number): ReserveRow[] {
   const freshAfter = new Date(now.getTime() - RESERVE_FRESH_MS).toISOString();
   const rows = getDb()
     .prepare(
-      `SELECT target_user_id, username, kind, checked_at
+      `SELECT target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb
        FROM follow_reserve
        WHERE account_id = ? AND status = 'reserved' AND checked_at >= ?
          AND NOT EXISTS (
@@ -312,11 +337,18 @@ function selectReserve(accountId: AccountId, now: Date, limit: number): ReserveR
     )
     .all(accountId, freshAfter) as ReserveRow[];
   return rows
-    .sort((left, right) => {
-      const rank = (left.kind === "followback" ? 0 : 1) - (right.kind === "followback" ? 0 : 1);
-      return rank || left.target_user_id.localeCompare(right.target_user_id);
-    })
+    .sort((left, right) => reserveRank(left) - reserveRank(right) || left.target_user_id.localeCompare(right.target_user_id))
     .slice(0, limit);
+}
+
+/** Lower sorts first. Follow-back stays ahead of new follows. Follower count, flb, and recency only order new follows. */
+function reserveRank(row: ReserveRow): number {
+  if (row.kind === "followback") return 0;
+  let rank = 300;
+  if (row.prefer_flb) rank -= 100;
+  if (typeof row.followers_count === "number" && row.followers_count <= MAX_FOLLOWERS) rank -= 50;
+  if (row.last_post_at && !Number.isNaN(Date.parse(row.last_post_at))) rank -= 10;
+  return rank;
 }
 
 export function classifyFollow(input: {
@@ -340,14 +372,6 @@ export function classifyFollow(input: {
   const audience = audienceMatch(audienceFor(input.accountId), input.profile);
   if (audience === "unknown") return { proceed: false, result: "unknown", reason: "audience_unconfirmed" };
   if (audience === "miss") return { proceed: false, result: "skipped", reason: input.accountId === 1 ? "not_chinese" : "not_english" };
-  if (input.profile.followers == null) return { proceed: false, result: "unknown", reason: "followers_unconfirmed" };
-  if (input.profile.followers > MAX_FOLLOWERS) return { proceed: false, result: "skipped", reason: "too_many_followers" };
-  if (!input.profile.lastPostKnown) return { proceed: false, result: "unknown", reason: "activity_unconfirmed" };
-  if (!input.profile.lastPostAt) return { proceed: false, result: "skipped", reason: "inactive" };
-  const posted = Date.parse(input.profile.lastPostAt);
-  if (Number.isNaN(posted) || input.now.getTime() - posted > RECENT_ACTIVITY_MS) {
-    return { proceed: false, result: "skipped", reason: "inactive" };
-  }
   const hint = preferFlb([input.profile.name, input.profile.bio, input.profile.tweetText]);
   return { proceed: true, result: "success", reason: hint ? "new_flb" : "new" };
 }
@@ -401,8 +425,11 @@ export async function submitFollowBatch(input: {
   if (paused?.paused !== 0) return emptyFollow(accountId, now, slot, "paused");
   const remaining = Math.max(0, FOLLOW_DAILY_CAP - followedToday(accountId, now));
   if (remaining <= 0) return emptyFollow(accountId, now, slot, "daily_cap");
-  const hooks = input.hooks;
-  if (!hooks) return emptyFollow(accountId, now, slot, "verifier_unavailable");
+  const sourceUserId = getCredentialsRow(accountId)?.user_id ?? "";
+  const hooks = input.hooks ?? {
+    inspect: async (targetUserId: string) => evidenceFollowProfile(accountId, targetUserId, now),
+    follow: (targetUserId: string) => followTarget(accountId, sourceUserId, targetUserId),
+  };
 
   const view = reserveView(accountId, now);
   if (view.available === 0) {

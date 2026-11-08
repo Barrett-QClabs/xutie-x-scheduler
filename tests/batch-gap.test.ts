@@ -378,10 +378,7 @@ describe("live timeline read", () => {
       );
     });
     vi.stubGlobal("fetch", fetchMock);
-    await expect(x.latestTweet!("42")).resolves.toEqual({
-      id: "newer",
-      createdAt: "2026-06-01T11:00:00.000Z",
-    });
-    expect(fetchMock).toHaveBeenCalledOnce();
+    await expect(x.latestTweet!("42")).rejects.toThrow(/读额度已关闭/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

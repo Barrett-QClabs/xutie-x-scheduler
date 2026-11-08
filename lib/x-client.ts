@@ -524,6 +524,9 @@ async function xRequest(
   body?: unknown,
   timeoutMs: number = X_REQUEST_TIMEOUT_MS,
 ): Promise<{ data?: unknown }> {
+  if (method === "GET") {
+    throw new XApiError("用户 X 的读额度已关闭。关注、取关和发帖只允许写入。", "rejected", 0);
+  }
   const url = `${API_BASE}${path}`;
   const { header } = buildAuthorizationHeader({
     method,

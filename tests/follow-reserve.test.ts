@@ -230,8 +230,8 @@ describe("account 2 follow reserve", () => {
       accountId: 2,
       kind: "new",
       now: WORK,
-      profile: blueEnglish({ followers: 20_001 }),
-    }).reason).toBe("too_many_followers");
+      profile: blueEnglish({ followers: 20_001, lastPostAt: new Date(WORK.getTime() - 30 * 60 * 60 * 1000).toISOString() }),
+    }).proceed).toBe(true);
     expect(classifyFollow({
       accountId: 2,
       kind: "new",
