@@ -1,9 +1,14 @@
-import { pauseFromBody } from "@/app/api/unfollow/route";
-import { handle } from "@/lib/http";
+import { accountIdFrom } from "@/lib/account";
+import { handle, readJson } from "@/lib/http";
+import { requireUnfollowAccount, setUnfollowPaused } from "@/lib/unfollow-queue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export function POST(request: Request) {
-  return handle(() => pauseFromBody(request, true));
+export async function POST(request: Request) {
+  return handle(async () => {
+    const body = await readJson(request);
+    requireUnfollowAccount(accountIdFrom(request, body));
+    return setUnfollowPaused(true, "manual");
+  });
 }

@@ -3,6 +3,9 @@ export const ACCOUNT1_UNFOLLOW_USER_ID = "1933586991612080128";
 
 export const UNFOLLOW_BATCH_LIMIT = 14;
 
+/** A candidate is inactive only when the newest public post is strictly older than this. */
+export const INACTIVE_AFTER_MS = 48 * 60 * 60 * 1000;
+
 export const UNFOLLOW_WHITELIST: ReadonlySet<string> = new Set([
   "25073877",
   "44196397",

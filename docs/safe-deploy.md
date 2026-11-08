@@ -70,7 +70,7 @@ curl -sS 'http://127.0.0.1:3847/api/state?accountId=2'
 
 ## 账号1自动取关
 
-默认关闭。`XUTIE_AUTOMATION_SUPERVISOR` 保持 `off`，否则会尝试启动回关和关键词关注。只在准备按授权跑账号1取关时把 `XUTIE_ACCOUNT1_UNFOLLOW=on`。父定时调用 `POST /api/unfollow/batches`，正文 `{"accountId":1}`。同一台北整点或半点重复调用不会再取关一次。返回里的 `submitted` 是本批纳入人数，`unfollowed` 才是实际取关成功人数。`executed: false` 表示这一次没有执行。账号2的请求会被拒绝。这个接口不改变发帖队列。取关控制默认暂停，需要另调 `POST /api/unfollow/resume`，正文同样是 `{"accountId":1}`，它不会恢复发帖。
+默认关闭。`XUTIE_AUTOMATION_SUPERVISOR` 保持 `off`，否则会尝试启动回关和关键词关注。只在准备按授权跑账号1取关时把 `XUTIE_ACCOUNT1_UNFOLLOW=on`。父定时调用 `POST /api/unfollow/batches`，正文 `{"accountId":1}`。未活跃层级 `inactive_48h` 只在最新公开帖严格早于 48 小时时才算符合；刚好 48 小时不取关。库里旧的 `inactive_36h` 也按这个 48 小时界限判断，不再沿用 36 小时。同一台北整点或半点重复调用不会再取关一次。返回里的 `submitted` 是本批纳入人数，`unfollowed` 才是实际取关成功人数。`executed: false` 表示这一次没有执行。账号2的请求会被拒绝。这个接口不改变发帖队列。取关控制默认暂停，需要另调 `POST /api/unfollow/resume`，正文同样是 `{"accountId":1}`，它不会恢复发帖。
 
 ## English
 

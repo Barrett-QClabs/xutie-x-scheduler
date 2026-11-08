@@ -1,9 +1,9 @@
-import { ACCOUNT1_UNFOLLOW_USER_ID, UNFOLLOW_BATCH_LIMIT, UNFOLLOW_WHITELIST } from "@/lib/unfollow-policy";
+import { ACCOUNT1_UNFOLLOW_USER_ID, INACTIVE_AFTER_MS, UNFOLLOW_BATCH_LIMIT, UNFOLLOW_WHITELIST } from "@/lib/unfollow-policy";
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import type { AccountId } from "@/lib/account";
 
-export type UnfollowTier = "non_blue" | "no_followback_72h" | "inactive_36h";
+export type UnfollowTier = "non_blue" | "no_followback_72h" | "inactive_48h";
 export type UnfollowOutcome = "success" | "failed" | "skipped" | "unknown";
 
 export type FreshProfile = {
@@ -23,7 +23,7 @@ const HOUR = 60 * 60 * 1000;
 const TIER_RANK: Record<UnfollowTier, number> = {
   non_blue: 1,
   no_followback_72h: 2,
-  inactive_36h: 3,
+  inactive_48h: 3,
 };
 
 export function account1UnfollowEnabled(): boolean {
@@ -74,12 +74,14 @@ export function classifyAction(input: {
     if (input.fresh.followsBack == null) return { proceed: false, result: "unknown", reason: "followback_unconfirmed" };
     if (input.fresh.followsBack) return { proceed: false, result: "skipped", reason: "follows_back" };
   }
-  if (input.tier === "inactive_36h") {
+  if (input.tier === "inactive_48h") {
     if (!input.fresh.lastPostKnown) return { proceed: false, result: "unknown", reason: "last_post_unconfirmed" };
     if (input.fresh.lastPostAt) {
       const posted = Date.parse(input.fresh.lastPostAt);
       if (Number.isNaN(posted)) return { proceed: false, result: "unknown", reason: "last_post_unconfirmed" };
-      if (input.now.getTime() - posted < 36 * HOUR) return { proceed: false, result: "skipped", reason: "posted_within_36h" };
+      if (input.now.getTime() - posted <= INACTIVE_AFTER_MS) {
+        return { proceed: false, result: "skipped", reason: "not_older_than_48h" };
+      }
     }
   }
   return { proceed: true, result: "success", reason: "confirmed" };
@@ -88,7 +90,7 @@ export function classifyAction(input: {
 type CandidateRow = {
   target_user_id: string;
   username: string | null;
-  tier: UnfollowTier;
+  tier: string;
   first_recorded_at: string | null;
   status: string;
 };
@@ -142,6 +144,7 @@ export function getUnfollowStatus() {
     paused: control?.paused !== 0,
     pauseReason: control?.pause_reason ?? null,
     batchSize: UNFOLLOW_BATCH_LIMIT,
+    inactiveAfterMs: INACTIVE_AFTER_MS,
     counts: Object.fromEntries(counts.map((row) => [row.status, row.n])),
     lastBatch: last,
     whitelistSize: UNFOLLOW_WHITELIST.size,
@@ -149,8 +152,14 @@ export function getUnfollowStatus() {
 }
 
 function parseTier(value: unknown): UnfollowTier {
-  if (value === "non_blue" || value === "no_followback_72h" || value === "inactive_36h") return value;
-  throw new AppError("invalid_tier", "取关层级必须是 non_blue、no_followback_72h 或 inactive_36h。");
+  if (value === "non_blue" || value === "no_followback_72h" || value === "inactive_48h") return value;
+  throw new AppError("invalid_tier", "取关层级必须是 non_blue、no_followback_72h 或 inactive_48h。");
+}
+
+function normalizeTier(value: string): UnfollowTier | null {
+  if (value === "inactive_36h" || value === "inactive_48h") return "inactive_48h";
+  if (value === "non_blue" || value === "no_followback_72h") return value;
+  return null;
 }
 
 export function importUnfollowCandidates(input: {
@@ -204,8 +213,9 @@ export function importUnfollowCandidates(input: {
 }
 
 function locallyReady(row: CandidateRow, now: Date): boolean {
-  if (UNFOLLOW_WHITELIST.has(row.target_user_id)) return false;
-  if (row.tier !== "no_followback_72h") return true;
+  const tier = normalizeTier(row.tier);
+  if (!tier || UNFOLLOW_WHITELIST.has(row.target_user_id)) return false;
+  if (tier !== "no_followback_72h") return true;
   const recorded = Date.parse(row.first_recorded_at ?? "");
   return !Number.isNaN(recorded) && now.getTime() - recorded >= 72 * HOUR;
 }
@@ -219,7 +229,11 @@ function selectBatch(now: Date): CandidateRow[] {
     .all() as CandidateRow[];
   return rows
     .filter((row) => locallyReady(row, now))
-    .sort((a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier] || a.target_user_id.localeCompare(b.target_user_id))
+    .sort((a, b) => {
+      const left = TIER_RANK[normalizeTier(a.tier) ?? "inactive_48h"];
+      const right = TIER_RANK[normalizeTier(b.tier) ?? "inactive_48h"];
+      return left - right || a.target_user_id.localeCompare(b.target_user_id);
+    })
     .slice(0, UNFOLLOW_BATCH_LIMIT);
 }
 
@@ -291,7 +305,7 @@ export async function submitUnfollowBatch(input?: { now?: Date; hooks?: Unfollow
       try {
         const fresh = await hooks.inspect(row.target_user_id);
         const decision = classifyAction({
-          tier: row.tier,
+          tier: normalizeTier(row.tier) ?? "inactive_48h",
           firstRecordedAt: row.first_recorded_at,
           fresh,
           now,
@@ -308,7 +322,7 @@ export async function submitUnfollowBatch(input?: { now?: Date; hooks?: Unfollow
       db.prepare(
         `UPDATE unfollow_candidates SET status = ?, result = ?, reason = ?, updated_at = ? WHERE account_id = 1 AND target_user_id = ?`,
       ).run(outcome.result, outcome.result, outcome.reason, new Date().toISOString(), row.target_user_id);
-      results.push({ targetUserId: row.target_user_id, tier: row.tier, result: outcome.result, reason: outcome.reason });
+      results.push({ targetUserId: row.target_user_id, tier: normalizeTier(row.tier) ?? "inactive_48h", result: outcome.result, reason: outcome.reason });
     }
   } finally {
     const unfollowed = results.filter((item) => item.result === "success").length;

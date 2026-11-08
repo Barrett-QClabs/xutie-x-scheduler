@@ -5,7 +5,6 @@ import {
   getUnfollowStatus,
   importUnfollowCandidates,
   requireUnfollowAccount,
-  setUnfollowPaused,
   submitUnfollowBatch,
   type UnfollowHooks,
 } from "@/lib/unfollow-queue";
@@ -51,10 +50,4 @@ export async function POST(request: Request) {
     const hooks = testHooks() ?? (process.env.VITEST ? null : liveHooks());
     return submitUnfollowBatch({ hooks: hooks ?? undefined });
   });
-}
-
-export async function pauseFromBody(request: Request, paused: boolean) {
-  const body = await readJson(request);
-  requireUnfollowAccount(accountIdFrom(request, body));
-  return setUnfollowPaused(paused, paused ? "manual" : "manual_resume");
 }

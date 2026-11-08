@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { POST as submitBatch } from "@/app/api/unfollow/batches/route";
 import { POST as pauseUnfollow } from "@/app/api/unfollow/pause/route";
-import { getQueueSettings, updateAccount } from "@/lib/db";
+import { getDb, getQueueSettings, updateAccount } from "@/lib/db";
 import { profileFromLookup } from "@/lib/unfollow-live";
 import { UNFOLLOW_WHITELIST } from "@/lib/unfollow-policy";
 import {
@@ -84,7 +84,7 @@ describe("account 1 unfollow batch", () => {
       candidates: [
         { targetUserId: "25073877", tier: "non_blue" },
         { targetUserId: "555", tier: "non_blue" },
-        { targetUserId: "555", tier: "inactive_36h" },
+        { targetUserId: "555", tier: "inactive_48h" },
       ],
     });
     expect(imported.rejected.map((item) => item.reason)).toContain("whitelist");
@@ -102,7 +102,7 @@ describe("account 1 unfollow batch", () => {
     importUnfollowCandidates({
       candidates: [
         ...ids.map((id) => ({ targetUserId: id, tier: "non_blue" as const })),
-        { targetUserId: "2000", tier: "inactive_36h" as const },
+        { targetUserId: "2000", tier: "inactive_48h" as const },
         {
           targetUserId: "3000",
           tier: "no_followback_72h" as const,
@@ -137,13 +137,56 @@ describe("account 1 unfollow batch", () => {
     expect(JSON.stringify(later)).not.toContain(SECRET);
   });
 
+  it("keeps a post at exactly 48 hours and still unfollows an older one", async () => {
+    enable();
+    const now = new Date("2026-11-08T08:00:00.000Z");
+    const hour = 60 * 60 * 1000;
+    importUnfollowCandidates({
+      candidates: [
+        { targetUserId: "41", tier: "inactive_48h" },
+        { targetUserId: "42", tier: "inactive_48h" },
+        { targetUserId: "43", tier: "non_blue" },
+      ],
+    });
+    expect(importUnfollowCandidates({ candidates: [{ targetUserId: "99", tier: "inactive_36h" }] }).rejected[0].reason).toBe(
+      "invalid_tier",
+    );
+    const stamp = now.toISOString();
+    getDb()
+      .prepare(
+        `INSERT INTO unfollow_candidates
+          (account_id, target_user_id, username, tier, first_recorded_at, status, created_at, updated_at)
+         VALUES (1, '44', NULL, 'inactive_36h', NULL, 'candidate', ?, ?)`,
+      )
+      .run(stamp, stamp);
+    const calls: string[] = [];
+    const at = (ms: number) => new Date(now.getTime() - ms).toISOString();
+    const result = await submitUnfollowBatch({
+      now,
+      hooks: hooks(
+        {
+          "41": { ...confirmed, lastPostAt: at(48 * hour) },
+          "42": { ...confirmed, lastPostAt: at(48 * hour + 1) },
+          "43": { ...confirmed, lastPostAt: at(hour) },
+          "44": { ...confirmed, lastPostAt: at(40 * hour) },
+        },
+        calls,
+      ),
+    });
+    expect(result.results.find((item) => item.targetUserId === "41")?.reason).toBe("not_older_than_48h");
+    expect(result.results.find((item) => item.targetUserId === "44")?.reason).toBe("not_older_than_48h");
+    expect(result.results.find((item) => item.targetUserId === "42")?.result).toBe("success");
+    expect(result.results.find((item) => item.targetUserId === "43")?.result).toBe("success");
+    expect(calls.sort()).toEqual(["42", "43"]);
+  });
+
   it("does not act when following, blue, or the last post is unknown", async () => {
     enable();
     importUnfollowCandidates({
       candidates: [
         { targetUserId: "11", tier: "non_blue" },
         { targetUserId: "12", tier: "non_blue" },
-        { targetUserId: "13", tier: "inactive_36h" },
+        { targetUserId: "13", tier: "inactive_48h" },
       ],
     });
     const calls: string[] = [];
