@@ -101,7 +101,43 @@ function migrate(db: DatabaseSync): void {
   widenAccountTables(db);
   ensureColumn(db, "tweets", "account_id", "ALTER TABLE tweets ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1");
   db.exec("CREATE INDEX IF NOT EXISTS idx_tweets_account_sched ON tweets(account_id, status, scheduled_at)");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS unfollow_control (
+      account_id INTEGER PRIMARY KEY CHECK (account_id = 1),
+      paused INTEGER NOT NULL DEFAULT 1,
+      pause_reason TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS unfollow_candidates (
+      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      target_user_id TEXT NOT NULL,
+      username TEXT,
+      tier TEXT NOT NULL,
+      first_recorded_at TEXT,
+      status TEXT NOT NULL,
+      batch_slot TEXT,
+      result TEXT,
+      reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+    CREATE TABLE IF NOT EXISTS unfollow_batches (
+      slot TEXT PRIMARY KEY,
+      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      status TEXT NOT NULL,
+      submitted INTEGER NOT NULL DEFAULT 0,
+      unfollowed INTEGER NOT NULL DEFAULT 0,
+      results_json TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+  `);
   const now = new Date().toISOString();
+  db.prepare(
+    `INSERT OR IGNORE INTO unfollow_control (account_id, paused, pause_reason, updated_at)
+     VALUES (1, 1, 'safe_start', ?)`,
+  ).run(now);
   for (const id of ACCOUNT_IDS) {
     db.prepare(
       `INSERT OR IGNORE INTO queue_settings
@@ -544,7 +580,10 @@ export function deleteTweet(id: string, accountId: AccountId): boolean {
 export function resetAllData(): void {
   const db = getDb();
   const now = new Date().toISOString();
-  db.exec("DELETE FROM tweets; DELETE FROM credentials;");
+  db.exec("DELETE FROM tweets; DELETE FROM credentials; DELETE FROM unfollow_candidates; DELETE FROM unfollow_batches;");
+  db.prepare(
+    `UPDATE unfollow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ? WHERE account_id = 1`,
+  ).run(now);
   const reset = (accountId: AccountId, paused: number, reason: string | null) => {
     db.prepare(
       `UPDATE queue_settings SET

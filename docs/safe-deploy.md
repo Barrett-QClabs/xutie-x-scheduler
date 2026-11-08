@@ -68,6 +68,10 @@ curl -sS 'http://127.0.0.1:3847/api/state?accountId=2'
 
 关注自动化页在 supervisor 关闭时不提供启动按钮。`POST /api/automation/start` 返回 403，代码 `automation_disabled`。
 
+## 账号1自动取关
+
+默认关闭。`XUTIE_AUTOMATION_SUPERVISOR` 保持 `off`，否则会尝试启动回关和关键词关注。只在准备按授权跑账号1取关时把 `XUTIE_ACCOUNT1_UNFOLLOW=on`。父定时调用 `POST /api/unfollow/batches`，正文 `{"accountId":1}`。同一台北整点或半点重复调用不会再取关一次。返回里的 `submitted` 是本批纳入人数，`unfollowed` 才是实际取关成功人数。`executed: false` 表示这一次没有执行。账号2的请求会被拒绝。这个接口不改变发帖队列。取关控制默认暂停，需要另调 `POST /api/unfollow/resume`，正文同样是 `{"accountId":1}`，它不会恢复发帖。
+
 ## English
 
 There is no supported Grok Bot browser preview of a service on `127.0.0.1`. Cursor staff confirmed the loopback block on 2026-11-07. The [private-network docs](https://cursor.com/docs/grok-bot/private-networks) require an Enterprise networking setup or a desktop route that still blocks private addresses; this repo does not turn those on. Operators open the UI themselves. A bot may use the shell against loopback. Do not tunnel the port or publish it.
