@@ -49,12 +49,12 @@ export function londonUnfollowSlot(now: Date): string | null {
 }
 
 /**
- * Follow cycle is 45 minutes from 00:00: 15 minutes of work, then 30 minutes of rest.
- * Returns the work-window start, or null during rest.
+ * Follow cycle is 30 minutes from 00:00: 15 minutes of work, then 15 minutes of rest.
+ * Both accounts use this same clock. Returns the work-window start, or null during rest.
  */
 export function londonFollowSlot(now: Date): string | null {
   const clockNow = londonClock(now);
-  const offset = clockNow.minutes % 45;
+  const offset = clockNow.minutes % 30;
   if (offset >= 15) return null;
   return `${clockNow.day}T${clock(clockNow.minutes - offset)}`;
 }

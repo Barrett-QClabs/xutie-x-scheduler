@@ -8,6 +8,8 @@ import { ACCOUNT1_KEYWORDS, ACCOUNT2_KEYWORDS } from "@/lib/follow-config";
 import { classifyAction } from "@/lib/unfollow-queue";
 import { xGet } from "@/lib/x-client";
 import { runDueAutomation } from "@/lib/automation-run";
+import { submitFollowBatch } from "@/lib/follow-queue";
+import { londonFollowSlot, londonUnfollowSlot } from "@/lib/london";
 
 const OBSERVED = "2026-11-08T07:50:00.000Z";
 const EXPIRES = "2026-11-08T08:30:00.000Z";
@@ -131,10 +133,24 @@ describe("account keyword config", () => {
     };
     try {
       process.env.XUTIE_ACCOUNT1_FOLLOW = "on";
-      const first = await runDueAutomation(new Date("2026-11-08T00:45:00.000Z"));
+      const first = await runDueAutomation(new Date("2026-11-08T00:30:00.000Z"));
       expect(first.map((item) => item.accountId)).toEqual([1]);
       expect(first[0].kind).toBe("follow");
-      expect(first[0].slot).toBe("2026-11-08T00:45");
+      expect(first[0].slot).toBe("2026-11-08T00:30");
+      const rest = await submitFollowBatch({
+        accountId: 1,
+        now: new Date("2026-11-08T00:45:00.000Z"),
+        hooks: { inspect: async () => { throw new Error("no read"); }, follow: async () => { throw new Error("no write"); } },
+      });
+      expect(rest.reason).toBe("rest");
+      expect(rest.slot).toBeNull();
+      expect(rest.followed).toBe(0);
+      expect(londonFollowSlot(new Date("2026-11-08T00:00:00.000Z"))).toBe("2026-11-08T00:00");
+      expect(londonFollowSlot(new Date("2026-11-08T00:14:00.000Z"))).toBe("2026-11-08T00:00");
+      expect(londonFollowSlot(new Date("2026-11-08T00:15:00.000Z"))).toBeNull();
+      expect(londonFollowSlot(new Date("2026-07-15T23:00:00.000Z"))).toBe("2026-07-16T00:00");
+      expect(londonUnfollowSlot(new Date("2026-11-08T00:15:00.000Z"))).toBe("2026-11-08T00:15");
+      expect(londonUnfollowSlot(new Date("2026-11-08T00:45:00.000Z"))).toBe("2026-11-08T00:45");
       expect(calls).toEqual([]);
     } finally {
       delete process.env.XUTIE_ACCOUNT1_FOLLOW;

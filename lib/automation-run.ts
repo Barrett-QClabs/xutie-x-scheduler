@@ -21,7 +21,7 @@ export async function runDueAutomation(now = new Date()) {
   return results;
 }
 
-/** The process itself checks every 20 seconds. A half-hour cron misses follow windows that open at :15 and :45 offsets. */
+/** The process itself checks every 20 seconds, so each 15-minute London work window is seen while it is open. */
 export function startAutomationRunner(): void {
   if (process.env.VITEST || process.env.NODE_ENV === "test") return;
   if (globalState.__xutiAutomationRunner) return;
