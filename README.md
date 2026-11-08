@@ -50,7 +50,7 @@ npm run build
 npm start
 ```
 
-The server listens on port `3847`. The database is created at `./data/xqueue.sqlite` on first start.
+The server listens on `127.0.0.1` and port `3847` unless `HOST` or `PORT` is set. A new database starts paused. The database is created at `./data/xqueue.sqlite` on first start.
 
 ### Mock mode
 
@@ -60,7 +60,7 @@ To try the queue without calling X, set this in `.env.local`:
 X_API_MODE=mock
 ```
 
-Connection tests and posts stay local. Tweet text containing `[[duplicate]]`, `[[rate-limit]]`, `[[credits]]`, `[[auth]]`, `[[forbidden]]`, or `[[fail]]` makes the mock client return a duplicate, a 429, a 402, a 401, a 403 permission error, or a transient error. In mock mode those markers work even when no credentials are saved, and nothing is sent to X. Switch back to `X_API_MODE=live` before posting for real.
+Connection tests and posts stay local unless `X_API_MODE` is exactly `live`. Any other value, including an unset variable, stays in mock mode. Tweet text containing `[[duplicate]]`, `[[rate-limit]]`, `[[credits]]`, `[[auth]]`, `[[forbidden]]`, or `[[fail]]` makes the mock client return a duplicate, a 429, a 402, a 401, a 403 permission error, or a transient error. In mock mode those markers work even when no credentials are saved, and nothing is sent to X. Set `X_API_MODE=live` only when this process should call X, and keep the queue paused until you mean to post. See [docs/safe-deploy.md](docs/safe-deploy.md).
 
 `GET /api/diagnostics` reads the local queue only. It reports the service phase (empty queue, nothing waiting, paused, credits wait, rate-limit wait, auth pause, waiting for the due time, or due). `?scenario=credits` (or `rate_limit`, `auth`, `forbidden`, `duplicate`, `rejected`, `transient`) describes that built-in case and does not apply it to the queue. The response does not include saved credentials. A queue with nothing pending, including one that already has many successful posts, is reported as idle. A missing scheduler heartbeat is reported as unknown, which means this process has not recorded a check yet.
 
@@ -126,7 +126,8 @@ There is no login. Do not expose the port on the public internet. Keep it on you
 
 ```bash
 cp .env.example .env
-# Edit .env: set CREDENTIALS_ENCRYPTION_KEY and keep X_API_MODE=live
+# Set CREDENTIALS_ENCRYPTION_KEY. The image defaults to X_API_MODE=mock.
+# Set X_API_MODE=live only for a process that should call X.
 docker compose up -d --build
 ```
 
@@ -139,7 +140,9 @@ docker build -t xuti .
 docker run -d --name xuti \
   -p 3847:3847 \
   -e CREDENTIALS_ENCRYPTION_KEY='a-long-random-string' \
-  -e X_API_MODE=live \
+  -e X_API_MODE=mock \
+  -e XUTIE_AUTOMATION_SUPERVISOR=off \
+  -e HOST=0.0.0.0 \
   -e DATABASE_PATH=/data/xqueue.sqlite \
   -v xuti-data:/data \
   xuti

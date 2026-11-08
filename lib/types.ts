@@ -110,8 +110,20 @@ export type QueueSettings = {
   lastTickAction: string | null;
 };
 
+export type DeploymentPosture = {
+  apiMode: "mock" | "live";
+  queuePaused: boolean;
+  pauseReason: string | null;
+  credentialsConfigured: boolean;
+  encryptionKeyConfigured: boolean;
+  automationSupervisor: "on" | "off";
+  /** True only when a due post would call X. Mock mode never sets this. */
+  sendsWhenDue: boolean;
+};
+
 export type PublicState = {
   mockMode: boolean;
+  deployment: DeploymentPosture;
   credentialsConfigured: boolean;
   account: { username: string; displayName: string; userId: string } | null;
   queue: QueueSettings;

@@ -6,7 +6,7 @@ import { FileUp, ListOrdered, Settings, UserPlus } from "lucide-react";
 import { useAppState } from "@/components/app-state";
 import { useI18n } from "@/components/i18n-provider";
 import type { MessageKey } from "@/lib/messages";
-import type { ServicePhase } from "@/lib/types";
+import type { PublicState, ServicePhase } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const links = [
@@ -25,6 +25,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
     ? t("connectedAs", { handle: state.account.username })
     : t("notConnected");
   const service = state?.activity ? t("serviceLabel", { phase: t(servicePhaseKey(state.activity.phase)) }) : null;
+  const posture = state ? t(postureKey(state)) : null;
+  const automation = state
+    ? t(state.deployment.automationSupervisor === "on" ? "postureAutomationOn" : "postureAutomationOff")
+    : null;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -61,6 +65,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </nav>
           <div className="mt-auto space-y-3">
             {service ? <p className="text-xs leading-5 text-muted-foreground">{service}</p> : null}
+            {posture ? <p className="text-xs leading-5 text-muted-foreground">{posture}</p> : null}
+            {automation ? <p className="text-xs leading-5 text-muted-foreground">{automation}</p> : null}
             <p className="text-xs leading-5 text-muted-foreground">{connection}</p>
             <p className="text-xs leading-5 text-muted-foreground">{t("footerNote")}</p>
             <LocaleSwitch locale={locale} setLocale={setLocale} />
@@ -77,7 +83,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <LocaleSwitch locale={locale} setLocale={setLocale} />
             </div>
           </header>
-          <main className="px-4 py-6 pb-24 md:px-8 md:py-8 md:pb-10">{children}</main>
+          <main className="px-4 py-6 pb-24 md:px-8 md:py-8 md:pb-10">
+            {posture ? (
+              <p className="mb-4 rounded-lg bg-secondary px-3 py-2 text-sm leading-6 md:hidden">{posture}</p>
+            ) : null}
+            {children}
+          </main>
         </div>
       </div>
       <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-4 border-t border-border bg-card md:hidden">
@@ -101,6 +112,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
       </nav>
     </div>
   );
+}
+
+function postureKey(state: PublicState): MessageKey {
+  if (state.deployment.apiMode === "mock") return "postureMock";
+  if (state.deployment.queuePaused) return "postureLivePaused";
+  return "postureLiveArmed";
 }
 
 function servicePhaseKey(phase: ServicePhase): MessageKey {

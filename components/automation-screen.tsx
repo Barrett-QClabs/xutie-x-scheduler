@@ -12,6 +12,7 @@ import { StatsPanel } from "@/components/stats-panel";
 type Entry = { time?: string; username?: string; result?: string; pending?: boolean; detail?: string | null; keyword?: string | null; followers?: number | null };
 type DaemonStatus = { state?: string; resumeAt?: string; why?: string; reason?: string; targetsRemaining?: number; updated?: string; error?: string };
 type Status = {
+  supervisor?: "on" | "off";
   day: string;
   config: { unfollow: { enabled: boolean }; followback: { enabled: boolean }; keywordfollow: { enabled: boolean; keywords: string[]; poolSize: number; maxFollowers: number }; combinedFollowDailyCap: number };
   caps: { combinedFollows: number; unfollows: number; unfollowPerRun: number; followWindow15m: number };
@@ -37,6 +38,7 @@ const L = {
     turnOn: "开启", turnOff: "关闭", keywords: "关键词（逗号分隔）", save: "保存关键词", pool: "今日候选池",
     remaining: "剩余", recent: "最近记录", rules: "规则", stopDay: "今日已停止关注", resume: "恢复于", refresh: "刷新",
     hourly: "每小时运行一次", pid: "进程",
+    supervisorOff: "关注自动化默认关闭。启动按钮不可用。只有在进程环境里把 XUTIE_AUTOMATION_SUPERVISOR 设为 on 并重启后，才会启动关注或取关进程。",
   },
   en: {
     title: "Auto follow / unfollow", sub: "Today's status of unfollow, follow-back and keyword follow (Asia/Shanghai day).",
@@ -45,6 +47,7 @@ const L = {
     turnOn: "Turn on", turnOff: "Turn off", keywords: "Keywords (comma separated)", save: "Save keywords", pool: "Today's candidate pool",
     remaining: "remaining", recent: "Recent", rules: "Rules", stopDay: "Follows stopped for today", resume: "resumes", refresh: "Refresh",
     hourly: "runs hourly", pid: "pid",
+    supervisorOff: "Follow automation is off by default, so Start is unavailable. Set XUTIE_AUTOMATION_SUPERVISOR=on and restart before any follow or unfollow process can start.",
   },
 };
 
@@ -79,6 +82,7 @@ export function AutomationScreen() {
   }
 
   if (!s) return <p className="text-sm text-muted-foreground">{err ?? "…"}</p>;
+  const supervisorOn = s.supervisor === "on";
   const tiles = [
     { label: t.unfollowed, value: `${s.counts.unfollowed} / ${s.caps.unfollows}` },
     { label: t.followedBack, value: String(s.counts.followedBack) },
@@ -113,7 +117,7 @@ export function AutomationScreen() {
           {"lastLines" in d && d.lastLines.length > 0 && <p className="truncate text-xs text-muted-foreground">{d.lastLines[d.lastLines.length - 1]}</p>}
           <div className="flex gap-2 pt-1">
             <Button size="sm" variant="outline" disabled={busy} onClick={() => patch({ [key]: { enabled: !enabled } })}>{enabled ? t.turnOff : t.turnOn}</Button>
-            {key !== "unfollow" && enabled && !d.running && <Button size="sm" disabled={busy} onClick={() => start(key)}>{t.start}</Button>}
+            {supervisorOn && key !== "unfollow" && enabled && !d.running && <Button size="sm" disabled={busy} onClick={() => start(key)}>{t.start}</Button>}
           </div>
         </CardContent>
       </Card>
@@ -147,6 +151,7 @@ export function AutomationScreen() {
         <Button size="sm" variant="outline" onClick={load}>{t.refresh}</Button>
       </div>
       {err && <p className="text-sm text-destructive">{err}</p>}
+      {!supervisorOn && <p className="rounded-lg bg-secondary px-3 py-2 text-sm leading-6">{t.supervisorOff}</p>}
       {s.stopForToday && <p className="rounded-lg border border-destructive p-3 text-sm text-destructive">{t.stopDay}: {s.stopForToday.reason} ({s.stopForToday.by})</p>}
       <StatsPanel zh={locale === "zh"} />
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">

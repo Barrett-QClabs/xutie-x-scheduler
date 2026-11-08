@@ -13,11 +13,13 @@ export const dynamic = "force-dynamic";
 export function GET(request: Request) {
   return handle(() => {
     const scenarioId = new URL(request.url).searchParams.get("scenario");
+    const state = getPublicState();
     const payload: Record<string, unknown> = {
       ok: true,
       offline: true,
       callsX: false,
-      activity: getPublicState().activity,
+      activity: state.activity,
+      deployment: state.deployment,
       mockScenarios: listMockScenarios(),
     };
     if (scenarioId) {

@@ -8,6 +8,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { automationSupervisorEnabled } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
 
 export const AUTOMATION_DIR = process.env.X_AUTOMATION_DIR || "/workspace/x-unfollow";
@@ -112,6 +113,7 @@ export function getAutomationStatus() {
   const windowUsed = [...fbLog, ...kwLog].filter((e) => e.time && e.result !== "skipped" && Date.parse(e.time) > sinceWindow).length;
   return {
     ok: true,
+    supervisor: automationSupervisorEnabled() ? "on" : "off",
     day: today(), timezone: TZ, dir: AUTOMATION_DIR,
     config: cfg,
     caps: { combinedFollows: cfg.combinedFollowDailyCap, unfollows: cfg.unfollow.dailyCap, unfollowPerRun: cfg.unfollow.perRun, followWindow15m: 45 },
@@ -136,6 +138,13 @@ const START_SCRIPTS: Record<string, string> = { followback: "start-followback.sh
 
 /** Idempotent start (the scripts exit if the daemon already runs). */
 export function startDaemon(name: string): Promise<string> {
+  if (!automationSupervisorEnabled()) {
+    throw new AppError(
+      "automation_disabled",
+      "关注自动化默认关闭。只有进程环境 XUTIE_AUTOMATION_SUPERVISOR=on 时才会启动。",
+      403,
+    );
+  }
   const script = START_SCRIPTS[name];
   if (!script) throw new AppError("unknown_daemon", "未知的任务。");
   return new Promise((resolve, reject) => {
@@ -152,7 +161,7 @@ export function startDaemon(name: string): Promise<string> {
 /** Called from instrumentation: keep enabled daemons alive (every 5 min). */
 let supervisor: NodeJS.Timeout | null = null;
 export function startAutomationSupervisor() {
-  if (supervisor || !fs.existsSync(AUTOMATION_DIR) || process.env.XUTIE_AUTOMATION_SUPERVISOR === "off") return;
+  if (supervisor || !automationSupervisorEnabled() || !fs.existsSync(AUTOMATION_DIR)) return;
   const tick = async () => {
     try {
       const cfg = getConfig();

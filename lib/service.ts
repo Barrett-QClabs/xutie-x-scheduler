@@ -30,6 +30,7 @@ import {
 } from "@/lib/schedule";
 import type { Credentials, ImportMode, InvalidTweet, PublicState, PublicTweet, Tweet } from "@/lib/types";
 import { inspectTweet, MAX_LONG_POST_LENGTH, MAX_WEIGHTED_LENGTH } from "@/lib/weighted-length";
+import { deploymentPosture } from "@/lib/deployment";
 import { createXClient, isMockMode, XApiError } from "@/lib/x-client";
 
 export function readCredentials(): Credentials | null {
@@ -140,6 +141,11 @@ export function getPublicState(now = new Date()): PublicState {
   const activity = buildActivity({ now, queue, tweets });
   return {
     mockMode: isMockMode(),
+    deployment: deploymentPosture({
+      paused: queue.paused,
+      pauseReason: queue.pauseReason,
+      credentialsConfigured: Boolean(row),
+    }),
     credentialsConfigured: Boolean(row),
     account:
       row?.username && row.user_id

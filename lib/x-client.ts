@@ -1,3 +1,4 @@
+import { apiMode } from "@/lib/deployment";
 import { buildAuthorizationHeader, percentEncode } from "@/lib/oauth";
 import type { Credentials, XUser } from "@/lib/types";
 
@@ -32,7 +33,7 @@ export interface XClient {
 const API_BASE = "https://api.x.com";
 
 export function isMockMode(): boolean {
-  return process.env.X_API_MODE === "mock";
+  return apiMode() === "mock";
 }
 
 /**

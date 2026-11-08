@@ -44,7 +44,7 @@ function migrate(db: DatabaseSync): void {
       id INTEGER PRIMARY KEY CHECK (id = 1),
       interval_minutes INTEGER NOT NULL DEFAULT 15,
       jitter_minutes INTEGER NOT NULL DEFAULT 0,
-      paused INTEGER NOT NULL DEFAULT 0,
+      paused INTEGER NOT NULL DEFAULT 1,
       pause_reason TEXT,
       rate_limit_until TEXT,
       last_error TEXT,
@@ -99,8 +99,8 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, "queue_settings", "last_tick_action", "ALTER TABLE queue_settings ADD COLUMN last_tick_action TEXT");
   db.prepare(
     `INSERT OR IGNORE INTO queue_settings
-      (id, interval_minutes, jitter_minutes, paused, updated_at)
-     VALUES (1, 15, 0, 0, ?)`,
+      (id, interval_minutes, jitter_minutes, paused, pause_reason, updated_at)
+     VALUES (1, 15, 0, 1, 'safe_start', ?)`,
   ).run(new Date().toISOString());
 }
 
@@ -457,6 +457,7 @@ export function deleteTweet(id: string): boolean {
   return result.changes > 0;
 }
 
+/** Test helper. Production first boot stays paused; this puts the fixture queue back into the unpaused path. */
 export function resetAllData(): void {
   const db = getDb();
   const now = new Date().toISOString();

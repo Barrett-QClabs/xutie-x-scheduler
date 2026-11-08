@@ -7,6 +7,7 @@ services:
       - .env
     environment:
       DATABASE_PATH: /data/xqueue.sqlite
+      HOST: 0.0.0.0
       PORT: "3847"
     volumes:
       - xuti-data:/data

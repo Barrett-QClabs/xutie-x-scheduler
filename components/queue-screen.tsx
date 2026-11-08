@@ -401,11 +401,12 @@ export function QueueScreen() {
 
 function pauseCopy(
   reason: string | null,
-  t: (key: "pauseManual" | "pauseMissing" | "pauseDecrypt" | "pauseKey") => string,
+  t: (key: "pauseManual" | "pauseSafeStart" | "pauseMissing" | "pauseDecrypt" | "pauseKey") => string,
 ) {
   if (reason === "missing_credentials") return t("pauseMissing");
   if (reason === "decrypt_failed") return t("pauseDecrypt");
   if (reason === "encryption_key_missing") return t("pauseKey");
+  if (reason === "safe_start") return t("pauseSafeStart");
   if (!reason || reason === "manual") return t("pauseManual");
   return reason;
 }
