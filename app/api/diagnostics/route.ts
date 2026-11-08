@@ -1,3 +1,4 @@
+import { accountIdFrom } from "@/lib/account";
 import { describeMockScenario, listMockScenarios } from "@/lib/diagnostics";
 import { AppError } from "@/lib/errors";
 import { handle } from "@/lib/http";
@@ -13,13 +14,16 @@ export const dynamic = "force-dynamic";
 export function GET(request: Request) {
   return handle(() => {
     const scenarioId = new URL(request.url).searchParams.get("scenario");
-    const state = getPublicState();
+    const state = getPublicState(new Date(), accountIdFrom(request));
     const payload: Record<string, unknown> = {
       ok: true,
       offline: true,
       callsX: false,
       activity: state.activity,
       deployment: state.deployment,
+      accountId: state.accountId,
+      accountLabel: state.accountLabel,
+      slots: state.slots,
       mockScenarios: listMockScenarios(),
     };
     if (scenarioId) {

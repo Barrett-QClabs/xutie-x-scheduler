@@ -14,6 +14,7 @@ describe("duplicate slot fill does not revive other statuses", () => {
   it("moves the next pending tweet onto the failed slot and leaves a cancelled row alone", async () => {
     const now = new Date();
     importTweets({
+      accountId: 1,
       source: "重复这条\n补位这条",
       format: "text",
       startAt: new Date(now.getTime() - 60_000).toISOString(),

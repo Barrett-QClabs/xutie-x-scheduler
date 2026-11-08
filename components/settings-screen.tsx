@@ -22,7 +22,7 @@ const empty = { apiKey: "", apiSecret: "", accessToken: "", accessTokenSecret: "
 
 export function SettingsScreen() {
   const { t, locale } = useI18n();
-  const { state, refresh } = useAppState();
+  const { state, refresh, accountId } = useAppState();
   const [form, setForm] = useState(empty);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -37,10 +37,10 @@ export function SettingsScreen() {
     setBusy(true);
     setMessage(null);
     try {
-      await api("/api/credentials", { method: "PUT", body: JSON.stringify(form) });
+      await api("/api/credentials", { method: "PUT", body: JSON.stringify({ ...form, accountId }) });
       const result = await api<{ username: string }>("/api/credentials/test", {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ accountId }),
       });
       setOk(true);
       setMessage(t("testOk", { handle: result.username }));
@@ -61,7 +61,7 @@ export function SettingsScreen() {
     try {
       const result = await api<{ username: string }>("/api/credentials/test", {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ accountId }),
       });
       setOk(true);
       setMessage(t("testOk", { handle: result.username }));
@@ -78,7 +78,7 @@ export function SettingsScreen() {
     setBusy(true);
     setMessage(null);
     try {
-      await api("/api/credentials", { method: "DELETE" });
+      await api(`/api/credentials?accountId=${accountId}`, { method: "DELETE" });
       setConfirmClear(false);
       setOk(true);
       setMessage(t("notConfigured"));
@@ -97,6 +97,7 @@ export function SettingsScreen() {
     <div className="mx-auto max-w-2xl space-y-6">
       <header>
         <h1 className="font-heading text-3xl tracking-wide">{t("settingsTitle")}</h1>
+        <p className="mt-1 text-sm text-muted-foreground">{state?.accountLabel ?? (accountId === 1 ? "账号1" : "账号2")}</p>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">{t("settingsIntro")}</p>
       </header>
 

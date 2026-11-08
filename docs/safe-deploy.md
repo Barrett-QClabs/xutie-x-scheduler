@@ -36,9 +36,12 @@ Grok Bot 的浏览器不能打开这台机器上的 `127.0.0.1`。Cursor 团队�
 这两个接口不返回密钥，诊断接口本身不请求 X。
 
 ```bash
-curl -sS http://127.0.0.1:3847/api/state
-curl -sS http://127.0.0.1:3847/api/diagnostics
+curl -sS 'http://127.0.0.1:3847/api/state?accountId=1'
+curl -sS 'http://127.0.0.1:3847/api/diagnostics?accountId=1'
+curl -sS 'http://127.0.0.1:3847/api/state?accountId=2'
 ```
+
+同一进程里有两个槽：账号1、账号2。每个槽单独加密保存自己的四项凭据，并单独拥有队列、暂停状态和发帖记录。请求不带 `accountId` 会返回 400，不会落到另一个号。新数据库两个槽都是暂停。旧的单账号库升级后，原来的凭据和队列留在账号1，暂停值保持原样；账号2是新建的空队列，默认暂停。
 
 安全配置下应看到：
 

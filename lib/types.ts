@@ -71,6 +71,7 @@ export type Tweet = {
   attemptCount: number;
   sortOrder: number;
   delayReason: DelayReason;
+  accountId: 1 | 2;
   /** Optional media + thread replies for this queue item (the whole thread counts as one post). */
   extra?: TweetExtra | null;
   createdAt: string;
@@ -123,6 +124,15 @@ export type DeploymentPosture = {
 
 export type PublicState = {
   mockMode: boolean;
+  accountId: 1 | 2;
+  accountLabel: "账号1" | "账号2";
+  slots: Array<{
+    id: 1 | 2;
+    label: "账号1" | "账号2";
+    credentialsConfigured: boolean;
+    paused: boolean;
+    username: string | null;
+  }>;
   deployment: DeploymentPosture;
   credentialsConfigured: boolean;
   account: { username: string; displayName: string; userId: string } | null;

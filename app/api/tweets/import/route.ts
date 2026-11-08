@@ -1,3 +1,4 @@
+import { accountIdFrom } from "@/lib/account";
 import { asNumber, handle, optionalNumber, readJson } from "@/lib/http";
 import { importTweets } from "@/lib/service";
 
@@ -8,6 +9,7 @@ export async function POST(request: Request) {
   return handle(async () => {
     const body = await readJson(request);
     return importTweets({
+      accountId: accountIdFrom(request, body),
       source: typeof body.source === "string" ? body.source : "",
       format: body.format === "csv" ? "csv" : "text",
       startAt: typeof body.startAt === "string" ? body.startAt : "",

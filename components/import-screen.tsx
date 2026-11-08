@@ -29,7 +29,7 @@ const MODE_KEYS: Record<ImportMode, MessageKey> = {
 
 export function ImportScreen() {
   const { t, locale } = useI18n();
-  const { state, refresh } = useAppState();
+  const { state, refresh, accountId } = useAppState();
   const [source, setSource] = useState("");
   const [format, setFormat] = useState<"text" | "csv">("text");
   const [startAt, setStartAt] = useState("");
@@ -100,6 +100,7 @@ export function ImportScreen() {
         {
         method: "POST",
         body: JSON.stringify({
+          accountId,
           source,
           format,
           startAt: new Date(startAt).toISOString(),
@@ -141,6 +142,7 @@ export function ImportScreen() {
     <div className="space-y-6">
       <header>
         <h1 className="font-heading text-3xl tracking-wide">{t("importTitle")}</h1>
+        <p className="mt-1 text-sm text-muted-foreground">{state?.accountLabel ?? (accountId === 1 ? "账号1" : "账号2")}</p>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">{t("importSubtitle")}</p>
       </header>
 

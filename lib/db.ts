@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { ACCOUNT_IDS, type AccountId } from "@/lib/account";
 import { DEFAULT_RANDOM_MAX_SECONDS, DEFAULT_RANDOM_MIN_SECONDS } from "@/lib/schedule";
 import type { DelayReason, QueueSettings, Tweet, TweetExtra, TweetStatus } from "@/lib/types";
 
@@ -32,7 +33,7 @@ export function reopenDatabase(): DatabaseSync {
 function migrate(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS credentials (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
+      id INTEGER PRIMARY KEY CHECK (id IN (1, 2)),
       ciphertext TEXT NOT NULL,
       username TEXT,
       display_name TEXT,
@@ -41,7 +42,7 @@ function migrate(db: DatabaseSync): void {
     );
 
     CREATE TABLE IF NOT EXISTS queue_settings (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
+      id INTEGER PRIMARY KEY CHECK (id IN (1, 2)),
       interval_minutes INTEGER NOT NULL DEFAULT 15,
       jitter_minutes INTEGER NOT NULL DEFAULT 0,
       paused INTEGER NOT NULL DEFAULT 1,
@@ -97,11 +98,17 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, "tweets", "error_kind", "ALTER TABLE tweets ADD COLUMN error_kind TEXT");
   ensureColumn(db, "queue_settings", "last_tick_at", "ALTER TABLE queue_settings ADD COLUMN last_tick_at TEXT");
   ensureColumn(db, "queue_settings", "last_tick_action", "ALTER TABLE queue_settings ADD COLUMN last_tick_action TEXT");
-  db.prepare(
-    `INSERT OR IGNORE INTO queue_settings
-      (id, interval_minutes, jitter_minutes, paused, pause_reason, updated_at)
-     VALUES (1, 15, 0, 1, 'safe_start', ?)`,
-  ).run(new Date().toISOString());
+  widenAccountTables(db);
+  ensureColumn(db, "tweets", "account_id", "ALTER TABLE tweets ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_tweets_account_sched ON tweets(account_id, status, scheduled_at)");
+  const now = new Date().toISOString();
+  for (const id of ACCOUNT_IDS) {
+    db.prepare(
+      `INSERT OR IGNORE INTO queue_settings
+        (id, interval_minutes, jitter_minutes, paused, pause_reason, updated_at)
+       VALUES (?, 15, 0, 1, 'safe_start', ?)`,
+    ).run(id, now);
+  }
 }
 
 type CredentialRow = {
@@ -113,6 +120,7 @@ type CredentialRow = {
 
 type TweetRow = {
   id: string;
+  account_id?: number | null;
   text: string;
   weighted_length: number;
   status: string;
@@ -129,6 +137,66 @@ type TweetRow = {
   updated_at: string;
 };
 
+function tableSql(db: DatabaseSync, name: string): string {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
+    | { sql: string }
+    | undefined;
+  return row?.sql ?? "";
+}
+
+/** Older databases allowed only credentials/queue id 1. Rebuild those tables so 账号2 can have its own row. */
+function widenAccountTables(db: DatabaseSync): void {
+  if (!/IN \(1,\s*2\)/i.test(tableSql(db, "credentials"))) {
+    db.exec(`
+      CREATE TABLE credentials_new (
+        id INTEGER PRIMARY KEY CHECK (id IN (1, 2)),
+        ciphertext TEXT NOT NULL,
+        username TEXT,
+        display_name TEXT,
+        user_id TEXT,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO credentials_new (id, ciphertext, username, display_name, user_id, updated_at)
+      SELECT id, ciphertext, username, display_name, user_id, updated_at FROM credentials;
+      DROP TABLE credentials;
+      ALTER TABLE credentials_new RENAME TO credentials;
+    `);
+  }
+  if (/IN \(1,\s*2\)/i.test(tableSql(db, "queue_settings"))) return;
+  const existing = db.prepare("PRAGMA table_info(queue_settings)").all() as Array<{ name: string }>;
+  db.exec(`
+    CREATE TABLE queue_settings_new (
+      id INTEGER PRIMARY KEY CHECK (id IN (1, 2)),
+      interval_minutes INTEGER NOT NULL DEFAULT 15,
+      jitter_minutes INTEGER NOT NULL DEFAULT 0,
+      paused INTEGER NOT NULL DEFAULT 1,
+      pause_reason TEXT,
+      rate_limit_until TEXT,
+      last_error TEXT,
+      lock_until TEXT,
+      timeline_checked_at TEXT,
+      timeline_latest_at TEXT,
+      timeline_latest_id TEXT,
+      timeline_ok INTEGER,
+      anchored_manual_id TEXT,
+      random_min_seconds INTEGER NOT NULL DEFAULT 60,
+      random_max_seconds INTEGER NOT NULL DEFAULT 120,
+      last_tick_at TEXT,
+      last_tick_action TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  const target = new Set(
+    (db.prepare("PRAGMA table_info(queue_settings_new)").all() as Array<{ name: string }>).map((column) => column.name),
+  );
+  const shared = existing.map((column) => column.name).filter((name) => target.has(name));
+  db.exec(
+    `INSERT INTO queue_settings_new (${shared.join(", ")}) SELECT ${shared.join(", ")} FROM queue_settings`,
+  );
+  db.exec("DROP TABLE queue_settings");
+  db.exec("ALTER TABLE queue_settings_new RENAME TO queue_settings");
+}
+
 function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (!columns.some((item) => item.name === column)) db.exec(ddl);
@@ -139,18 +207,19 @@ function one<T>(sql: string, ...params: unknown[]): T | null {
   return (row as T | undefined) ?? null;
 }
 
-export function getCredentialsRow(): CredentialRow | null {
+export function getCredentialsRow(accountId: AccountId = 1): CredentialRow | null {
   return one<CredentialRow>(
-    "SELECT ciphertext, username, display_name, user_id FROM credentials WHERE id = 1",
+    "SELECT ciphertext, username, display_name, user_id FROM credentials WHERE id = ?",
+    accountId,
   );
 }
 
-export function upsertCredentials(ciphertext: string): void {
+export function upsertCredentials(accountId: AccountId, ciphertext: string): void {
   const updatedAt = new Date().toISOString();
   getDb()
     .prepare(
       `INSERT INTO credentials (id, ciphertext, username, display_name, user_id, updated_at)
-       VALUES (1, ?, NULL, NULL, NULL, ?)
+       VALUES (?, ?, NULL, NULL, NULL, ?)
        ON CONFLICT(id) DO UPDATE SET
          ciphertext = excluded.ciphertext,
          username = NULL,
@@ -158,24 +227,27 @@ export function upsertCredentials(ciphertext: string): void {
          user_id = NULL,
          updated_at = excluded.updated_at`,
     )
-    .run(ciphertext, updatedAt);
+    .run(accountId, ciphertext, updatedAt);
 }
 
-export function updateAccount(account: { username: string; displayName: string; userId: string }): void {
+export function updateAccount(
+  accountId: AccountId,
+  account: { username: string; displayName: string; userId: string },
+): void {
   getDb()
     .prepare(
       `UPDATE credentials
        SET username = ?, display_name = ?, user_id = ?, updated_at = ?
-       WHERE id = 1`,
+       WHERE id = ?`,
     )
-    .run(account.username, account.displayName, account.userId, new Date().toISOString());
+    .run(account.username, account.displayName, account.userId, new Date().toISOString(), accountId);
 }
 
-export function deleteCredentials(): void {
-  getDb().prepare("DELETE FROM credentials WHERE id = 1").run();
+export function deleteCredentials(accountId: AccountId): void {
+  getDb().prepare("DELETE FROM credentials WHERE id = ?").run(accountId);
 }
 
-export function getQueueSettings(): QueueSettings {
+export function getQueueSettings(accountId: AccountId = 1): QueueSettings {
   const row = one<{
     interval_minutes: number;
     random_min_seconds: number | null;
@@ -189,7 +261,8 @@ export function getQueueSettings(): QueueSettings {
   }>(
     `SELECT interval_minutes, random_min_seconds, random_max_seconds, paused, pause_reason, rate_limit_until, last_error,
             last_tick_at, last_tick_action
-     FROM queue_settings WHERE id = 1`,
+     FROM queue_settings WHERE id = ?`,
+    accountId,
   );
   if (!row) {
     return {
@@ -218,6 +291,7 @@ export function getQueueSettings(): QueueSettings {
 }
 
 export function patchQueueSettings(
+  accountId: AccountId,
   fields: Partial<{
     intervalMinutes: number;
     randomMinSeconds: number;
@@ -251,23 +325,23 @@ export function patchQueueSettings(
   }
   sets.push("updated_at = ?");
   params.push(new Date().toISOString());
-  getDb().prepare(`UPDATE queue_settings SET ${sets.join(", ")} WHERE id = 1`).run(...params);
+  getDb().prepare(`UPDATE queue_settings SET ${sets.join(", ")} WHERE id = ?`).run(...params, accountId);
 }
 
-export function tryAcquireLock(now: Date, holdMs = 30_000): boolean {
+export function tryAcquireLock(accountId: AccountId, now: Date, holdMs = 30_000): boolean {
   const until = new Date(now.getTime() + holdMs).toISOString();
   const result = getDb()
     .prepare(
       `UPDATE queue_settings
        SET lock_until = ?
-       WHERE id = 1 AND (lock_until IS NULL OR lock_until < ?)`,
+       WHERE id = ? AND (lock_until IS NULL OR lock_until < ?)`,
     )
-    .run(until, now.toISOString());
+    .run(until, accountId, now.toISOString());
   return result.changes > 0;
 }
 
-export function releaseLock(): void {
-  getDb().prepare("UPDATE queue_settings SET lock_until = NULL WHERE id = 1").run();
+export function releaseLock(accountId: AccountId): void {
+  getDb().prepare("UPDATE queue_settings SET lock_until = NULL WHERE id = ?").run(accountId);
 }
 
 export type TimelineCache = {
@@ -277,7 +351,7 @@ export type TimelineCache = {
   ok: boolean;
 };
 
-export function getTimelineCache(): TimelineCache {
+export function getTimelineCache(accountId: AccountId): TimelineCache {
   const row = one<{
     timeline_checked_at: string | null;
     timeline_latest_at: string | null;
@@ -285,7 +359,8 @@ export function getTimelineCache(): TimelineCache {
     timeline_ok: number | null;
   }>(
     `SELECT timeline_checked_at, timeline_latest_at, timeline_latest_id, timeline_ok
-     FROM queue_settings WHERE id = 1`,
+     FROM queue_settings WHERE id = ?`,
+    accountId,
   );
   return {
     checkedAt: row?.timeline_checked_at ?? null,
@@ -295,12 +370,12 @@ export function getTimelineCache(): TimelineCache {
   };
 }
 
-export function setTimelineCache(cache: TimelineCache): void {
+export function setTimelineCache(accountId: AccountId, cache: TimelineCache): void {
   getDb()
     .prepare(
       `UPDATE queue_settings
        SET timeline_checked_at = ?, timeline_latest_at = ?, timeline_latest_id = ?, timeline_ok = ?, updated_at = ?
-       WHERE id = 1`,
+       WHERE id = ?`,
     )
     .run(
       cache.checkedAt,
@@ -308,16 +383,20 @@ export function setTimelineCache(cache: TimelineCache): void {
       cache.latestId,
       cache.ok ? 1 : 0,
       new Date().toISOString(),
+      accountId,
     );
 }
 
 /** Id of the manual X post the queue was last re-anchored to (so each manual post anchors once). */
-export function getAnchoredManualId(): string | null {
-  return one<{ anchored_manual_id: string | null }>("SELECT anchored_manual_id FROM queue_settings WHERE id = 1")?.anchored_manual_id ?? null;
+export function getAnchoredManualId(accountId: AccountId): string | null {
+  return (
+    one<{ anchored_manual_id: string | null }>("SELECT anchored_manual_id FROM queue_settings WHERE id = ?", accountId)
+      ?.anchored_manual_id ?? null
+  );
 }
 
-export function setAnchoredManualId(id: string | null): void {
-  getDb().prepare("UPDATE queue_settings SET anchored_manual_id = ? WHERE id = 1").run(id);
+export function setAnchoredManualId(accountId: AccountId, id: string | null): void {
+  getDb().prepare("UPDATE queue_settings SET anchored_manual_id = ? WHERE id = ?").run(id, accountId);
 }
 
 function parseExtra(raw: string | null | undefined): TweetExtra | null {
@@ -344,29 +423,31 @@ function mapTweet(row: TweetRow): Tweet {
     attemptCount: row.attempt_count,
     sortOrder: row.sort_order,
     delayReason: row.delay_reason === "manual" ? "manual" : null,
+    accountId: row.account_id === 2 ? 2 : 1,
     extra: parseExtra(row.extra_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-export function listTweets(): Tweet[] {
+export function listTweets(accountId: AccountId = 1): Tweet[] {
   const rows = getDb()
     .prepare(
       `SELECT * FROM tweets
+       WHERE account_id = ?
        ORDER BY scheduled_at ASC, sort_order ASC, created_at ASC`,
     )
-    .all() as TweetRow[];
+    .all(accountId) as TweetRow[];
   return rows.map(mapTweet);
 }
 
-export function getTweet(id: string): Tweet | null {
-  const row = one<TweetRow>("SELECT * FROM tweets WHERE id = ?", id);
+export function getTweet(id: string, accountId: AccountId = 1): Tweet | null {
+  const row = one<TweetRow>("SELECT * FROM tweets WHERE id = ? AND account_id = ?", id, accountId);
   return row ? mapTweet(row) : null;
 }
 
-export function nextSortOrder(): number {
-  const row = one<{ max: number | null }>("SELECT MAX(sort_order) AS max FROM tweets");
+export function nextSortOrder(accountId: AccountId = 1): number {
+  const row = one<{ max: number | null }>("SELECT MAX(sort_order) AS max FROM tweets WHERE account_id = ?", accountId);
   return (row?.max ?? 0) + 1;
 }
 
@@ -375,15 +456,16 @@ export function insertTweets(rows: Tweet[]): void {
   const db = getDb();
   const statement = db.prepare(
     `INSERT INTO tweets (
-      id, text, weighted_length, status, scheduled_at, posted_at, tweet_id,
+      id, account_id, text, weighted_length, status, scheduled_at, posted_at, tweet_id,
       error_message, attempt_count, sort_order, delay_reason, extra_json, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   db.exec("BEGIN");
   try {
     for (const row of rows) {
       statement.run(
         row.id,
+        row.accountId,
         row.text,
         row.weightedLength,
         row.status,
@@ -423,6 +505,7 @@ const TWEET_COLUMNS: Record<string, string> = {
 
 export function patchTweet(
   id: string,
+  accountId: AccountId,
   fields: Partial<{
     text: string;
     weightedLength: number;
@@ -448,12 +531,12 @@ export function patchTweet(
   }
   if (sets.length === 0) return;
   sets.push("updated_at = ?");
-  params.push(new Date().toISOString(), id);
-  getDb().prepare(`UPDATE tweets SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+  params.push(new Date().toISOString(), id, accountId);
+  getDb().prepare(`UPDATE tweets SET ${sets.join(", ")} WHERE id = ? AND account_id = ?`).run(...params);
 }
 
-export function deleteTweet(id: string): boolean {
-  const result = getDb().prepare("DELETE FROM tweets WHERE id = ?").run(id);
+export function deleteTweet(id: string, accountId: AccountId): boolean {
+  const result = getDb().prepare("DELETE FROM tweets WHERE id = ? AND account_id = ?").run(id, accountId);
   return result.changes > 0;
 }
 
@@ -462,24 +545,29 @@ export function resetAllData(): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.exec("DELETE FROM tweets; DELETE FROM credentials;");
-  db.prepare(
-    `UPDATE queue_settings SET
-      interval_minutes = 15,
-      jitter_minutes = 0,
-      random_min_seconds = 60,
-      random_max_seconds = 120,
-      paused = 0,
-      pause_reason = NULL,
-      rate_limit_until = NULL,
-      last_error = NULL,
-      last_tick_at = NULL,
-      last_tick_action = NULL,
-      lock_until = NULL,
-      timeline_checked_at = NULL,
-      timeline_latest_at = NULL,
-      timeline_latest_id = NULL,
-      timeline_ok = NULL,
-      updated_at = ?
-     WHERE id = 1`,
-  ).run(now);
+  const reset = (accountId: AccountId, paused: number, reason: string | null) => {
+    db.prepare(
+      `UPDATE queue_settings SET
+        interval_minutes = 15,
+        jitter_minutes = 0,
+        random_min_seconds = 60,
+        random_max_seconds = 120,
+        paused = ?,
+        pause_reason = ?,
+        rate_limit_until = NULL,
+        last_error = NULL,
+        last_tick_at = NULL,
+        last_tick_action = NULL,
+        lock_until = NULL,
+        timeline_checked_at = NULL,
+        timeline_latest_at = NULL,
+        timeline_latest_id = NULL,
+        timeline_ok = NULL,
+        anchored_manual_id = NULL,
+        updated_at = ?
+       WHERE id = ?`,
+    ).run(paused, reason, now, accountId);
+  };
+  reset(1, 0, null);
+  reset(2, 1, "safe_start");
 }

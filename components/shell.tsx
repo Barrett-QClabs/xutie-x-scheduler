@@ -19,7 +19,7 @@ const links = [
 export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { t, locale, setLocale } = useI18n();
-  const { state } = useAppState();
+  const { state, setAccountId, accountId } = useAppState();
 
   const connection = state?.account
     ? t("connectedAs", { handle: state.account.username })
@@ -45,6 +45,25 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </span>
           </Link>
           <nav className="mt-8 flex flex-col gap-1">
+            <div className="mb-3 grid grid-cols-2 gap-1">
+              {(state?.slots ?? [
+                { id: 1 as const, label: "账号1" as const, paused: false },
+                { id: 2 as const, label: "账号2" as const, paused: false },
+              ]).map((slot) => (
+                <button
+                  key={slot.id}
+                  type="button"
+                  onClick={() => setAccountId(slot.id)}
+                  className={cn(
+                    "rounded-lg px-2 py-2 text-xs",
+                    accountId === slot.id ? "bg-primary text-primary-foreground" : "bg-muted text-foreground",
+                  )}
+                >
+                  {slot.label}
+                  {slot.paused ? " · 暂停" : ""}
+                </button>
+              ))}
+            </div>
             {links.map((link) => {
               const active = link.href === "/" ? pathname === "/" : pathname.startsWith(link.href);
               const Icon = link.icon;

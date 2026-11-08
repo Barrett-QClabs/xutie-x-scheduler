@@ -2,7 +2,7 @@ services:
   xuti:
     build: .
     ports:
-      - "3847:3847"
+      - "127.0.0.1:3847:3847"
     env_file:
       - .env
     environment:
