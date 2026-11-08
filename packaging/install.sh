@@ -16,6 +16,13 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if [ ! -f "$IMAGE_TAR" ]; then
+  set -- "$ROOT"/xuti-image.tar.gz.part-*
+  if [ -e "$1" ]; then
+    cat "$ROOT"/xuti-image.tar.gz.part-* | gzip -dc > "$IMAGE_TAR"
+  fi
+fi
+
+if [ ! -f "$IMAGE_TAR" ]; then
   echo "missing image archive: $IMAGE_TAR" >&2
   exit 1
 fi
