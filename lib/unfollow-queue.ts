@@ -1,5 +1,6 @@
 import { ACCOUNT1_UNFOLLOW_USER_ID, INACTIVE_AFTER_MS, UNFOLLOW_BATCH_LIMIT, UNFOLLOW_WHITELIST } from "@/lib/unfollow-policy";
 import { getCredentialsRow, getDb } from "@/lib/db";
+import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
 import type { AccountId } from "@/lib/account";
 
@@ -136,8 +137,9 @@ export function getUnfollowStatus() {
     status: string;
     submitted: number;
     unfollowed: number;
+    started_at: string;
     finished_at: string | null;
-  }>("SELECT slot, status, submitted, unfollowed, finished_at FROM unfollow_batches ORDER BY started_at DESC LIMIT 1");
+  }>("SELECT slot, status, submitted, unfollowed, started_at, finished_at FROM unfollow_batches ORDER BY started_at DESC LIMIT 1");
   return {
     accountId: 1 as const,
     enabled: account1UnfollowEnabled(),
@@ -148,7 +150,79 @@ export function getUnfollowStatus() {
     counts: Object.fromEntries(counts.map((row) => [row.status, row.n])),
     lastBatch: last,
     whitelistSize: UNFOLLOW_WHITELIST.size,
+    apiMode: apiMode(),
+    identityConfirmed: getCredentialsRow(1)?.user_id === ACCOUNT1_UNFOLLOW_USER_ID,
   };
+}
+
+export type UnfollowAuditBatch = {
+  slot: string;
+  status: string;
+  submitted: number;
+  unfollowed: number;
+  startedAt: string;
+  finishedAt: string | null;
+  results: UnfollowBatchResult["results"];
+};
+
+/** Pages completed and in-flight batches, newest slot first. `before` is the slot cursor, exclusive. */
+export function listUnfollowAudit(input?: { limit?: number; before?: string | null }): {
+  accountId: 1;
+  limit: number;
+  batches: UnfollowAuditBatch[];
+  nextBefore: string | null;
+} {
+  requireUnfollowAccount(1);
+  const limit = input?.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new AppError("invalid_limit", "审计分页 limit 必须是 1 到 50 的整数。");
+  }
+  const before = input?.before ?? null;
+  if (before !== null && !/^\d{4}-\d{2}-\d{2}T\d{2}:(00|30)$/.test(before)) {
+    throw new AppError("invalid_cursor", "审计分页 before 必须是台北半点槽，形如 2026-11-08T12:00。");
+  }
+  const rows = getDb()
+    .prepare(
+      `SELECT slot, status, submitted, unfollowed, results_json, started_at, finished_at
+       FROM unfollow_batches
+       WHERE account_id = 1 AND (? IS NULL OR slot < ?)
+       ORDER BY slot DESC
+       LIMIT ?`,
+    )
+    .all(before, before, limit + 1) as Array<{
+    slot: string;
+    status: string;
+    submitted: number;
+    unfollowed: number;
+    results_json: string | null;
+    started_at: string;
+    finished_at: string | null;
+  }>;
+  const page = rows.slice(0, limit);
+  return {
+    accountId: 1,
+    limit,
+    batches: page.map((row) => ({
+      slot: row.slot,
+      status: row.status,
+      submitted: row.submitted,
+      unfollowed: row.unfollowed,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+      results: parseResults(row.results_json),
+    })),
+    nextBefore: rows.length > limit ? (page[page.length - 1]?.slot ?? null) : null,
+  };
+}
+
+function parseResults(raw: string | null): UnfollowBatchResult["results"] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as UnfollowBatchResult["results"]) : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseTier(value: unknown): UnfollowTier {
@@ -260,6 +334,7 @@ export async function submitUnfollowBatch(input?: { now?: Date; hooks?: Unfollow
   const now = input?.now ?? new Date();
   const slot = halfHourSlot(now);
   if (!account1UnfollowEnabled()) return emptyResult(slot, "disabled");
+  if (apiMode() !== "live" && !input?.hooks) return emptyResult(slot, "mock_mode");
   if (!identityAllowsRun().ok) return emptyResult(slot, "identity_unconfirmed");
   if (controlPaused()) return emptyResult(slot, "paused");
   const hooks = input?.hooks;
@@ -298,6 +373,7 @@ export async function submitUnfollowBatch(input?: { now?: Date; hooks?: Unfollow
   const results: UnfollowBatchResult["results"] = [];
   try {
     for (const row of picked) {
+      if (controlPaused()) break;
       db.prepare(
         `UPDATE unfollow_candidates SET status = 'submitted', batch_slot = ?, updated_at = ? WHERE account_id = 1 AND target_user_id = ?`,
       ).run(slot, new Date().toISOString(), row.target_user_id);

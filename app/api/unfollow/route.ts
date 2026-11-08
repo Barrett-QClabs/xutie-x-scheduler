@@ -1,6 +1,8 @@
 import { accountIdFrom } from "@/lib/account";
-import { handle, readJson } from "@/lib/http";
+import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
+import { handle, readJson } from "@/lib/http";
+import { account1LiveHooks } from "@/lib/unfollow-live";
 import {
   getUnfollowStatus,
   importUnfollowCandidates,
@@ -8,9 +10,6 @@ import {
   submitUnfollowBatch,
   type UnfollowHooks,
 } from "@/lib/unfollow-queue";
-import { inspectTarget, unfollowTarget } from "@/lib/unfollow-live";
-import { ACCOUNT1_UNFOLLOW_USER_ID } from "@/lib/unfollow-policy";
-import { getCredentialsRow } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,15 +19,9 @@ function testHooks(): UnfollowHooks | null {
   return (globalThis as { __xutiUnfollowHooks?: UnfollowHooks }).__xutiUnfollowHooks ?? null;
 }
 
-function liveHooks(): UnfollowHooks {
-  const sourceUserId = getCredentialsRow(1)?.user_id;
-  if (sourceUserId !== ACCOUNT1_UNFOLLOW_USER_ID) {
-    throw new AppError("identity_unconfirmed", "账号1尚未确认是指定账号，不会取关。", 409);
-  }
-  return {
-    inspect: (targetUserId) => inspectTarget(sourceUserId, targetUserId),
-    unfollow: (targetUserId) => unfollowTarget(sourceUserId, targetUserId),
-  };
+function productionBatch() {
+  if (apiMode() !== "live") return submitUnfollowBatch();
+  return submitUnfollowBatch({ hooks: account1LiveHooks() });
 }
 
 export function GET(request: Request) {
@@ -47,7 +40,8 @@ export async function POST(request: Request) {
       if (!Array.isArray(body.candidates)) throw new AppError("invalid_json", "候选名单格式不正确。");
       return importUnfollowCandidates({ candidates: body.candidates });
     }
-    const hooks = testHooks() ?? (process.env.VITEST ? null : liveHooks());
-    return submitUnfollowBatch({ hooks: hooks ?? undefined });
+    const injected = process.env.VITEST ? testHooks() : null;
+    if (injected) return submitUnfollowBatch({ hooks: injected });
+    return productionBatch();
   });
 }

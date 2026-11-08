@@ -1,35 +1,42 @@
 import { accountIdFrom } from "@/lib/account";
-import { getCredentialsRow } from "@/lib/db";
-import { AppError } from "@/lib/errors";
+import { apiMode } from "@/lib/deployment";
 import { handle, readJson } from "@/lib/http";
-import { ACCOUNT1_UNFOLLOW_USER_ID } from "@/lib/unfollow-policy";
-import { inspectTarget, unfollowTarget } from "@/lib/unfollow-live";
-import { requireUnfollowAccount, submitUnfollowBatch, type UnfollowHooks } from "@/lib/unfollow-queue";
+import { account1LiveHooks } from "@/lib/unfollow-live";
+import { listUnfollowAudit, requireUnfollowAccount, submitUnfollowBatch, type UnfollowHooks } from "@/lib/unfollow-queue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function hooksForBatch(): UnfollowHooks | undefined {
-  if (process.env.VITEST) {
-    return (globalThis as { __xutiUnfollowHooks?: UnfollowHooks }).__xutiUnfollowHooks;
-  }
-  const sourceUserId = getCredentialsRow(1)?.user_id;
-  if (sourceUserId !== ACCOUNT1_UNFOLLOW_USER_ID) return undefined;
+function testHooks(): UnfollowHooks | undefined {
+  return (globalThis as { __xutiUnfollowHooks?: UnfollowHooks }).__xutiUnfollowHooks;
+}
+
+function auditQuery(request: Request): { limit?: number; before: string | null } {
+  const url = new URL(request.url);
+  const rawLimit = url.searchParams.get("limit");
+  const before = url.searchParams.get("before");
   return {
-    inspect: (targetUserId) => inspectTarget(sourceUserId, targetUserId),
-    unfollow: (targetUserId) => unfollowTarget(sourceUserId, targetUserId),
+    limit: rawLimit === null ? undefined : Number(rawLimit),
+    before: before === null || before === "" ? null : before,
   };
+}
+
+/** Read batch audit pages. Does not call X. */
+export function GET(request: Request) {
+  return handle(() => {
+    requireUnfollowAccount(accountIdFrom(request));
+    return listUnfollowAudit(auditQuery(request));
+  });
 }
 
 /** One half-hour batch for account 1. Does not import candidates and does not touch the post queue. */
 export async function POST(request: Request) {
   return handle(async () => {
     const body = await readJson(request);
-    const accountId = accountIdFrom(request, body);
-    requireUnfollowAccount(accountId);
-    if (!process.env.VITEST && getCredentialsRow(1)?.user_id !== ACCOUNT1_UNFOLLOW_USER_ID) {
-      throw new AppError("identity_unconfirmed", "账号1尚未确认是指定账号，不会取关。", 409);
-    }
-    return submitUnfollowBatch({ hooks: hooksForBatch() });
+    requireUnfollowAccount(accountIdFrom(request, body));
+    const injected = process.env.VITEST ? testHooks() : undefined;
+    if (injected) return submitUnfollowBatch({ hooks: injected });
+    if (apiMode() !== "live") return submitUnfollowBatch();
+    return submitUnfollowBatch({ hooks: account1LiveHooks() });
   });
 }

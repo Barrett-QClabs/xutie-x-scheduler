@@ -63,14 +63,45 @@ curl -sS 'http://127.0.0.1:3847/api/state?accountId=2'
 1. 确认 `deployment.queuePaused` 仍是 `true`，`sendsWhenDue` 仍是 `false`。
 2. 把 `X_API_MODE` 设为 `live` 并重启这一个进程。
 3. 再读 `/api/state`。`apiMode` 应为 `live`，`sendsWhenDue` 仍应为 `false`。
-4. 设置页「重新测试已保存的凭据」只调用 `GET /2/users/me`。这一步会请求 X，并可能扣读取额度。队列保持暂停时，调度不会发帖。
+4. 设置页「重新测试已保存的凭据」只调用 `GET /2/users/me`。这一步在 `X_API_MODE=live` 时会请求 X。队列保持暂停时，调度不会发帖。
 5. 只有操作者决定发帖时，才 `POST /api/queue/resume`。
 
 关注自动化页在 supervisor 关闭时不提供启动按钮。`POST /api/automation/start` 返回 403，代码 `automation_disabled`。
 
 ## 账号1自动取关
 
-默认关闭。`XUTIE_AUTOMATION_SUPERVISOR` 保持 `off`，否则会尝试启动回关和关键词关注。只在准备按授权跑账号1取关时把 `XUTIE_ACCOUNT1_UNFOLLOW=on`。父定时调用 `POST /api/unfollow/batches`，正文 `{"accountId":1}`。未活跃层级 `inactive_48h` 只在最新公开帖严格早于 48 小时时才算符合；刚好 48 小时不取关。库里旧的 `inactive_36h` 也按这个 48 小时界限判断，不再沿用 36 小时。同一台北整点或半点重复调用不会再取关一次。返回里的 `submitted` 是本批纳入人数，`unfollowed` 才是实际取关成功人数。`executed: false` 表示这一次没有执行。账号2的请求会被拒绝。这个接口不改变发帖队列。取关控制默认暂停，需要另调 `POST /api/unfollow/resume`，正文同样是 `{"accountId":1}`，它不会恢复发帖。
+`XUTIE_AUTOMATION_SUPERVISOR` 保持 `off`。不要为了取关把它打开，那会尝试启动回关和关键词关注。没有新增自动关注。账号2的取关请求返回 403 `account_forbidden`。
+
+模拟模式（`X_API_MODE` 不是精确的 `live`）下，批次不调用 `xGet` / `xDelete`，也不会打开到 `api.x.com` 的连接。返回 `executed: false`、`reason: "mock_mode"`。正式执行要四项同时成立：`X_API_MODE=live`、`XUTIE_ACCOUNT1_UNFOLLOW=on`、取关控制已 resume、账号1的 `user_id` 是 `1933586991612080128`。任一不成立就关闭这一次，不取关。
+
+动作前的官方读取和写入，都用账号1自己的 OAuth 1.0a 用户上下文：
+
+- `GET https://api.x.com/2/users?ids={target}&user.fields=connection_status,verified,verified_type`
+- `GET https://api.x.com/2/users/{target}/tweets?max_results=5&tweet.fields=created_at&exclude=retweets,replies`
+- `DELETE https://api.x.com/2/users/{source}/following/{target}`
+
+`connection_status` 缺数组时关系是未知，不取关，该行记成 `unknown`，下一半点不再选。`DELETE` 失败记成 `failed`，也不再选。
+
+导入是 `POST /api/unfollow`，正文 `{"accountId":1,"candidates":[...]}`。每个对象：
+
+| 字段 | 要求 |
+| --- | --- |
+| `targetUserId` | 字符串，只含数字 |
+| `tier` | `non_blue`、`no_followback_72h`、`inactive_48h` 三者之一。`inactive_36h` 拒绝 |
+| `username` | 可省略。有则截到 64 字 |
+| `firstRecordedAt` | `no_followback_72h` 必填，且 `Date.parse` 成功。另外两层可省略 |
+
+导入不向 X 取证。72 小时从 `firstRecordedAt` 起算，动作时再看 `followed_by`。未活跃只在动作时看推文 `created_at`，必须严格大于 48 小时。白名单在导入时拒绝；库里已有的白名单行在选批时丢掉，不调用 X。
+
+批次是 `POST /api/unfollow/batches`，正文只有 `{"accountId":1}`。没有客户端幂等令牌。幂等键是台北时间半点槽 `YYYY-MM-DDTHH:00` 或 `YYYY-MM-DDTHH:30`。同一槽再调用返回 `replay: true` 和原结果，不再 `DELETE`。每批最多 14。服务自己不补跑错过的槽。
+
+`submitted` 是本批实际纳入人数。`unfollowed` 只数 `result: "success"`。门没过时 HTTP 200，`executed: false`，`reason` 按这个顺序判断：`disabled`、`mock_mode`、`identity_unconfirmed`、`paused`、`verifier_unavailable`。已经有一批在跑时再调用，`reason` 是 `overlap`。账号2仍是 403，不走这套 reason。
+
+暂停是 `POST /api/unfollow/pause`，正文 `{"accountId":1}`，返回 `{ok:true,paused:true}`。它不暂停发帖。已经跑进循环的一批会在下一个目标之前停住，还没处理的人保持 `candidate`。恢复是 `POST /api/unfollow/resume`，同样只带 `{"accountId":1}`。
+
+状态是 `GET /api/unfollow?accountId=1`。字段：`accountId`、`enabled`、`paused`、`pauseReason`、`batchSize`、`inactiveAfterMs`、`counts`、`lastBatch`、`whitelistSize`、`apiMode`、`identityConfirmed`。`lastBatch` 使用库里的 `slot`、`status`、`submitted`、`unfollowed`、`started_at`、`finished_at`。
+
+审计分页是 `GET /api/unfollow/batches?accountId=1&limit=20&before={slot}`。`limit` 缺省 20，允许 1 到 50。`before` 缺省时从最新槽开始，有值时必须是半点槽，返回更早的页。响应是 `{accountId, limit, batches, nextBefore}`。`batches[]` 含 `slot`、`status`、`submitted`、`unfollowed`、`startedAt`、`finishedAt`、`results`。没有下一页时 `nextBefore` 为 null。
 
 ## English
 

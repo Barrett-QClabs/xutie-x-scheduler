@@ -1,5 +1,8 @@
+import { getCredentialsRow } from "@/lib/db";
+import { apiMode } from "@/lib/deployment";
 import { readCredentials } from "@/lib/service";
-import type { FreshProfile } from "@/lib/unfollow-queue";
+import { ACCOUNT1_UNFOLLOW_USER_ID } from "@/lib/unfollow-policy";
+import type { FreshProfile, UnfollowHooks } from "@/lib/unfollow-queue";
 import { xDelete, xGet } from "@/lib/x-client";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -33,11 +36,29 @@ export function profileFromLookup(user: Record<string, unknown> | null, tweets: 
   return { following, blue, followsBack, lastPostAt, lastPostKnown };
 }
 
+const unknownProfile = (): FreshProfile => ({
+  following: null,
+  blue: null,
+  followsBack: null,
+  lastPostAt: null,
+  lastPostKnown: false,
+});
+
+/** Live hooks only. Mock mode returns nothing, so the batch cannot call X. */
+export function account1LiveHooks(): UnfollowHooks | undefined {
+  if (apiMode() !== "live") return undefined;
+  const sourceUserId = getCredentialsRow(1)?.user_id;
+  if (sourceUserId !== ACCOUNT1_UNFOLLOW_USER_ID) return undefined;
+  return {
+    inspect: (targetUserId) => inspectTarget(sourceUserId, targetUserId),
+    unfollow: (targetUserId) => unfollowTarget(sourceUserId, targetUserId),
+  };
+}
+
 export async function inspectTarget(sourceUserId: string, targetUserId: string): Promise<FreshProfile> {
+  if (apiMode() !== "live") return unknownProfile();
   const credentials = readCredentials(1);
-  if (!credentials) {
-    return { following: null, blue: null, followsBack: null, lastPostAt: null, lastPostKnown: false };
-  }
+  if (!credentials) return unknownProfile();
   try {
     const users = await xGet(credentials, "/2/users", {
       ids: targetUserId,
@@ -57,11 +78,12 @@ export async function inspectTarget(sourceUserId: string, targetUserId: string):
     }
     return profileFromLookup(user, tweets);
   } catch {
-    return { following: null, blue: null, followsBack: null, lastPostAt: null, lastPostKnown: false };
+    return unknownProfile();
   }
 }
 
 export async function unfollowTarget(sourceUserId: string, targetUserId: string): Promise<void> {
+  if (apiMode() !== "live") throw new Error("mock mode does not unfollow");
   const credentials = readCredentials(1);
   if (!credentials) throw new Error("missing account 1 credentials");
   await xDelete(
