@@ -17,5 +17,8 @@ export { UNFOLLOW_WHITELIST, ACCOUNT2_UNFOLLOW_WHITELIST } from "@/lib/automatio
 /** A candidate is inactive only when the newest public post is strictly older than this. */
 export const INACTIVE_AFTER_MS = 48 * 60 * 60 * 1000;
 
+/** Unfollow evidence is trusted for at most 25 hours after observed_at. */
+export const UNFOLLOW_EVIDENCE_MAX_MS = 25 * 60 * 60 * 1000;
+
 /** A reserve row older than one follow cycle cannot be acted on until it is stocked again. */
 export const RESERVE_FRESH_MS = 45 * 60 * 1000;

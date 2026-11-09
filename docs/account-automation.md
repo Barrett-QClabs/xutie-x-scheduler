@@ -27,6 +27,8 @@ X_API_MODE=live
 
 证据持续供给仍是父把免费插件结果 `POST /api/evidence`。程序不搜索、不调用 X 的 GET。信封字段见 `docs/free-evidence.md`。
 
+账号1的取关池由伦敦 00:00 的导入建立。进程之后在每个 `:15` 和 `:45` 槽自己取关，每槽最多 10 人，助手不在线也会继续。证据缺失或过期只跳过，候选保持 `candidate`。取关证据从 `observed_at` 起最长 25 小时。候选和剩余可执行数是 `GET /api/unfollow/candidates?accountId=1`。72 小时只认本账号 `follow_success.succeeded_at`。
+
 平时只回关。新关注要先进入活动储备才会被批次执行；把现有 `kind=new` 且 `status=reserved` 的人清出去用：
 
 ```json

@@ -177,8 +177,8 @@ describe("account 1 unfollow batch", () => {
         calls,
       ),
     });
-    expect(result.results.find((item) => item.targetUserId === "41")?.reason).toBe("not_qualified");
-    expect(result.results.find((item) => item.targetUserId === "44")?.reason).toBe("not_qualified");
+    expect(result.results.find((item) => item.targetUserId === "41")?.reason).toBe("follow_time_unknown");
+    expect(result.results.find((item) => item.targetUserId === "44")?.reason).toBe("follow_time_unknown");
     expect(result.results.find((item) => item.targetUserId === "42")?.result).toBe("success");
     expect(result.results.find((item) => item.targetUserId === "43")?.result).toBe("success");
     expect(calls.sort()).toEqual(["42", "43"]);
@@ -497,21 +497,20 @@ describe("unfollow network gate", () => {
     try {
       enable();
       importUnfollowCandidates(1, { candidates: [{ targetUserId: "555", tier: "non_blue" }] });
-      const response = await submitBatch(new Request("http://local/api/unfollow/batches", {
-        method: "POST",
-        body: JSON.stringify({ accountId: 1 }),
-      }));
-      const body = await response.json();
-      expect(body.submitted).toBe(1);
+      const body = await submitUnfollowBatch({ accountId: 1, now: new Date("2026-11-08T05:20:00.000Z") });
+      expect(body.submitted).toBe(0);
       expect(body.unfollowed).toBe(0);
-      expect(body.results[0]).toMatchObject({ result: "unknown", reason: "following_unconfirmed" });
+      expect(body.results).toEqual([]);
+      const kept = getDb().prepare("SELECT status, reason FROM unfollow_candidates WHERE account_id = 1 AND target_user_id = '555'").get();
+      expect(kept).toEqual({ status: "candidate", reason: "evidence_missing" });
       expect(calls.some((item) => item.startsWith("DELETE"))).toBe(false);
-      const later = await submitUnfollowBatch({ accountId: 1, 
-        now: new Date(Date.now() + 60 * 60 * 1000),
-        hooks: hooks({ "555": confirmed }, []),
+      const later = await submitUnfollowBatch({
+        accountId: 1,
+        now: new Date("2026-11-08T05:50:00.000Z"),
       });
       expect(later.submitted).toBe(0);
       expect(later.unfollowed).toBe(0);
+      expect(getDb().prepare("SELECT status FROM unfollow_candidates WHERE account_id = 1 AND target_user_id = '555'").get()).toEqual({ status: "candidate" });
       expect(calls.some((item) => item.startsWith("DELETE"))).toBe(false);
     } finally {
       globalThis.fetch = original;

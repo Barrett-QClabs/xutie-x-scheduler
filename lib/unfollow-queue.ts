@@ -6,7 +6,7 @@ import { AppError } from "@/lib/errors";
 import { evidenceUnfollowProfile } from "@/lib/evidence";
 import { londonUnfollowSlot } from "@/lib/london";
 import { unfollowTarget } from "@/lib/unfollow-live";
-import { INACTIVE_AFTER_MS, UNFOLLOW_BATCH_LIMIT } from "@/lib/unfollow-policy";
+import { INACTIVE_AFTER_MS, UNFOLLOW_BATCH_LIMIT, UNFOLLOW_EVIDENCE_MAX_MS } from "@/lib/unfollow-policy";
 
 export type UnfollowTier = "non_blue" | "no_followback_72h" | "inactive_48h";
 export type UnfollowOutcome = "success" | "failed" | "skipped" | "unknown";
@@ -49,7 +49,8 @@ export function classifyAction(input: {
   let noFollow: "yes" | "no" | "unknown" = "no";
   const followed = Date.parse(input.followedAt ?? "");
   const followKnown = Boolean(input.followedAt) && !Number.isNaN(followed);
-  if (followKnown && input.now.getTime() - followed >= 72 * HOUR) {
+  if (!followKnown) noFollow = "unknown";
+  else if (input.now.getTime() - followed >= 72 * HOUR) {
     if (input.fresh.followsBack == null) noFollow = "unknown";
     else if (input.fresh.followsBack === false) noFollow = "yes";
   }
@@ -67,7 +68,13 @@ export function classifyAction(input: {
   if (noFollow === "yes") return { proceed: true, result: "success", reason: "no_followback_72h" };
   if (inactive === "yes") return { proceed: true, result: "success", reason: "inactive_48h" };
   if (nonBlue === "unknown") return { proceed: false, result: "unknown", reason: "blue_unconfirmed" };
-  if (noFollow === "unknown") return { proceed: false, result: "unknown", reason: "followback_unconfirmed" };
+  if (noFollow === "unknown") {
+    return {
+      proceed: false,
+      result: "unknown",
+      reason: followKnown ? "followback_unconfirmed" : "follow_time_unknown",
+    };
+  }
   if (inactive === "unknown") return { proceed: false, result: "unknown", reason: "last_post_unconfirmed" };
   return { proceed: false, result: "skipped", reason: "not_qualified" };
 }
@@ -227,6 +234,35 @@ function realTime(value: unknown): string | null {
   return new Date(Date.parse(value)).toISOString();
 }
 
+export type UnfollowEvidenceState = "fresh" | "missing" | "expired";
+
+/** Fresh only while now is inside min(expires_at, observed_at + 25h). Longer claims are clamped. */
+export function unfollowEvidenceState(accountId: AccountId, targetUserId: string, now = new Date()): UnfollowEvidenceState {
+  const rows = getDb()
+    .prepare(
+      `SELECT observed_at, expires_at FROM evidence_subjects
+       WHERE account_id = ? AND source_user_id = ? AND target_user_id = ?`,
+    )
+    .all(accountId, ACCOUNT_USER_ID[accountId], targetUserId) as Array<{ observed_at: string; expires_at: string }>;
+  if (!rows.length) return "missing";
+  const fresh = rows.some((row) => {
+    const observed = Date.parse(row.observed_at);
+    const expires = Date.parse(row.expires_at);
+    if (Number.isNaN(observed) || Number.isNaN(expires)) return false;
+    return Math.min(expires, observed + UNFOLLOW_EVIDENCE_MAX_MS) > now.getTime();
+  });
+  return fresh ? "fresh" : "expired";
+}
+
+function ledgerFollowedAt(accountId: AccountId, targetUserId: string): string | null {
+  const row = one<{ succeeded_at: string }>(
+    "SELECT succeeded_at FROM follow_success WHERE account_id = ? AND target_user_id = ?",
+    accountId,
+    targetUserId,
+  );
+  return realTime(row?.succeeded_at);
+}
+
 export function importUnfollowCandidates(
   accountId: AccountId,
   input: {
@@ -268,7 +304,18 @@ export function importUnfollowCandidates(
       continue;
     }
     const recorded = realTime(raw.firstRecordedAt);
-    const followed = realTime(raw.followedAt);
+    const ledger = ledgerFollowedAt(accountId, id);
+    let followed: string | null;
+    if (raw.followedAt !== undefined && raw.followedAt !== null) {
+      const provided = realTime(raw.followedAt);
+      if (!provided || provided !== ledger) {
+        rejected.push({ targetUserId: id, reason: "followed_at_mismatch" });
+        continue;
+      }
+      followed = provided;
+    } else {
+      followed = ledger;
+    }
     const username = typeof raw.username === "string" ? raw.username.slice(0, 64) : null;
     const found = one<{ status: string }>(
       "SELECT status FROM unfollow_candidates WHERE account_id = ? AND target_user_id = ?",
@@ -290,21 +337,103 @@ export function importUnfollowCandidates(
   return { accepted, reopened, existing, rejected };
 }
 
-function selectBatch(accountId: AccountId): CandidateRow[] {
-  const whitelist = unfollowWhitelist(accountId);
-  const rows = getDb()
+function candidateRows(accountId: AccountId): CandidateRow[] {
+  return getDb()
     .prepare(
       `SELECT target_user_id, username, tier, first_recorded_at, followed_at, status
        FROM unfollow_candidates WHERE account_id = ? AND status = 'candidate'`,
     )
     .all(accountId) as CandidateRow[];
-  return rows
-    .filter((row) => normalizeTier(row.tier) && !whitelist.has(row.target_user_id))
+}
+
+function selectable(accountId: AccountId, row: CandidateRow): boolean {
+  return Boolean(normalizeTier(row.tier)) && !unfollowWhitelist(accountId).has(row.target_user_id);
+}
+
+function selectBatch(accountId: AccountId, now?: Date, evidenceBacked = false): CandidateRow[] {
+  return candidateRows(accountId)
+    .filter((row) => selectable(accountId, row))
+    .filter((row) => !evidenceBacked || !now || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh")
     .sort((left, right) => {
       const rank = TIER_RANK[normalizeTier(left.tier) ?? "inactive_48h"] - TIER_RANK[normalizeTier(right.tier) ?? "inactive_48h"];
       return rank || left.target_user_id.localeCompare(right.target_user_id);
     })
     .slice(0, UNFOLLOW_BATCH_LIMIT);
+}
+
+function noteStaleEvidence(accountId: AccountId, now: Date) {
+  const stamp = now.toISOString();
+  const update = getDb().prepare(
+    `UPDATE unfollow_candidates SET result = 'skipped', reason = ?, updated_at = ?
+     WHERE account_id = ? AND target_user_id = ? AND status = 'candidate'`,
+  );
+  const clear = getDb().prepare(
+    `UPDATE unfollow_candidates SET result = NULL, reason = NULL, updated_at = ?
+     WHERE account_id = ? AND target_user_id = ? AND status = 'candidate' AND reason IN ('evidence_missing', 'evidence_expired')`,
+  );
+  for (const row of candidateRows(accountId)) {
+    if (!selectable(accountId, row)) continue;
+    const state = unfollowEvidenceState(accountId, row.target_user_id, now);
+    if (state === "fresh") clear.run(stamp, accountId, row.target_user_id);
+    else update.run(state === "expired" ? "evidence_expired" : "evidence_missing", stamp, accountId, row.target_user_id);
+  }
+}
+
+export function executableUnfollowCount(accountId: AccountId, now = new Date()): number {
+  return candidateRows(accountId).filter(
+    (row) => selectable(accountId, row) && unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh",
+  ).length;
+}
+
+export function listUnfollowCandidates(
+  accountId: AccountId,
+  input?: { limit?: number; before?: string | null },
+  now = new Date(),
+) {
+  const limit = input?.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new AppError("invalid_limit", "取关候选分页 limit 必须是 1 到 50 的整数。");
+  }
+  const before = input?.before ?? null;
+  if (before !== null && !/^\d+$/.test(before)) {
+    throw new AppError("invalid_cursor", "取关候选 before 必须是数字 id。");
+  }
+  const rows = getDb()
+    .prepare(
+      `SELECT target_user_id, username, tier, first_recorded_at, followed_at, status, result, reason
+       FROM unfollow_candidates
+       WHERE account_id = ? AND status = 'candidate' AND (? IS NULL OR target_user_id < ?)
+       ORDER BY target_user_id DESC
+       LIMIT ?`,
+    )
+    .all(accountId, before, before, limit + 1) as Array<{
+    target_user_id: string;
+    username: string | null;
+    tier: string;
+    first_recorded_at: string | null;
+    followed_at: string | null;
+    status: string;
+    result: string | null;
+    reason: string | null;
+  }>;
+  const page = rows.slice(0, limit);
+  return {
+    accountId,
+    limit,
+    executable: executableUnfollowCount(accountId, now),
+    candidates: page.map((row) => ({
+      targetUserId: row.target_user_id,
+      username: row.username,
+      tier: normalizeTier(row.tier) ?? row.tier,
+      status: row.status,
+      followedAt: row.followed_at,
+      firstRecordedAt: row.first_recorded_at,
+      result: row.result,
+      reason: row.reason,
+      evidence: unfollowEvidenceState(accountId, row.target_user_id, now),
+    })),
+    nextBefore: rows.length > limit ? (page[page.length - 1]?.target_user_id ?? null) : null,
+  };
 }
 
 function emptyResult(accountId: AccountId, slot: string | null, reason: string): UnfollowBatchResult {
@@ -353,7 +482,9 @@ export async function submitUnfollowBatch(input: {
   const running = one<{ slot: string }>("SELECT slot FROM unfollow_batches WHERE account_id = ? AND status = 'running'", accountId);
   if (running) return emptyResult(accountId, slot, "overlap");
 
-  const picked = selectBatch(accountId);
+  const evidenceBacked = !input.hooks;
+  if (evidenceBacked) noteStaleEvidence(accountId, now);
+  const picked = selectBatch(accountId, now, evidenceBacked);
   try {
     db.prepare(
       `INSERT INTO unfollow_batches (account_id, slot, status, submitted, unfollowed, results_json, started_at)

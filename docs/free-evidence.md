@@ -54,10 +54,12 @@
 - 公开帖不排除回复。样本没有命中转帖，所以不把「没看见转帖」说成已经覆盖转帖。
 - 空时间线、不完整页、错误，都不能单独当成 48 小时不活跃。只有 `activity_window_complete`、分页完成、没有 errors、没有 excluded，才可以用「没有更新的帖」作为不活跃。看见一条 48 小时内的帖，则证明仍活跃。
 - `lang` 没返回就是语言未知，新关注因此跳过。未知不是中文，也不是英文。
-- 名单里没有真实关注时间。72 小时只读 `follow_success.succeeded_at`。
+- 取关证据的有效期最长是 `observed_at` 之后 25 小时。`expires_at` 更晚时，取关只认到这 25 小时；过了就当过期。关注储备不使用这 25 小时上限。
+- 取关执行时如果这个人的证据缺失或已经过期，本槽跳过，`status` 保持 `candidate`，`reason` 记 `evidence_missing` 或 `evidence_expired`。这不是不可再打开的 `unknown`。同一天后面的 `:15` / `:45` 槽还会再看。
+- 72 小时未回关只认同一 `accountId` 的 `follow_success.succeeded_at`。导入没传 `followedAt` 时用这个时间。传了就必须和账本一致，否则该人被拒绝。没有账本时不抄 `firstRecordedAt`，72 小时这条保持 `follow_time_unknown`，不会取关。
 - 粉丝数、flb、最近发帖只改变储备排序，不构成拒绝。
 
-缺任何硬条件就 skip 或 unknown，不调用用户 GET 去补。unknown 和 failed 不会在下一批自动重试。
+缺任何硬条件就 skip 或 unknown，不调用用户 GET 去补。证据缺失或过期的取关候选保持 `candidate`，下个取关槽可以再试。其他 unknown 和 failed 不会在下一批自动重试。
 
 ## 身份
 
