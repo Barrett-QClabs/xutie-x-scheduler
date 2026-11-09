@@ -183,6 +183,220 @@ export function setFollowPaused(accountId: AccountId, paused: boolean, reason: s
   return { ok: true as const, accountId, paused };
 }
 
+type ReserveStored = {
+  target_user_id: string;
+  username: string | null;
+  kind: string;
+  status: string;
+  checked_at: string;
+  followers_count: number | null;
+  last_post_at: string | null;
+  prefer_flb: number | null;
+  result: string | null;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ParkedReserve = {
+  targetUserId: string;
+  kind: FollowKind;
+  checkedAt: string;
+  priorStatus: string | null;
+  priorReason: string | null;
+  parkedReason: string;
+  evidenceReason: string;
+  terminal: boolean;
+};
+
+const FORGED_REASONS = new Set(["spam", "not_blue", "nonblue", "non_blue", "not_english", "not_chinese", "not_follower", "already_following"]);
+
+function reserveKind(value: string): FollowKind {
+  return value === "followback" ? "followback" : "new";
+}
+
+function evidenceGate(accountId: AccountId, row: { target_user_id: string; kind: string; checked_at: string }, now: Date): { executable: boolean; evidenceReason: string } {
+  const kind = reserveKind(row.kind);
+  const decision = classifyFollow({
+    accountId,
+    kind,
+    profile: evidenceFollowProfile(accountId, row.target_user_id, now),
+    now,
+  });
+  const evidenceReason = decision.proceed ? "qualified" : decision.reason;
+  const checked = Date.parse(row.checked_at);
+  const fresh = !Number.isNaN(checked) && checked >= now.getTime() - RESERVE_FRESH_MS && checked <= now.getTime() + 5 * 60 * 1000;
+  if (!fresh || !decision.proceed) return { executable: false, evidenceReason };
+  return { executable: true, evidenceReason };
+}
+
+function terminalAudit(accountId: AccountId, targetUserId: string): boolean {
+  return Boolean(one(
+    "SELECT 1 AS ok FROM follow_reserve_audit WHERE account_id = ? AND target_user_id = ? AND terminal = 1",
+    accountId,
+    targetUserId,
+  ));
+}
+
+function parkedBefore(accountId: AccountId, targetUserId: string): boolean {
+  return Boolean(one(
+    "SELECT 1 AS ok FROM follow_reserve_audit WHERE account_id = ? AND target_user_id = ?",
+    accountId,
+    targetUserId,
+  ));
+}
+
+function parkReserve(accountId: AccountId, row: ReserveStored, parkedReason: string, evidenceReason: string, now: Date): ParkedReserve {
+  const parkedAt = now.toISOString();
+  const kind = reserveKind(row.kind);
+  getDb().prepare(
+    `INSERT OR IGNORE INTO follow_reserve_audit
+      (account_id, target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb, prior_status, prior_result, prior_reason, parked_reason, evidence_reason, terminal, parked_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+  ).run(
+    accountId,
+    row.target_user_id,
+    row.username,
+    kind,
+    row.checked_at,
+    row.followers_count,
+    row.last_post_at,
+    row.prefer_flb,
+    row.status,
+    row.result,
+    row.reason,
+    parkedReason,
+    evidenceReason,
+    parkedAt,
+    row.created_at,
+    row.updated_at,
+  );
+  getDb().prepare("DELETE FROM follow_reserve WHERE account_id = ? AND target_user_id = ?").run(accountId, row.target_user_id);
+  return {
+    targetUserId: row.target_user_id,
+    kind,
+    checkedAt: row.checked_at,
+    priorStatus: row.status,
+    priorReason: row.reason,
+    parkedReason,
+    evidenceReason,
+    terminal: false,
+  };
+}
+
+function parsePruneFilter(input: { kinds?: unknown; statuses?: unknown; reason?: unknown }): { kinds: FollowKind[] | null; statuses: string[]; reason: string } {
+  const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+  if (!reason || reason.length > 80) throw new AppError("invalid_reason", "清理原因必须是 1 到 80 个字符。");
+  if (FORGED_REASONS.has(reason.toLowerCase())) {
+    throw new AppError("forged_reason", "清理原因不能写成 spam 或非蓝 V 这类未核验结论。");
+  }
+  let kinds: FollowKind[] | null = null;
+  if (input.kinds !== undefined) {
+    if (!Array.isArray(input.kinds) || input.kinds.length < 1 || input.kinds.length > 2) {
+      throw new AppError("invalid_kind", "kinds 只能是 followback、new，或两者。");
+    }
+    kinds = [];
+    for (const item of input.kinds) {
+      if (item !== "followback" && item !== "new") throw new AppError("invalid_kind", "kinds 只能是 followback 或 new。");
+      if (!kinds.includes(item)) kinds.push(item);
+    }
+  }
+  const rawStatuses = input.statuses === undefined ? ["reserved"] : input.statuses;
+  if (!Array.isArray(rawStatuses) || rawStatuses.length !== 1 || rawStatuses[0] !== "reserved") {
+    throw new AppError("invalid_status", "statuses 只能是 reserved。成功、失败和 unknown 不从审计里移走。");
+  }
+  return { kinds, statuses: ["reserved"], reason };
+}
+
+/** Move matching reserved rows out of the active pool. Does not touch follow_success or terminal results. */
+export function pruneActiveReserve(
+  accountId: AccountId,
+  input: { kinds?: unknown; statuses?: unknown; reason?: unknown } = {},
+  now = new Date(),
+) {
+  const filter = parsePruneFilter(input);
+  const rows = getDb().prepare(
+    `SELECT target_user_id, username, kind, status, checked_at, followers_count, last_post_at, prefer_flb, result, reason, created_at, updated_at
+     FROM follow_reserve WHERE account_id = ? AND status = 'reserved'`,
+  ).all(accountId) as ReserveStored[];
+  const parked: ParkedReserve[] = [];
+  for (const row of rows) {
+    if (filter.kinds && !filter.kinds.includes(reserveKind(row.kind))) continue;
+    const gate = evidenceGate(accountId, row, now);
+    const selected = filter.kinds !== null || !gate.executable;
+    if (!selected) continue;
+    parked.push(parkReserve(accountId, row, filter.reason, gate.evidenceReason, now));
+  }
+  const view = reserveView(accountId, now);
+  return {
+    ok: true as const,
+    accountId,
+    applied: true as const,
+    kinds: filter.kinds,
+    statuses: filter.statuses,
+    reason: filter.reason,
+    parked,
+    active: view.available,
+    followbackAvailable: view.followbackAvailable,
+    newAvailable: view.newAvailable,
+  };
+}
+
+export function listReserveAudit(accountId: AccountId, input?: { limit?: number; before?: string | null }) {
+  const limit = input?.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new AppError("invalid_limit", "审计分页 limit 必须是 1 到 50 的整数。");
+  }
+  const before = input?.before ?? null;
+  const rows = getDb().prepare(
+    `SELECT target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb, prior_status, prior_result, prior_reason, parked_reason, evidence_reason, terminal, parked_at, created_at, updated_at
+     FROM follow_reserve_audit
+     WHERE account_id = ? AND (? IS NULL OR parked_at < ?)
+     ORDER BY parked_at DESC, target_user_id DESC
+     LIMIT ?`,
+  ).all(accountId, before, before, limit + 1) as Array<{
+    target_user_id: string;
+    username: string | null;
+    kind: string;
+    checked_at: string;
+    followers_count: number | null;
+    last_post_at: string | null;
+    prefer_flb: number | null;
+    prior_status: string | null;
+    prior_result: string | null;
+    prior_reason: string | null;
+    parked_reason: string;
+    evidence_reason: string | null;
+    terminal: number;
+    parked_at: string;
+    created_at: string;
+    updated_at: string | null;
+  }>;
+  const page = rows.slice(0, limit);
+  return {
+    accountId,
+    entries: page.map((row) => ({
+      targetUserId: row.target_user_id,
+      username: row.username,
+      kind: row.kind,
+      checkedAt: row.checked_at,
+      followersCount: row.followers_count,
+      lastPostAt: row.last_post_at,
+      preferFlb: row.prefer_flb === 1,
+      priorStatus: row.prior_status,
+      priorResult: row.prior_result,
+      priorReason: row.prior_reason,
+      parkedReason: row.parked_reason,
+      evidenceReason: row.evidence_reason,
+      terminal: row.terminal === 1,
+      parkedAt: row.parked_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })),
+    nextBefore: rows.length > limit ? (page[page.length - 1]?.parked_at ?? null) : null,
+  };
+}
+
 export function stockFollowReserve(
   accountId: AccountId,
   input: {
@@ -197,6 +411,7 @@ export function stockFollowReserve(
       flb?: unknown;
     }>;
   },
+  now = new Date(),
 ): { accepted: string[]; refreshed: string[]; existing: string[]; rejected: Array<{ targetUserId: string; reason: string }> } {
   const fallback = realTime(input.checkedAt);
   if (input.checkedAt !== undefined && !fallback) {
@@ -206,7 +421,7 @@ export function stockFollowReserve(
   const refreshed: string[] = [];
   const existing: string[] = [];
   const rejected: Array<{ targetUserId: string; reason: string }> = [];
-  const now = new Date().toISOString();
+  const stamp = now.toISOString();
   const insert = getDb().prepare(
     `INSERT INTO follow_reserve
       (account_id, target_user_id, username, kind, status, checked_at, followers_count, last_post_at, prefer_flb, created_at, updated_at)
@@ -236,12 +451,20 @@ export function stockFollowReserve(
       rejected.push({ targetUserId: id, reason: "checked_at_required" });
       continue;
     }
-    if (Date.parse(checked) > Date.now() + 5 * 60 * 1000) {
+    if (Date.parse(checked) > now.getTime() + 5 * 60 * 1000) {
       rejected.push({ targetUserId: id, reason: "checked_at_in_future" });
       continue;
     }
+    const username = typeof raw.username === "string" ? raw.username.slice(0, 64) : null;
+    const followers = typeof raw.followersCount === "number" && Number.isFinite(raw.followersCount) ? Math.trunc(raw.followersCount) : null;
+    const lastPostAt = realTime(raw.lastPostAt);
+    const flb = raw.flb === true ? 1 : 0;
     if (one("SELECT 1 AS ok FROM follow_success WHERE account_id = ? AND target_user_id = ?", accountId, id)) {
       rejected.push({ targetUserId: id, reason: "already_followed" });
+      continue;
+    }
+    if (terminalAudit(accountId, id)) {
+      existing.push(id);
       continue;
     }
     const found = one<{ status: string }>(
@@ -249,20 +472,24 @@ export function stockFollowReserve(
       accountId,
       id,
     );
-    const username = typeof raw.username === "string" ? raw.username.slice(0, 64) : null;
-    const followers = typeof raw.followersCount === "number" && Number.isFinite(raw.followersCount) ? Math.trunc(raw.followersCount) : null;
-    const lastPostAt = realTime(raw.lastPostAt);
-    const flb = raw.flb === true ? 1 : 0;
     if (found && NO_RETRY.has(found.status)) {
       existing.push(id);
       continue;
     }
+    if (!found && parkedBefore(accountId, id)) {
+      const gate = evidenceGate(accountId, { target_user_id: id, kind, checked_at: checked }, now);
+      const fresh = Date.parse(checked) >= now.getTime() - RESERVE_FRESH_MS;
+      if (!gate.executable) {
+        rejected.push({ targetUserId: id, reason: fresh ? gate.evidenceReason : "stale" });
+        continue;
+      }
+    }
     if (found) {
-      refresh.run(username, kind, checked, followers, lastPostAt, flb, now, accountId, id);
+      refresh.run(username, kind, checked, followers, lastPostAt, flb, stamp, accountId, id);
       refreshed.push(id);
       continue;
     }
-    insert.run(accountId, id, username, kind, checked, followers, lastPostAt, flb, now, now);
+    insert.run(accountId, id, username, kind, checked, followers, lastPostAt, flb, stamp, stamp);
     accepted.push(id);
   }
   return { accepted, refreshed, existing, rejected };
@@ -274,6 +501,7 @@ export function listFollowReserve(accountId: AccountId, input?: { limit?: number
     throw new AppError("invalid_limit", "名单分页 limit 必须是 1 到 50 的整数。");
   }
   const before = input?.before ?? null;
+  const reserve = reserveView(accountId, now);
   const rows = getDb()
     .prepare(
       `SELECT target_user_id, username, kind, status, checked_at, updated_at, result, reason
@@ -297,7 +525,7 @@ export function listFollowReserve(accountId: AccountId, input?: { limit?: number
   return {
     accountId,
     audience: audienceFor(accountId),
-    reserve: reserveView(accountId, now),
+    reserve,
     candidates: page.map((row) => ({
       targetUserId: row.target_user_id,
       username: row.username,

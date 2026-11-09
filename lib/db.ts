@@ -321,6 +321,26 @@ function ensureAutomationTables(db: DatabaseSync): void {
       london_day TEXT NOT NULL,
       PRIMARY KEY (account_id, target_user_id)
     );
+    CREATE TABLE IF NOT EXISTS follow_reserve_audit (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      target_user_id TEXT NOT NULL,
+      username TEXT,
+      kind TEXT NOT NULL,
+      checked_at TEXT NOT NULL,
+      followers_count INTEGER,
+      last_post_at TEXT,
+      prefer_flb INTEGER,
+      prior_status TEXT,
+      prior_result TEXT,
+      prior_reason TEXT,
+      parked_reason TEXT NOT NULL,
+      evidence_reason TEXT,
+      terminal INTEGER NOT NULL DEFAULT 0,
+      parked_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT,
+      PRIMARY KEY (account_id, target_user_id, parked_at)
+    );
   `);
   ensureColumn(db, "evidence_subjects", "actual_source_namespace", "ALTER TABLE evidence_subjects ADD COLUMN actual_source_namespace TEXT");
   ensureColumn(db, "evidence_subjects", "normalized_source", "ALTER TABLE evidence_subjects ADD COLUMN normalized_source TEXT");
@@ -752,6 +772,7 @@ export function resetAllData(): void {
     DELETE FROM unfollow_candidates;
     DELETE FROM unfollow_batches;
     DELETE FROM follow_reserve;
+    DELETE FROM follow_reserve_audit;
     DELETE FROM follow_batches;
     DELETE FROM follow_success;
     DELETE FROM evidence_subjects;

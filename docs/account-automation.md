@@ -26,3 +26,11 @@ X_API_MODE=live
 进程每 20 秒调用一次内部调度。两号用同一伦敦钟：从 00:00 起每 30 分钟一轮，前 15 分钟最多关注 10 人，后 15 分钟休息。工作槽是 `HH:00` 和 `HH:30`。`HH:15` 和 `HH:45` 是休息，不是关注槽。取关仍是 `HH:15` 和 `HH:45`，每槽最多 10 人。同一槽已完成就回放，不重复写。进程整段窗口不在线时不补跑。已部署的 `f4c713d` 仍是 45 分钟一轮。`GET /api/follow/config` 没有周期字段，`PUT` 只接受 `accountId` 和 `keywords`，所以 30 分钟要换容器后才生效。换容器时沿用原数据卷和 `credentials.key`，不要运行 `install.sh`，不要改待发帖。换完后，伦敦每小时的 15–29 分和 45–59 分，`GET /api/follow?accountId=1` 与 `2` 的 `schedule` 应为 `rest`；00–14 分和 30–44 分应为 `work`。
 
 证据持续供给仍是父把免费插件结果 `POST /api/evidence`。程序不搜索、不调用 X 的 GET。信封字段见 `docs/free-evidence.md`。
+
+平时只回关。新关注要先进入活动储备才会被批次执行；把现有 `kind=new` 且 `status=reserved` 的人清出去用：
+
+```json
+{ "accountId": 2, "kinds": ["new"], "statuses": ["reserved"], "reason": "hold_new" }
+```
+
+`POST /api/follow/reserve/prune` 只处理正文里的 `accountId`。匹配的 reserved 行从活动储备删掉，原字段、`checkedAt`、`createdAt`、`updatedAt` 和原先的 result/reason 写入 `follow_reserve_audit`。`follow_success`、失败和 unknown 行不改。`kinds` 省略时，只移走过期、关系未知或其他当前不能执行的 reserved；写了 `kinds:["new"]` 时，该号全部 reserved new 都移走，回关行留下。`reason` 不能写成 `spam` 或 `not_blue`。审计是 `GET /api/follow/reserve/audit?accountId=2&limit=50`。之后用新鲜且证据合格的 `POST /api/follow/reserve` 可以重新入库；成功、失败和 unknown 不会因此变回可执行。读接口不会自己清理。`13f378e` 还没有这个接口。
