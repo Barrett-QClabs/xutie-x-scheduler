@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useAppState } from "@/components/app-state";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
@@ -18,14 +19,15 @@ const NA = "unavailable";
 const num = (v: number | null | undefined) => (v === null || v === undefined ? NA : v.toLocaleString());
 
 export function StatsPanel({ zh }: { zh: boolean }) {
+  const { accountId } = useAppState();
   const [s, setS] = useState<Stats | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const load = useCallback(async (refresh = false) => {
     setBusy(true);
-    try { setS(await api<Stats>(`/api/stats/daily?days=7${refresh ? "&refresh=1" : ""}`)); setErr(null); }
+    try { setS(await api<Stats>(`/api/stats/daily?accountId=${accountId}&days=7${refresh ? "&refresh=1" : ""}`)); setErr(null); }
     catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
-  }, []);
+  }, [accountId]);
   // Auto-refresh every 30 min while the tab is visible (the server caches X reads anyway).
   useEffect(() => { load(); const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 30 * 60_000); return () => clearInterval(id); }, [load]);
 

@@ -17,6 +17,7 @@ function client(postTweet: XClient["postTweet"]): XClient {
 
 function queueDue(source: string, startAt = new Date(Date.now() - 60_000).toISOString()) {
   return importTweets({
+      accountId: 1,
     source,
     format: "text",
     startAt,
@@ -30,6 +31,7 @@ describe("credentials stay on the server", () => {
       new Request("http://local/api/credentials", {
         method: "PUT",
         body: JSON.stringify({
+          accountId: 1,
           apiKey: "abc12345",
           apiSecret: secret,
           accessToken: "token-value",
@@ -47,14 +49,14 @@ describe("credentials stay on the server", () => {
     expect(row?.ciphertext).not.toContain(secret);
     expect(decryptString(row!.ciphertext)).toContain(secret);
 
-    const stateResponse = await getStateRoute();
+    const stateResponse = await getStateRoute(new Request("http://local/api/state?accountId=1"));
     const body = await stateResponse.json();
     expect(body.credentialsConfigured).toBe(true);
     expect(body.account).toBeNull();
     expect(JSON.stringify(body)).not.toContain(secret);
     expect(JSON.stringify(body)).not.toContain("token-secret-value");
 
-    const cleared = await deleteCredentials();
+    const cleared = await deleteCredentials(new Request("http://local/api/credentials?accountId=1", { method: "DELETE" }));
     expect(cleared.status).toBe(200);
     expect(getPublicState().credentialsConfigured).toBe(false);
   });
@@ -74,7 +76,7 @@ describe("import, queue, and mocked posting", () => {
   const originalFetch = global.fetch;
 
   it("queues valid posts, skips over-limit text, and posts only the due one", async () => {
-    saveCredentials({
+    saveCredentials(1, {
       apiKey: "abc12345",
       apiSecret: secret,
       accessToken: "token-value",
@@ -166,7 +168,7 @@ describe("import, queue, and mocked posting", () => {
         throw new Error("should not be called while paused");
       }),
     });
-    resumeQueue();
+    resumeQueue(1);
     const resumed = await tick({
       client: client(async () => ({ id: "resumed-id" })),
     });
@@ -182,7 +184,7 @@ describe("import, queue, and mocked posting", () => {
     const failed = getPublicState().tweets.find((tweet) => tweet.text === "重复这条");
     expect(failed?.status).toBe("failed");
     expect(getPublicState().queue.paused).toBe(false);
-    retryTweet(failed!.id, new Date());
+    retryTweet(1, failed!.id, new Date());
     const retried = await tick({ client: client(async () => ({ id: "retried" })) });
     expect(retried).toMatchObject({ action: "posted", tweetId: "retried" });
   });
@@ -190,6 +192,7 @@ describe("import, queue, and mocked posting", () => {
   it("on duplicate content, moves the next pending tweet to that slot", async () => {
     const slot = new Date();
     importTweets({
+      accountId: 1,
       source: "重复这条\n补位这条",
       format: "text",
       startAt: new Date(slot.getTime() - 60_000).toISOString(),
@@ -234,17 +237,17 @@ describe("import, queue, and mocked posting", () => {
   it("edits, reorders, deletes, and pauses the queue", async () => {
     const imported = queueDue("甲\n乙\n丙", new Date(Date.now() + 60 * 60_000).toISOString());
     const [first, second] = imported.queued;
-    reorderTweet(first.id, "down");
+    reorderTweet(1, first.id, "down");
     const reordered = getPublicState().tweets;
     expect(reordered.find((tweet) => tweet.id === first.id)?.scheduledAt).toBe(second.scheduledAt);
     expect(reordered.find((tweet) => tweet.id === second.id)?.scheduledAt).toBe(first.scheduledAt);
 
-    updateTweetText(first.id, "甲改过了");
+    updateTweetText(1, first.id, "甲改过了");
     expect(getPublicState().tweets.find((tweet) => tweet.id === first.id)?.text).toBe("甲改过了");
-    expect(updateTweetText(first.id, "中".repeat(150)).isLong).toBe(true);
-    expect(() => updateTweetText(first.id, "中".repeat(12_501))).toThrow(/25000/);
+    expect(updateTweetText(1, first.id, "中".repeat(150)).isLong).toBe(true);
+    expect(() => updateTweetText(1, first.id, "中".repeat(12_501))).toThrow(/25000/);
 
-    pauseQueue();
+    pauseQueue(1);
     const paused = await tick({
       now: new Date(Date.now() + 3 * 60 * 60_000),
       client: client(async () => {
@@ -255,7 +258,7 @@ describe("import, queue, and mocked posting", () => {
 
     const removed = imported.queued[2];
     const { DELETE } = await import("@/app/api/tweets/[id]/route");
-    const response = await DELETE(new Request("http://local"), { params: Promise.resolve({ id: removed.id }) });
+    const response = await DELETE(new Request("http://local/api/tweets/x?accountId=1"), { params: Promise.resolve({ id: removed.id }) });
     expect(response.status).toBe(200);
     expect(getPublicState().tweets.some((tweet) => tweet.id === removed.id)).toBe(false);
   });
@@ -263,7 +266,7 @@ describe("import, queue, and mocked posting", () => {
 
 describe("long posts", () => {
   it("queues posts over 280 with a warning, allows ~10,000-char posts, and fails a rejected one alone", async () => {
-    saveCredentials({
+    saveCredentials(1, {
       apiKey: "abc12345",
       apiSecret: secret,
       accessToken: "token-value",
@@ -313,9 +316,13 @@ describe("live X client", () => {
     const x = createLiveXClient(credentials);
     const original = global.fetch;
 
-    global.fetch = async () =>
-      new Response(JSON.stringify({ data: { id: "99", name: "Ada", username: "ada" } }), { status: 200 });
-    await expect(x.verify()).resolves.toMatchObject({ username: "ada", id: "99" });
+    let reads = 0;
+    global.fetch = async () => {
+      reads += 1;
+      return new Response(JSON.stringify({ data: { id: "99", name: "Ada", username: "ada" } }), { status: 200 });
+    };
+    await expect(x.verify()).rejects.toThrow(/读额度已关闭/);
+    expect(reads).toBe(0);
 
     global.fetch = async (_url, init) => {
       const header = new Headers(init?.headers).get("authorization") ?? "";

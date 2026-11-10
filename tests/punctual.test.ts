@@ -9,11 +9,13 @@ const user = { id: "42", username: "demo", name: "Demo" };
 /** Simulate the real 5 s tick loop against a fake X account and record actual post times. */
 describe("punctual posting (5 s tick simulation)", () => {
   it("posts at scheduledAt, shifts once after a manual post, and never posts closer than the interval", async () => {
-    saveCredentials({ apiKey: "abc12345", apiSecret: "s3cret-value", accessToken: "tok-value", accessTokenSecret: "toksecret" });
-    updateAccount({ username: user.username, displayName: user.name, userId: user.id });
+    saveCredentials(1, { apiKey: "abc12345", apiSecret: "s3cret-value", accessToken: "tok-value", accessTokenSecret: "toksecret" });
+    updateAccount(1, { username: user.username, displayName: user.name, userId: user.id });
     const start = new Date(Date.now() + 60_000);
-    importTweets({ source: "一\n二\n三\n四\n五", format: "text", startAt: start.toISOString(), intervalMinutes: 17 });
-    updateScheduleSettings({ intervalMinutes: 17, randomMinSeconds: 0, randomMaxSeconds: 180, reschedule: true, startAt: start.toISOString() });
+    importTweets({
+      accountId: 1, source: "一\n二\n三\n四\n五", format: "text", startAt: start.toISOString(), intervalMinutes: 17 });
+    updateScheduleSettings({
+      accountId: 1, intervalMinutes: 17, randomMinSeconds: 0, randomMaxSeconds: 180, reschedule: true, startAt: start.toISOString() });
 
     const timeline: { id: string; at: number }[] = [];
     let seq = 0;
@@ -62,11 +64,13 @@ describe("punctual posting (5 s tick simulation)", () => {
 
 describe("dynamic re-anchoring to manual posts", () => {
   it("re-anchors the queue once per manual post and cascades 17–20 min gaps", async () => {
-    saveCredentials({ apiKey: "abc12345", apiSecret: "s3cret-value", accessToken: "tok-value", accessTokenSecret: "toksecret" });
-    updateAccount({ username: user.username, displayName: user.name, userId: user.id });
+    saveCredentials(1, { apiKey: "abc12345", apiSecret: "s3cret-value", accessToken: "tok-value", accessTokenSecret: "toksecret" });
+    updateAccount(1, { username: user.username, displayName: user.name, userId: user.id });
     const start = new Date(Date.now() + 60_000);
-    importTweets({ source: "一\n二\n三\n四\n五\n六", format: "text", startAt: start.toISOString(), intervalMinutes: 17 });
-    updateScheduleSettings({ intervalMinutes: 17, randomMinSeconds: 0, randomMaxSeconds: 180, reschedule: true, startAt: start.toISOString() });
+    importTweets({
+      accountId: 1, source: "一\n二\n三\n四\n五\n六", format: "text", startAt: start.toISOString(), intervalMinutes: 17 });
+    updateScheduleSettings({
+      accountId: 1, intervalMinutes: 17, randomMinSeconds: 0, randomMaxSeconds: 180, reschedule: true, startAt: start.toISOString() });
 
     const timeline: { id: string; at: number }[] = [];
     let seq = 0;

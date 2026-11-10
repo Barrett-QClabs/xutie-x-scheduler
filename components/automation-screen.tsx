@@ -8,10 +8,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { StatsPanel } from "@/components/stats-panel";
+import { useAppState } from "@/components/app-state";
 
 type Entry = { time?: string; username?: string; result?: string; pending?: boolean; detail?: string | null; keyword?: string | null; followers?: number | null };
 type DaemonStatus = { state?: string; resumeAt?: string; why?: string; reason?: string; targetsRemaining?: number; updated?: string; error?: string };
 type Status = {
+  supervisor?: "on" | "off";
   day: string;
   config: { unfollow: { enabled: boolean }; followback: { enabled: boolean }; keywordfollow: { enabled: boolean; keywords: string[]; poolSize: number; maxFollowers: number }; combinedFollowDailyCap: number };
   caps: { combinedFollows: number; unfollows: number; unfollowPerRun: number; followWindow15m: number };
@@ -37,6 +39,7 @@ const L = {
     turnOn: "开启", turnOff: "关闭", keywords: "关键词（逗号分隔）", save: "保存关键词", pool: "今日候选池",
     remaining: "剩余", recent: "最近记录", rules: "规则", stopDay: "今日已停止关注", resume: "恢复于", refresh: "刷新",
     hourly: "每小时运行一次", pid: "进程",
+    supervisorOff: "关注自动化默认关闭。启动按钮不可用。只有在进程环境里把 XUTIE_AUTOMATION_SUPERVISOR 设为 on 并重启后，才会启动关注或取关进程。",
   },
   en: {
     title: "Auto follow / unfollow", sub: "Today's status of unfollow, follow-back and keyword follow (Asia/Shanghai day).",
@@ -45,6 +48,7 @@ const L = {
     turnOn: "Turn on", turnOff: "Turn off", keywords: "Keywords (comma separated)", save: "Save keywords", pool: "Today's candidate pool",
     remaining: "remaining", recent: "Recent", rules: "Rules", stopDay: "Follows stopped for today", resume: "resumes", refresh: "Refresh",
     hourly: "runs hourly", pid: "pid",
+    supervisorOff: "Follow automation is off by default, so Start is unavailable. Set XUTIE_AUTOMATION_SUPERVISOR=on and restart before any follow or unfollow process can start.",
   },
 };
 
@@ -52,20 +56,35 @@ const fmt = (iso?: string) => (iso ? new Date(iso).toLocaleTimeString("zh-CN", {
 
 export function AutomationScreen() {
   const { locale } = useI18n();
+  const { accountId } = useAppState();
   const t = L[locale];
   const [s, setS] = useState<Status | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [kw, setKw] = useState("");
+  const [accountNote, setAccountNote] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const data = await api<Status>("/api/automation");
       setS(data); setErr(null);
-      setKw((cur) => (cur ? cur : data.config.keywordfollow.keywords.join(", ")));
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   }, []);
   useEffect(() => { load(); const id = setInterval(load, 20_000); return () => clearInterval(id); }, [load]);
+  useEffect(() => {
+    let cancel = false;
+    setKw("");
+    void api<{ keywords: string[]; running: boolean; reserve: { gap: number; constraint: string | null }; dailyCap: number; savesDoNotStart: boolean }>(`/api/follow/config?accountId=${accountId}`)
+      .then((config) => {
+        if (cancel) return;
+        setKw(config.keywords.join(", "));
+        setAccountNote(locale === "zh"
+          ? `账号${accountId} 单独配置。保存不会开始运行。运行中：${config.running ? "是" : "否"}。伦敦每日关注加回关上限 ${config.dailyCap}。证据或候选缺口 ${config.reserve.gap}${config.reserve.constraint ? `（${config.reserve.constraint}）` : ""}。`
+          : `Account ${accountId} has its own keywords. Saving does not start a run. Running: ${config.running ? "yes" : "no"}. London daily follow cap ${config.dailyCap}. Evidence or candidate gap ${config.reserve.gap}${config.reserve.constraint ? ` (${config.reserve.constraint})` : ""}.`);
+      })
+      .catch((error) => { if (!cancel) setErr(error instanceof Error ? error.message : String(error)); });
+    return () => { cancel = true; };
+  }, [accountId, locale]);
 
   async function patch(body: object) {
     setBusy(true);
@@ -79,6 +98,7 @@ export function AutomationScreen() {
   }
 
   if (!s) return <p className="text-sm text-muted-foreground">{err ?? "…"}</p>;
+  const supervisorOn = s.supervisor === "on";
   const tiles = [
     { label: t.unfollowed, value: `${s.counts.unfollowed} / ${s.caps.unfollows}` },
     { label: t.followedBack, value: String(s.counts.followedBack) },
@@ -113,7 +133,7 @@ export function AutomationScreen() {
           {"lastLines" in d && d.lastLines.length > 0 && <p className="truncate text-xs text-muted-foreground">{d.lastLines[d.lastLines.length - 1]}</p>}
           <div className="flex gap-2 pt-1">
             <Button size="sm" variant="outline" disabled={busy} onClick={() => patch({ [key]: { enabled: !enabled } })}>{enabled ? t.turnOff : t.turnOn}</Button>
-            {key !== "unfollow" && enabled && !d.running && <Button size="sm" disabled={busy} onClick={() => start(key)}>{t.start}</Button>}
+            {supervisorOn && key !== "unfollow" && enabled && !d.running && <Button size="sm" disabled={busy} onClick={() => start(key)}>{t.start}</Button>}
           </div>
         </CardContent>
       </Card>
@@ -147,6 +167,9 @@ export function AutomationScreen() {
         <Button size="sm" variant="outline" onClick={load}>{t.refresh}</Button>
       </div>
       {err && <p className="text-sm text-destructive">{err}</p>}
+      {!supervisorOn && <p className="rounded-lg bg-secondary px-3 py-2 text-sm leading-6">{t.supervisorOff}</p>}
+      <p className="rounded-lg border px-3 py-2 text-sm leading-6">{locale === "zh" ? "下面三张旧卡片和旧关键词是全局共享的，不随账号切换分开。旧 supervisor 保持关闭，这里不能启动固定账号1脚本。" : "The three legacy cards and the old keyword file are one shared config. They do not change with the account switch, and the legacy supervisor stays off."}</p>
+      {accountNote && <p className="rounded-lg bg-secondary px-3 py-2 text-sm leading-6">{accountNote}</p>}
       {s.stopForToday && <p className="rounded-lg border border-destructive p-3 text-sm text-destructive">{t.stopDay}: {s.stopForToday.reason} ({s.stopForToday.by})</p>}
       <StatsPanel zh={locale === "zh"} />
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
@@ -177,7 +200,14 @@ export function AutomationScreen() {
           <label className="text-sm">{t.keywords}</label>
           <div className="flex gap-2">
             <Input value={kw} onChange={(e) => setKw(e.target.value)} />
-            <Button disabled={busy} onClick={() => patch({ keywordfollow: { keywords: kw.split(/[,，]/).map((k) => k.trim()).filter(Boolean) } })}>{t.save}</Button>
+            <Button disabled={busy} onClick={async () => {
+              setBusy(true);
+              try {
+                await api("/api/follow/config", { method: "PUT", body: JSON.stringify({ accountId, keywords: kw.split(/[,，]/).map((item) => item.trim()).filter(Boolean) }) });
+                setAccountNote(locale === "zh" ? `已保存账号${accountId}的关键词。这只是配置，没有开始运行。` : `Saved account ${accountId} keywords. This is configuration only and does not start a run.`);
+              } catch (error) { setErr(error instanceof Error ? error.message : String(error)); }
+              finally { setBusy(false); }
+            }}>{t.save}</Button>
           </div>
           {s.pool && (
             <div className="text-sm">

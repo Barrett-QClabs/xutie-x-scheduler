@@ -1,3 +1,4 @@
+import { accountIdFrom } from "@/lib/account";
 import { asNumber, handle, optionalNumber, readJson } from "@/lib/http";
 import { updateScheduleSettings } from "@/lib/service";
 
@@ -8,6 +9,7 @@ export async function PUT(request: Request) {
   return handle(async () => {
     const body = await readJson(request);
     return updateScheduleSettings({
+      accountId: accountIdFrom(request, body),
       intervalMinutes: asNumber(body.intervalMinutes),
       // Legacy `jitterMinutes` is ignored; omitted values fall back to the saved (or default) range.
       randomMinSeconds: optionalNumber(body.randomMinSeconds),

@@ -7,15 +7,16 @@ import { classifyStatus, XApiError, type XClient } from "@/lib/x-client";
 const user = { id: "42", username: "demo", name: "Demo" };
 
 function connect() {
-  saveCredentials({ apiKey: "abc12345", apiSecret: "s3cret-value", accessToken: "tok-value", accessTokenSecret: "toksecret" });
-  updateAccount({ username: user.username, displayName: user.name, userId: user.id });
+  saveCredentials(1, { apiKey: "abc12345", apiSecret: "s3cret-value", accessToken: "tok-value", accessTokenSecret: "toksecret" });
+  updateAccount(1, { username: user.username, displayName: user.name, userId: user.id });
 }
 
 describe("X reads only when due", () => {
   it("does not read the timeline while the next post is still in the future", async () => {
     connect();
     const now = new Date();
-    importTweets({ source: "一\n二", format: "text", startAt: new Date(now.getTime() + 5 * 60_000).toISOString(), intervalMinutes: 30 });
+    importTweets({
+      accountId: 1, source: "一\n二", format: "text", startAt: new Date(now.getTime() + 5 * 60_000).toISOString(), intervalMinutes: 30 });
     let reads = 0;
     const client: XClient = {
       verify: async () => user,
@@ -41,7 +42,8 @@ describe("402 credits depleted", () => {
   it("pauses ~10 min instead of failing the post", async () => {
     connect();
     const now = new Date();
-    importTweets({ source: "一\n二", format: "text", startAt: new Date(now.getTime() - 1000).toISOString(), intervalMinutes: 30 });
+    importTweets({
+      accountId: 1, source: "一\n二", format: "text", startAt: new Date(now.getTime() - 1000).toISOString(), intervalMinutes: 30 });
     const result = await tick({
       now,
       client: {

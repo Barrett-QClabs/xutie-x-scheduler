@@ -1,3 +1,4 @@
+import { accountIdFrom } from "@/lib/account";
 import { handle, readJson } from "@/lib/http";
 import { testCredentials } from "@/lib/service";
 
@@ -11,7 +12,7 @@ function text(value: unknown): string {
 export async function POST(request: Request) {
   return handle(async () => {
     const body = await readJson(request);
-    return testCredentials({
+    return testCredentials(accountIdFrom(request, body), {
       apiKey: text(body.apiKey),
       apiSecret: text(body.apiSecret),
       accessToken: text(body.accessToken),
