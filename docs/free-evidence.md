@@ -56,7 +56,8 @@
 - `lang` 没返回就是语言未知，新关注因此跳过。未知不是中文，也不是英文。
 - 取关证据的有效期最长是 `observed_at` 之后 25 小时。`expires_at` 更晚时，取关只认到这 25 小时；过了就当过期。关注储备不使用这 25 小时上限。
 - 取关执行时如果这个人的证据缺失或已经过期，本槽跳过，`status` 保持 `candidate`，`reason` 记 `evidence_missing` 或 `evidence_expired`。这不是不可再打开的 `unknown`。同一天后面的 `:15` / `:45` 槽还会再看。
-- 72 小时未回关只认同一 `accountId` 的 `follow_success.succeeded_at`。导入没传 `followedAt` 时用这个时间。传了就必须和账本一致，否则该人被拒绝。没有账本时不抄 `firstRecordedAt`，72 小时这条保持 `follow_time_unknown`，不会取关。
+- 72 小时未回关只认同一 `accountId` 的 `follow_success.succeeded_at`。导入没传 `followedAt` 时用这个时间。传了就必须和账本一致，否则该人被拒绝。没有账本、也没有位置依据时，不抄 `firstRecordedAt`，也不把观察时间当成关注时间，72 小时这条保持 `follow_time_unknown`。
+- 位置依据是 `followingRank`，或 `followingPage`（默认每页 25 人，页内位置默认 1）。1 是 following 列表最浅的人。只有名次大于 1000，也就是第 41 页及之后，才取消 72 小时检查。第 40 页和名次 1000 以内仍走 72 小时。执行时仍要有 25 小时内的证据：`connection_status` 含 `following`、不含 `followed_by`。
 - 粉丝数、flb、最近发帖只改变储备排序，不构成拒绝。
 
 缺任何硬条件就 skip 或 unknown，不调用用户 GET 去补。证据缺失或过期的取关候选保持 `candidate`，下个取关槽可以再试。其他 unknown 和 failed 不会在下一批自动重试。

@@ -160,6 +160,7 @@ function ensureAutomationTables(db: DatabaseSync): void {
         tier TEXT NOT NULL,
         first_recorded_at TEXT,
         followed_at TEXT,
+        following_rank INTEGER,
         status TEXT NOT NULL,
         batch_slot TEXT,
         result TEXT,
@@ -207,6 +208,7 @@ function ensureAutomationTables(db: DatabaseSync): void {
       tier TEXT NOT NULL,
       first_recorded_at TEXT,
       followed_at TEXT,
+      following_rank INTEGER,
       status TEXT NOT NULL,
       batch_slot TEXT,
       result TEXT,
@@ -348,6 +350,7 @@ function ensureAutomationTables(db: DatabaseSync): void {
   ensureColumn(db, "evidence_pages", "actual_source_namespace", "ALTER TABLE evidence_pages ADD COLUMN actual_source_namespace TEXT");
   ensureColumn(db, "evidence_pages", "normalized_source", "ALTER TABLE evidence_pages ADD COLUMN normalized_source TEXT");
   ensureColumn(db, "evidence_pages", "claimed_activity_window_complete", "ALTER TABLE evidence_pages ADD COLUMN claimed_activity_window_complete INTEGER");
+  ensureColumn(db, "unfollow_candidates", "following_rank", "ALTER TABLE unfollow_candidates ADD COLUMN following_rank INTEGER");
   const now = new Date().toISOString();
   for (const id of [1, 2]) {
     db.prepare(

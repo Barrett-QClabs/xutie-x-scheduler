@@ -6,7 +6,13 @@ import { AppError } from "@/lib/errors";
 import { evidenceUnfollowProfile } from "@/lib/evidence";
 import { londonUnfollowSlot } from "@/lib/london";
 import { unfollowTarget } from "@/lib/unfollow-live";
-import { INACTIVE_AFTER_MS, UNFOLLOW_BATCH_LIMIT, UNFOLLOW_EVIDENCE_MAX_MS } from "@/lib/unfollow-policy";
+import {
+  FOLLOWING_PAGE_SIZE,
+  INACTIVE_AFTER_MS,
+  SHALLOW_FOLLOWING_DEPTH,
+  UNFOLLOW_BATCH_LIMIT,
+  UNFOLLOW_EVIDENCE_MAX_MS,
+} from "@/lib/unfollow-policy";
 
 export type UnfollowTier = "non_blue" | "no_followback_72h" | "inactive_48h";
 export type UnfollowOutcome = "success" | "failed" | "skipped" | "unknown";
@@ -34,6 +40,7 @@ const NO_RETRY = new Set(["unknown", "failed", "success"]);
 
 export function classifyAction(input: {
   followedAt: string | null;
+  followingRank?: number | null;
   fresh: FreshProfile;
   now: Date;
   whitelisted: boolean;
@@ -49,7 +56,15 @@ export function classifyAction(input: {
   let noFollow: "yes" | "no" | "unknown" = "no";
   const followed = Date.parse(input.followedAt ?? "");
   const followKnown = Boolean(input.followedAt) && !Number.isNaN(followed);
-  if (!followKnown) noFollow = "unknown";
+  const beyondShallow = typeof input.followingRank === "number" && input.followingRank > SHALLOW_FOLLOWING_DEPTH;
+  let deepRelation = false;
+  if (beyondShallow && input.fresh.followsBack === false) {
+    noFollow = "yes";
+    deepRelation = true;
+  } else if (beyondShallow && input.fresh.followsBack == null) {
+    noFollow = "unknown";
+    deepRelation = true;
+  } else if (!followKnown) noFollow = "unknown";
   else if (input.now.getTime() - followed >= 72 * HOUR) {
     if (input.fresh.followsBack == null) noFollow = "unknown";
     else if (input.fresh.followsBack === false) noFollow = "yes";
@@ -65,14 +80,16 @@ export function classifyAction(input: {
   }
 
   if (nonBlue === "yes") return { proceed: true, result: "success", reason: "non_blue" };
-  if (noFollow === "yes") return { proceed: true, result: "success", reason: "no_followback_72h" };
+  if (noFollow === "yes") {
+    return { proceed: true, result: "success", reason: deepRelation ? "no_followback_beyond_1000" : "no_followback_72h" };
+  }
   if (inactive === "yes") return { proceed: true, result: "success", reason: "inactive_48h" };
   if (nonBlue === "unknown") return { proceed: false, result: "unknown", reason: "blue_unconfirmed" };
   if (noFollow === "unknown") {
     return {
       proceed: false,
       result: "unknown",
-      reason: followKnown ? "followback_unconfirmed" : "follow_time_unknown",
+      reason: followKnown || deepRelation ? "followback_unconfirmed" : "follow_time_unknown",
     };
   }
   if (inactive === "unknown") return { proceed: false, result: "unknown", reason: "last_post_unconfirmed" };
@@ -85,6 +102,7 @@ type CandidateRow = {
   tier: string;
   first_recorded_at: string | null;
   followed_at: string | null;
+  following_rank: number | null;
   status: string;
 };
 
@@ -263,10 +281,47 @@ function ledgerFollowedAt(accountId: AccountId, targetUserId: string): string | 
   return realTime(row?.succeeded_at);
 }
 
+function wholeNumber(value: unknown, min: number, max: number): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) return null;
+  return value;
+}
+
+/** Rank 1 is the shallowest follow. Page 41 of 25 starts at rank 1001. */
+function followingRankFrom(raw: { followingRank?: unknown; followingPage?: unknown; pageSize?: unknown; indexOnPage?: unknown }): number | null | "invalid" {
+  const pageGiven = raw.followingPage !== undefined && raw.followingPage !== null;
+  const rankGiven = raw.followingRank !== undefined && raw.followingRank !== null;
+  if (!pageGiven && !rankGiven) return null;
+  let fromPage: number | null = null;
+  if (pageGiven) {
+    const page = wholeNumber(raw.followingPage, 1, 1_000_000);
+    const pageSize = raw.pageSize === undefined || raw.pageSize === null ? FOLLOWING_PAGE_SIZE : wholeNumber(raw.pageSize, 1, 100);
+    const index = raw.indexOnPage === undefined || raw.indexOnPage === null ? 1 : wholeNumber(raw.indexOnPage, 1, 100);
+    if (!page || !pageSize || !index || index > pageSize) return "invalid";
+    fromPage = (page - 1) * pageSize + index;
+  }
+  let declared: number | null = null;
+  if (rankGiven) {
+    declared = wholeNumber(raw.followingRank, 1, 50_000_000);
+    if (!declared) return "invalid";
+  }
+  if (declared != null && fromPage != null && declared !== fromPage) return "invalid";
+  return declared ?? fromPage;
+}
+
 export function importUnfollowCandidates(
   accountId: AccountId,
   input: {
-    candidates: Array<{ targetUserId?: unknown; username?: unknown; tier?: unknown; firstRecordedAt?: unknown; followedAt?: unknown }>;
+    candidates: Array<{
+      targetUserId?: unknown;
+      username?: unknown;
+      tier?: unknown;
+      firstRecordedAt?: unknown;
+      followedAt?: unknown;
+      followingRank?: unknown;
+      followingPage?: unknown;
+      pageSize?: unknown;
+      indexOnPage?: unknown;
+    }>;
   },
 ): { accepted: string[]; reopened: string[]; existing: string[]; rejected: Array<{ targetUserId: string; reason: string }> } {
   const accepted: string[] = [];
@@ -277,12 +332,12 @@ export function importUnfollowCandidates(
   const whitelist = unfollowWhitelist(accountId);
   const insert = getDb().prepare(
     `INSERT INTO unfollow_candidates
-      (account_id, target_user_id, username, tier, first_recorded_at, followed_at, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'candidate', ?, ?)`,
+      (account_id, target_user_id, username, tier, first_recorded_at, followed_at, following_rank, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?)`,
   );
   const reopen = getDb().prepare(
     `UPDATE unfollow_candidates
-     SET username = ?, tier = ?, first_recorded_at = ?, followed_at = ?, status = 'candidate',
+     SET username = ?, tier = ?, first_recorded_at = ?, followed_at = ?, following_rank = ?, status = 'candidate',
          batch_slot = NULL, result = NULL, reason = NULL, updated_at = ?
      WHERE account_id = ? AND target_user_id = ?`,
   );
@@ -301,6 +356,11 @@ export function importUnfollowCandidates(
       tier = parseTier(raw.tier);
     } catch {
       rejected.push({ targetUserId: id, reason: "invalid_tier" });
+      continue;
+    }
+    const rank = followingRankFrom(raw);
+    if (rank === "invalid") {
+      rejected.push({ targetUserId: id, reason: "invalid_following_rank" });
       continue;
     }
     const recorded = realTime(raw.firstRecordedAt);
@@ -322,16 +382,17 @@ export function importUnfollowCandidates(
       accountId,
       id,
     );
-    if (found && NO_RETRY.has(found.status)) {
+    const deep = typeof rank === "number" && rank > SHALLOW_FOLLOWING_DEPTH;
+    if (found && NO_RETRY.has(found.status) && !(found.status === "unknown" && deep)) {
       existing.push(id);
       continue;
     }
     if (found) {
-      reopen.run(username, tier, recorded, followed, now, accountId, id);
+      reopen.run(username, tier, recorded, followed, rank, now, accountId, id);
       reopened.push(id);
       continue;
     }
-    insert.run(accountId, id, username, tier, recorded, followed, now, now);
+    insert.run(accountId, id, username, tier, recorded, followed, rank, now, now);
     accepted.push(id);
   }
   return { accepted, reopened, existing, rejected };
@@ -340,7 +401,7 @@ export function importUnfollowCandidates(
 function candidateRows(accountId: AccountId): CandidateRow[] {
   return getDb()
     .prepare(
-      `SELECT target_user_id, username, tier, first_recorded_at, followed_at, status
+      `SELECT target_user_id, username, tier, first_recorded_at, followed_at, following_rank, status
        FROM unfollow_candidates WHERE account_id = ? AND status = 'candidate'`,
     )
     .all(accountId) as CandidateRow[];
@@ -400,7 +461,7 @@ export function listUnfollowCandidates(
   }
   const rows = getDb()
     .prepare(
-      `SELECT target_user_id, username, tier, first_recorded_at, followed_at, status, result, reason
+      `SELECT target_user_id, username, tier, first_recorded_at, followed_at, following_rank, status, result, reason
        FROM unfollow_candidates
        WHERE account_id = ? AND status = 'candidate' AND (? IS NULL OR target_user_id < ?)
        ORDER BY target_user_id DESC
@@ -412,6 +473,7 @@ export function listUnfollowCandidates(
     tier: string;
     first_recorded_at: string | null;
     followed_at: string | null;
+    following_rank: number | null;
     status: string;
     result: string | null;
     reason: string | null;
@@ -427,6 +489,7 @@ export function listUnfollowCandidates(
       tier: normalizeTier(row.tier) ?? row.tier,
       status: row.status,
       followedAt: row.followed_at,
+      followingRank: row.following_rank,
       firstRecordedAt: row.first_recorded_at,
       result: row.result,
       reason: row.reason,
@@ -506,6 +569,7 @@ export async function submitUnfollowBatch(input: {
         const fresh = await hooks.inspect(row.target_user_id);
         const decision = classifyAction({
           followedAt: row.followed_at,
+          followingRank: row.following_rank,
           fresh,
           now,
           whitelisted: unfollowWhitelist(accountId).has(row.target_user_id),
