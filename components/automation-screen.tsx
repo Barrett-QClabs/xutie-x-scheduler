@@ -79,8 +79,8 @@ export function AutomationScreen() {
         if (cancel) return;
         setKw(config.keywords.join(", "));
         setAccountNote(locale === "zh"
-          ? `账号${accountId} 单独配置。保存不会开始运行。运行中：${config.running ? "是" : "否"}。伦敦每日关注加回关上限 ${config.dailyCap}。证据或候选缺口 ${config.reserve.gap}${config.reserve.constraint ? `（${config.reserve.constraint}）` : ""}。`
-          : `Account ${accountId} has its own keywords. Saving does not start a run. Running: ${config.running ? "yes" : "no"}. London daily follow cap ${config.dailyCap}. Evidence or candidate gap ${config.reserve.gap}${config.reserve.constraint ? ` (${config.reserve.constraint})` : ""}.`);
+          ? `账号${accountId} 单独配置。保存不会开始运行。运行中：${config.running ? "是" : "否"}。${accountId === 1 ? "台北日历日" : "伦敦每日"}关注加回关上限 ${config.dailyCap}。证据或候选缺口 ${config.reserve.gap}${config.reserve.constraint ? `（${config.reserve.constraint}）` : ""}。`
+          : `Account ${accountId} has its own keywords. Saving does not start a run. Running: ${config.running ? "yes" : "no"}. ${accountId === 1 ? "Taipei-day" : "London daily"} follow cap ${config.dailyCap}. Evidence or candidate gap ${config.reserve.gap}${config.reserve.constraint ? ` (${config.reserve.constraint})` : ""}.`);
       })
       .catch((error) => { if (!cancel) setErr(error instanceof Error ? error.message : String(error)); });
     return () => { cancel = true; };

@@ -135,4 +135,25 @@ describe.skipIf(!chrome)("settings account switch in the browser", () => {
     expect(first.account.username).toBe("mock_acctonea");
     expect(JSON.stringify(first)).not.toContain("accttwoC-secret");
   }, 60_000);
+
+  it("shows the Taipei follow cap for account 1 and the London cap for account 2", async () => {
+    await page.setViewport({ width: 1280, height: 800 });
+    await page.goto(`${origin}/automation`, { waitUntil: "networkidle0" });
+    await page.click('[data-testid="nav-slot-1"]');
+    await page.waitForFunction(() => document.body.innerText.includes("台北日历日关注加回关上限 380"));
+    expect(await page.evaluate(() => document.body.innerText.includes("伦敦每日关注加回关上限"))).toBe(false);
+
+    await page.click('[data-testid="nav-slot-2"]');
+    await page.waitForFunction(() => document.body.innerText.includes("伦敦每日关注加回关上限 380"));
+    expect(await page.evaluate(() => document.body.innerText.includes("台北日历日关注加回关上限"))).toBe(false);
+
+    await page.evaluate(() => {
+      const button = [...document.querySelectorAll("button")].find((item) => item.textContent === "EN");
+      button?.click();
+    });
+    await page.waitForFunction(() => document.body.innerText.includes("London daily follow cap 380"));
+    await page.click('[data-testid="nav-slot-1"]');
+    await page.waitForFunction(() => document.body.innerText.includes("Taipei-day follow cap 380"));
+    expect(await page.evaluate(() => document.body.innerText.includes("London daily follow cap"))).toBe(false);
+  }, 60_000);
 });
