@@ -5,14 +5,14 @@ import { FOLLOW_BATCH_LIMIT } from "@/lib/unfollow-policy";
 /** Account 1 follow clock. No daylight-saving shift; the zone is still read from Intl. */
 export const ACCOUNT1_FOLLOW_ZONE = "Asia/Taipei";
 
-/** First work window of each Taipei day starts at 03:00. */
-export const ACCOUNT1_ANCHOR_MINUTES = 3 * 60;
+/** First work window of each Taipei day starts at 00:00. External pause is 03:00. */
+export const ACCOUNT1_ANCHOR_MINUTES = 0;
 
 export const ACCOUNT1_WORK_MINUTES = 15;
 
 export const ACCOUNT1_REST_MINUTES = 18;
 
-/** 15 minutes of work, then 18 of rest. Re-anchors at 03:00 each Taipei day. */
+/** 15 minutes of work, then 18 of rest. Re-anchors at 00:00 each Taipei day. */
 export const ACCOUNT1_CYCLE_MINUTES = ACCOUNT1_WORK_MINUTES + ACCOUNT1_REST_MINUTES;
 
 export const ACCOUNT1_FOLLOW_BATCH_LIMIT = 13;
@@ -37,7 +37,7 @@ export function followCapDay(accountId: AccountId, now: Date): string {
 
 /**
  * Work-window start for this account, or null during rest.
- * Account 2 is the London 00:00 / 15+15 clock. Account 1 is Taipei, anchored at 03:00.
+ * Account 2 is the London 00:00 / 15+15 clock. Account 1 is Taipei, anchored at 00:00.
  */
 export function followSlot(accountId: AccountId, now: Date): string | null {
   if (accountId === 2) return londonFollowSlot(now);

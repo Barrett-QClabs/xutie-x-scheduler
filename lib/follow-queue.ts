@@ -778,7 +778,7 @@ export function listFollowAudit(accountId: AccountId, input?: { limit?: number; 
     throw new AppError(
       "invalid_cursor",
       accountId === 1
-        ? "关注审计 before 必须是台北关注工作窗起点，例如 taipei:2026-11-11T03:00。"
+        ? "关注审计 before 必须是台北关注工作窗起点，例如 taipei:2026-11-11T00:00。"
         : "关注审计 before 必须是伦敦关注工作窗起点。",
     );
   }
