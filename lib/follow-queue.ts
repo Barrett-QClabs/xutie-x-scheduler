@@ -779,7 +779,7 @@ export function listFollowAudit(accountId: AccountId, input?: { limit?: number; 
       "invalid_cursor",
       accountId === 1
         ? "关注审计 before 必须是台北关注工作窗起点，例如 taipei:2026-11-11T00:00。"
-        : "关注审计 before 必须是伦敦关注工作窗起点。",
+        : "关注审计 before 必须是台北 :00 或 :30 的回关工作窗起点，例如 taipei:2026-11-11T00:30。",
     );
   }
   const rows = getDb()

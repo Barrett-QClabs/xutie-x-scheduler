@@ -1,5 +1,5 @@
 import type { AccountId } from "@/lib/account";
-import { londonClock, londonFollowSlot, zonedClock } from "@/lib/london";
+import { londonClock, zonedClock } from "@/lib/london";
 import { FOLLOW_BATCH_LIMIT } from "@/lib/unfollow-policy";
 
 /** Account 1 follow clock. No daylight-saving shift; the zone is still read from Intl. */
@@ -25,7 +25,6 @@ export const ACCOUNT1_SLOT_PREFIX = "taipei:";
 
 const DAY_MINUTES = 24 * 60;
 
-const LONDON_AUDIT_SLOT = /^\d{4}-\d{2}-\d{2}T\d{2}:(00|15|30|45)$/;
 const TAIPEI_SLOT = /^taipei:(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
 
 export function followBatchLimit(accountId: AccountId): number {
@@ -38,13 +37,25 @@ export function followCapDay(accountId: AccountId, now: Date): string {
   return londonClock(now).day;
 }
 
+/** Account 2 keeps 15 minutes of work and 15 of rest, 10 per round, anchored at 00:00 Taipei. */
+export const ACCOUNT2_FOLLOW_CYCLE_MINUTES = 30;
+export const ACCOUNT2_FOLLOW_WORK_MINUTES = 15;
+
 /**
  * Work-window start for this account, or null during rest.
- * Account 2 is the London 00:00 / 15+15 clock. Account 1 is Taipei, anchored at 00:00.
+ * Account 1 is the 33-minute Taipei cycle, open only until 05:00.
+ * Account 2 is 15/15 from 00:00 Taipei. The 05:00 pause is external.
  */
 export function followSlot(accountId: AccountId, now: Date): string | null {
-  if (accountId === 2) return londonFollowSlot(now);
+  if (accountId === 2) return account2FollowSlot(now);
   return taipeiFollowSlot(now);
+}
+
+export function account2FollowSlot(now: Date): string | null {
+  const clock = zonedClock(now, ACCOUNT1_FOLLOW_ZONE);
+  const offset = clock.minutes % ACCOUNT2_FOLLOW_CYCLE_MINUTES;
+  if (offset >= ACCOUNT2_FOLLOW_WORK_MINUTES) return null;
+  return `${ACCOUNT1_SLOT_PREFIX}${clock.day}T${hhmm(clock.minutes - offset)}`;
 }
 
 export function taipeiFollowSlot(now: Date): string | null {
@@ -64,10 +75,23 @@ export function taipeiFollowSlot(now: Date): string | null {
   return `${ACCOUNT1_SLOT_PREFIX}${day}T${hhmm(start)}`;
 }
 
-/** Audit cursor: account 2 keeps quarter-hour London strings; account 1 only accepts its own work starts. */
+/** Audit cursor: each account accepts only its own Taipei work-window starts. */
 export function isFollowAuditCursor(accountId: AccountId, slot: string): boolean {
   if (accountId === 1) return isAccount1FollowSlot(slot);
-  return LONDON_AUDIT_SLOT.test(slot);
+  return isAccount2FollowSlot(slot);
+}
+
+export function isAccount2FollowSlot(slot: string): boolean {
+  const match = TAIPEI_SLOT.exec(slot);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const date = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (month < 1 || month > 12 || hour > 23 || (minute !== 0 && minute !== 30)) return false;
+  const probe = new Date(Date.UTC(year, month - 1, date));
+  return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === date;
 }
 
 export function isAccount1FollowSlot(slot: string): boolean {

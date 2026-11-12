@@ -91,13 +91,21 @@ describe("account 1 Taipei unfollow window", () => {
     const afterClose = await submitUnfollowBatch({ accountId: 1, now: taipei(9, 15), hooks });
     expect(afterClose.reason).toBe("outside_window");
 
-    const londonNow = taipei(9, 15);
-    expect(unfollowSlot(2, londonNow)).toBe("2026-11-12T01:15");
-    expect(londonUnfollowSlot(londonNow)).toBe("2026-11-12T01:15");
-    const account2 = await submitUnfollowBatch({ accountId: 2, now: londonNow, hooks });
-    expect(account2.slot).toBe("2026-11-12T01:15");
-    expect(account2.unfollowed).toBe(1);
+    const outsideBoth = taipei(9, 15);
+    expect(unfollowSlot(2, outsideBoth)).toBeNull();
+    expect(londonUnfollowSlot(outsideBoth)).toBe("2026-11-12T01:15");
+    const account2Late = await submitUnfollowBatch({ accountId: 2, now: outsideBoth, hooks });
+    expect(account2Late.reason).toBe("outside_window");
+    expect(account2Late.unfollowed).toBe(0);
+
+    const account2Inside = await submitUnfollowBatch({ accountId: 2, now: taipei(5, 15), hooks });
+    expect(account2Inside.slot).toBe("taipei:2026-11-12T05:15");
+    expect(account2Inside.unfollowed).toBe(1);
     expect(calls).toEqual(["93001", "93002"]);
+    const account2Edge = await submitUnfollowBatch({ accountId: 2, now: taipei(4, 59), hooks });
+    expect(account2Edge.reason).toBe("outside_window");
+    const account2Last = await submitUnfollowBatch({ accountId: 2, now: taipei(8, 59), hooks });
+    expect(account2Last.slot).toBe("taipei:2026-11-12T08:45");
 
     expect(() => listUnfollowAudit(1, { before: "2026-11-12T05:15" })).toThrow(/台北/);
     expect(() => listUnfollowAudit(1, { before: "taipei:2026-11-12T04:45" })).toThrow(/台北/);
@@ -105,9 +113,9 @@ describe("account 1 Taipei unfollow window", () => {
     expect(listUnfollowAudit(1, { before: "taipei:2026-11-12T08:45" }).batches.map((item) => item.slot)).toEqual([
       "taipei:2026-11-12T05:15",
     ]);
-    expect(() => listUnfollowAudit(2, { before: "taipei:2026-11-12T05:15" })).toThrow(/伦敦/);
-    expect(listUnfollowAudit(2, { before: "2026-11-12T01:45" }).batches.map((item) => item.slot)).toEqual([
-      "2026-11-12T01:15",
+    expect(() => listUnfollowAudit(2, { before: "2026-11-12T05:15" })).toThrow(/台北/);
+    expect(listUnfollowAudit(2, { before: "taipei:2026-11-12T08:45" }).batches.map((item) => item.slot)).toEqual([
+      "taipei:2026-11-12T05:15",
     ]);
   });
 });

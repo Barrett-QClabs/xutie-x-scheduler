@@ -61,7 +61,7 @@ afterEach(() => {
 });
 
 describe("per-account follow cadence", () => {
-  it("anchors account 1 at 00:00 Taipei and leaves account 2 on the London clock", () => {
+  it("anchors both follow clocks at 00:00 Taipei and keeps account 2 on 15/15", () => {
     expect(ACCOUNT1_CYCLE_MINUTES).toBe(33);
     expect(followBatchLimit(1)).toBe(13);
     expect(followBatchLimit(2)).toBe(10);
@@ -88,23 +88,21 @@ describe("per-account follow cadence", () => {
     expect(followSlot(1, new Date("2026-11-11T16:00:00.000Z"))).toBe("taipei:2026-11-12T00:00");
     expect(followSlot(1, new Date("2028-02-29T16:04:00.000Z"))).toBe("taipei:2028-03-01T00:00");
 
-    expect(followSlot(2, new Date("2026-11-08T00:00:00.000Z"))).toBe("2026-11-08T00:00");
-    expect(followSlot(2, new Date("2026-11-08T00:14:00.000Z"))).toBe("2026-11-08T00:00");
-    expect(followSlot(2, new Date("2026-11-08T00:15:00.000Z"))).toBeNull();
-    expect(followSlot(2, new Date("2026-07-15T23:00:00.000Z"))).toBe("2026-07-16T00:00");
+    expect(followSlot(2, new Date("2026-11-10T16:00:00.000Z"))).toBe("taipei:2026-11-11T00:00");
+    expect(followSlot(2, new Date("2026-11-10T16:14:00.000Z"))).toBe("taipei:2026-11-11T00:00");
+    expect(followSlot(2, new Date("2026-11-10T16:15:00.000Z"))).toBeNull();
+    expect(followSlot(2, new Date("2026-11-10T16:30:00.000Z"))).toBe("taipei:2026-11-11T00:30");
+    expect(followSlot(1, new Date("2026-11-10T16:30:00.000Z"))).toBeNull();
     expect(londonFollowSlot(new Date("2026-07-15T23:00:00.000Z"))).toBe("2026-07-16T00:00");
 
     const start = Date.parse("2026-11-10T16:00:00.000Z");
     for (let minute = 0; minute < 48 * 60; minute += 1) {
       const now = new Date(start + minute * 60_000);
-      const london = londonFollowSlot(now);
-      expect(followSlot(2, now)).toBe(london);
       const taipei = followSlot(1, now);
       if (!taipei) continue;
       expect(taipei.startsWith("taipei:")).toBe(true);
       expect(isFollowAuditCursor(1, taipei)).toBe(true);
-      expect(isFollowAuditCursor(2, taipei)).toBe(false);
-      expect(taipei).not.toBe(london);
+      expect(isFollowAuditCursor(2, taipei)).toBe(/T\d{2}:(00|30)$/.test(taipei));
     }
 
     const duringTaipeiRest = new Date("2026-11-10T17:00:00.000Z");
@@ -126,10 +124,10 @@ describe("per-account follow cadence", () => {
     expect(() => listFollowAudit(1, { before: "taipei:2026-11-11T03:00" })).toThrow(/台北关注工作窗/);
     expect(() => listFollowAudit(1, { before: "taipei:2026-11-11T23:39" })).toThrow(/台北关注工作窗/);
     expect(listFollowAudit(1, { before: "taipei:2026-11-11T04:57" }).batches).toEqual([]);
-    expect(() => listFollowAudit(2, { before: "taipei:2026-11-11T00:00" })).toThrow(/伦敦关注工作窗/);
-    expect(() => listFollowAudit(2, { before: "2026-11-11T03:33" })).toThrow(/伦敦关注工作窗/);
-    expect(listFollowAudit(2, { before: "2026-11-11T03:00" }).batches).toEqual([]);
-    expect(listFollowAudit(2, { before: "2026-11-11T03:15" }).batches).toEqual([]);
+    expect(() => listFollowAudit(2, { before: "2026-11-11T00:00" })).toThrow(/台北 :00 或 :30/);
+    expect(() => listFollowAudit(2, { before: "taipei:2026-11-11T00:33" })).toThrow(/台北 :00 或 :30/);
+    expect(listFollowAudit(2, { before: "taipei:2026-11-11T00:30" }).batches).toEqual([]);
+    expect(listFollowAudit(2, { before: "taipei:2026-11-11T04:30" }).batches).toEqual([]);
   });
 
   it("follows at most 13 blue follow-backs for account 1 and never kind=new", async () => {
@@ -264,7 +262,7 @@ describe("per-account follow cadence", () => {
 
     stock(2, [{ id: "34011", kind: "followback" }, { id: "34012", kind: "new" }], early.toISOString(), early);
     const londonEarly = await submitFollowBatch({ accountId: 2, now: early, hooks });
-    expect(londonEarly.slot).toBe("2026-11-11T16:00");
+    expect(londonEarly.slot).toBe("taipei:2026-11-12T00:00");
     expect(londonEarly.followed).toBe(2);
     const londonDay = getDb().prepare(
       "SELECT london_day AS day FROM follow_success WHERE account_id = 2 ORDER BY target_user_id",
@@ -336,7 +334,7 @@ describe("per-account follow cadence", () => {
         follow: async (id) => { calls.push(id); },
       },
     });
-    expect(result.slot).toBe("2026-11-08T00:00");
+    expect(result.slot).toBe("taipei:2026-11-08T08:00");
     expect(result.submitted).toBe(10);
     expect(result.followed).toBe(10);
     expect(result.results.filter((item) => item.kind === "followback")).toHaveLength(4);

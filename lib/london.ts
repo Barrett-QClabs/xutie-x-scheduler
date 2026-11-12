@@ -72,8 +72,10 @@ export function account1UnfollowSlot(now: Date): string | null {
   return `taipei:${clockNow.day}T${clock(start)}`;
 }
 
+/** Both accounts unfollow on the Taipei 05:15–08:45 slots. */
 export function unfollowSlot(accountId: 1 | 2, now: Date): string | null {
-  return accountId === 1 ? account1UnfollowSlot(now) : londonUnfollowSlot(now);
+  void accountId;
+  return account1UnfollowSlot(now);
 }
 
 /**

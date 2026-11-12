@@ -117,11 +117,53 @@ describe("account 1 deep inactive unfollow", () => {
       ]);
       const account2 = await submitUnfollowBatch({ accountId: 2, now: NOW });
       expect(account2.results).toEqual([
-        { targetUserId: "92001", tier: "inactive_48h", result: "unknown", reason: "follow_time_unknown" },
+        { targetUserId: "92001", tier: "inactive_48h", result: "success", reason: "inactive_48h_beyond_1000" },
       ]);
-      expect(account2.unfollowed).toBe(0);
+      expect(account2.unfollowed).toBe(1);
+      expect(getDb().prepare("SELECT followed_at FROM unfollow_candidates WHERE account_id = 2 AND target_user_id = '92001'").get()).toEqual({ followed_at: null });
       expect(seen.filter((item) => item.startsWith("GET"))).toEqual([]);
-      expect(seen.filter((item) => item.startsWith("DELETE"))).toHaveLength(2);
+      expect(seen.filter((item) => item.startsWith("DELETE"))).toHaveLength(3);
+    } finally {
+      globalThis.fetch = original;
+      process.env.X_API_MODE = previous;
+    }
+  });
+
+  it("skips account 2 when the rank is 1000 or the post time is missing", async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    const previous = process.env.X_API_MODE;
+    process.env.X_API_MODE = "live";
+    globalThis.fetch = async (input, init) => {
+      const method = init?.method ?? "GET";
+      seen.push(`${method} ${String(input)}`);
+      if (method === "DELETE") return new Response("{}", { status: 200 });
+      throw new Error("network");
+    };
+    try {
+      enable(2);
+      importUnfollowCandidates(2, {
+        candidates: [
+          { targetUserId: "92100", tier: "inactive_48h", followingRank: 1000 },
+          { targetUserId: "92101", tier: "inactive_48h", followingRank: 1800 },
+        ],
+      });
+      publicRead(2, [
+        { id: "92100", verified: true, verified_type: "blue", connection_status: ["following", "followed_by"], posts: [{ id: "old", created_at: OLD_POST, text: "old" }] },
+        { id: "92101", verified: true, verified_type: "blue", connection_status: ["following", "followed_by"] },
+      ]);
+      const batch = await submitUnfollowBatch({ accountId: 2, now: NOW });
+      expect(batch.results.find((item) => item.targetUserId === "92100")).toMatchObject({
+        result: "unknown",
+        reason: "follow_time_unknown",
+      });
+      expect(batch.results.find((item) => item.targetUserId === "92101")).toMatchObject({
+        result: "unknown",
+        reason: "follow_time_unknown",
+      });
+      expect(batch.unfollowed).toBe(0);
+      expect(seen.filter((item) => item.startsWith("GET"))).toEqual([]);
+      expect(seen.filter((item) => item.startsWith("DELETE"))).toEqual([]);
     } finally {
       globalThis.fetch = original;
       process.env.X_API_MODE = previous;
