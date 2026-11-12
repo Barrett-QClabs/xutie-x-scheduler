@@ -136,7 +136,7 @@ describe("account keyword config", () => {
       const first = await runDueAutomation(new Date("2026-11-08T00:30:00.000Z"));
       expect(first.map((item) => item.accountId)).toEqual([1]);
       expect(first[0].kind).toBe("follow");
-      expect(first[0].slot).toBe("2026-11-08T00:30");
+      expect(first[0].slot).toBe("taipei:2026-11-08T08:30");
       const rest = await submitFollowBatch({
         accountId: 1,
         now: new Date("2026-11-08T00:45:00.000Z"),

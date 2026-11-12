@@ -3,6 +3,7 @@ export const ACCOUNT1_UNFOLLOW_USER_ID = "1933586991612080128";
 
 export const UNFOLLOW_BATCH_LIMIT = 10;
 
+/** Account 2 follow batch. Account 1's batch of 13 lives with its Taipei cadence. */
 export const FOLLOW_BATCH_LIMIT = 10;
 
 export const FOLLOW_DAILY_CAP = 380;
@@ -26,5 +27,8 @@ export const SHALLOW_FOLLOWING_DEPTH = 1000;
 /** Plugin pages are 25 people. Page 41 therefore starts at rank 1001. */
 export const FOLLOWING_PAGE_SIZE = 25;
 
-/** A reserve row older than one follow cycle cannot be acted on until it is stocked again. */
+/**
+ * A reserve row older than one follow cycle cannot be acted on until it is stocked again.
+ * 45 minutes covers account 2's 30-minute cycle and account 1's 33-minute cycle.
+ */
 export const RESERVE_FRESH_MS = 45 * 60 * 1000;

@@ -23,13 +23,13 @@ X_API_MODE=live
 
 然后只对账号1调用 `POST /api/follow/resume` 和 `POST /api/unfollow/resume`，正文 `{"accountId":1}`。这不恢复发帖。
 
-进程每 20 秒调用一次内部调度。两号用同一伦敦钟：从 00:00 起每 30 分钟一轮，前 15 分钟最多关注 10 人，后 15 分钟休息。工作槽是 `HH:00` 和 `HH:30`。`HH:15` 和 `HH:45` 是休息，不是关注槽。取关仍是 `HH:15` 和 `HH:45`，每槽最多 10 人。同一槽已完成就回放，不重复写。进程整段窗口不在线时不补跑。已部署的 `f4c713d` 仍是 45 分钟一轮。`GET /api/follow/config` 没有周期字段，`PUT` 只接受 `accountId` 和 `keywords`，所以 30 分钟要换容器后才生效。换容器时沿用原数据卷和 `credentials.key`，不要运行 `install.sh`，不要改待发帖。换完后，伦敦每小时的 15–29 分和 45–59 分，`GET /api/follow?accountId=1` 与 `2` 的 `schedule` 应为 `rest`；00–14 分和 30–44 分应为 `work`。
+进程每 20 秒调用一次内部调度。关注节奏按号分开，取关不改。账号2仍用伦敦钟（含夏令时）：从 00:00 起每 30 分钟一轮，前 15 分钟最多关注 10 人，后 15 分钟休息。工作槽是 `HH:00` 和 `HH:30`。账号1用 `Asia/Taipei`，每天 03:00 锚定：工作 15 分钟，休息 18 分钟，33 分钟一轮。头三轮是 03:00–03:15、03:33–03:48、04:06–04:21，每轮最多 13 人，只挑 `kind=followback`，不会退回 `kind=new`，也不会因为只有 new 就占掉这一轮的槽。账号1的幂等槽是 `taipei:YYYY-MM-DDTHH:MM`，不会和它历史上的伦敦槽（例如 `2026-11-11T03:00`）撞键。每日 380 的额度，账号1按台北日历日计，03:00–09:00 不会在伦敦零点（台北 08:00）被拆开；账号2仍按伦敦日。外部调度在台北 09:00 暂停账号1、03:00 恢复，这一段不在本程序里。取关两号仍是伦敦 `HH:15` 和 `HH:45`，每槽最多 10 人。同一槽已完成就回放，不重复写。进程整段窗口不在线时不补跑。`GET /api/follow/config` 没有周期字段，`PUT` 只接受 `accountId` 和 `keywords`。换容器时沿用原数据卷和 `credentials.key`，不要运行 `install.sh`，不要改待发帖。换完后，账号2在伦敦每小时的 15–29 分和 45–59 分 `schedule` 为 `rest`，00–14 分和 30–44 分为 `work`。账号1在台北 03:00–03:14 为 `work`，03:15–03:32 为 `rest`。
 
 证据持续供给仍是父把免费插件结果 `POST /api/evidence`。程序不搜索、不调用 X 的 GET。信封字段见 `docs/free-evidence.md`。
 
 账号1的取关池由伦敦 00:00 的导入建立。进程之后在每个 `:15` 和 `:45` 槽自己取关，每槽最多 10 人，助手不在线也会继续。证据缺失或过期只跳过，候选保持 `candidate`。取关证据从 `observed_at` 起最长 25 小时。候选和剩余可执行数是 `GET /api/unfollow/candidates?accountId=1`。72 小时只认本账号 `follow_success.succeeded_at`。following 列表名次大于 1000 的没回关候选用 `followingPage: 41` 或 `followingRank` 导入，不再要求关注时间；名次 1000 以内仍要 72 小时。`unknown` 可以靠这次带位置的导入回到 `candidate`。
 
-平时只回关。新关注要先进入活动储备才会被批次执行；把现有 `kind=new` 且 `status=reserved` 的人清出去用：
+平时只回关。账号1的批次只选 followback。账号2在回关之后仍可以用 new 补位。新关注要先进入活动储备才会被批次执行；把现有 `kind=new` 且 `status=reserved` 的人清出去用：
 
 ```json
 { "accountId": 2, "kinds": ["new"], "statuses": ["reserved"], "reason": "hold_new" }

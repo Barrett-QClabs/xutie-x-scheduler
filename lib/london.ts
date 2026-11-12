@@ -9,9 +9,9 @@ export type LondonClock = {
   minutes: number;
 };
 
-export function londonClock(now: Date): LondonClock {
+export function zonedClock(now: Date, zone: string): LondonClock {
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: ZONE,
+    timeZone: zone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -29,6 +29,10 @@ export function londonClock(now: Date): LondonClock {
     minute,
     minutes: hour * 60 + minute,
   };
+}
+
+export function londonClock(now: Date): LondonClock {
+  return zonedClock(now, ZONE);
 }
 
 function clock(totalMinutes: number): string {
@@ -49,8 +53,8 @@ export function londonUnfollowSlot(now: Date): string | null {
 }
 
 /**
- * Follow cycle is 30 minutes from 00:00: 15 minutes of work, then 15 minutes of rest.
- * Both accounts use this same clock. Returns the work-window start, or null during rest.
+ * Account 2 follow cycle: 30 minutes from 00:00 London, 15 minutes of work, then 15 of rest.
+ * Returns the work-window start, or null during rest. Account 1 does not use this clock.
  */
 export function londonFollowSlot(now: Date): string | null {
   const clockNow = londonClock(now);
