@@ -138,7 +138,7 @@ describe("free evidence contract", () => {
       expect(calls).toEqual([]);
 
       importUnfollowCandidates(1, { candidates: [{ targetUserId: "555", tier: "inactive_48h" }] });
-      const blocked = await submitUnfollowBatch({ accountId: 1, now: new Date("2026-11-08T08:00:00.000Z") });
+      const blocked = await submitUnfollowBatch({ accountId: 1, now: new Date("2026-11-08T00:00:00.000Z") });
       expect(blocked.unfollowed).toBe(0);
       expect(calls).toEqual([]);
 
@@ -156,7 +156,7 @@ describe("free evidence contract", () => {
           posts: [{ id: "p1", created_at: "2026-11-06T00:00:00.000Z", text: "old" }],
         }],
       }));
-      const acted = await submitUnfollowBatch({ accountId: 1, now: new Date("2026-11-08T08:20:00.000Z") });
+      const acted = await submitUnfollowBatch({ accountId: 1, now: new Date("2026-11-08T00:20:00.000Z") });
       expect(acted.unfollowed).toBe(1);
       expect(calls.some((item) => item.startsWith("DELETE"))).toBe(true);
       expect(calls.filter((item) => item.startsWith("GET"))).toEqual([]);

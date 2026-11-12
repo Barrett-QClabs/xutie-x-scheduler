@@ -6,7 +6,7 @@ import { ACCOUNT_USER_ID, audienceFor, followEnabled } from "@/lib/automation-ac
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
-import { followBatchLimit, followCapDay, followSlot, isFollowAuditCursor } from "@/lib/follow-cadence";
+import { account1FollowPhase, followBatchLimit, followCapDay, followSlot, isFollowAuditCursor } from "@/lib/follow-cadence";
 import { FOLLOW_DAILY_CAP, MAX_FOLLOWERS, RESERVE_FRESH_MS } from "@/lib/unfollow-policy";
 
 export type FollowKind = "followback" | "new";
@@ -79,6 +79,7 @@ export function reserveView(accountId: AccountId, now: Date): FollowReserveView 
   let newAvailable = 0;
   let stale = 0;
   let staleFollowback = 0;
+  let staleNew = 0;
   for (const row of rows) {
     if (!updatedAt || row.updated_at > updatedAt) updatedAt = row.updated_at;
     if (row.status !== "reserved") continue;
@@ -86,15 +87,18 @@ export function reserveView(accountId: AccountId, now: Date): FollowReserveView 
     if (Number.isNaN(checked) || checked < freshAfter) {
       stale += 1;
       if (row.kind === "followback") staleFollowback += 1;
+      else staleNew += 1;
       continue;
     }
     available += 1;
     if (row.kind === "followback") followbackAvailable += 1;
     else newAvailable += 1;
   }
+  const phase = accountId === 1 ? account1FollowPhase(now) : null;
+  const actionable = accountId !== 1 ? available : phase === "new" ? newAvailable : followbackAvailable;
+  const blockingStale = accountId !== 1 ? stale : phase === "new" ? staleNew : staleFollowback;
   const remaining = Math.max(0, FOLLOW_DAILY_CAP - followedToday(accountId, now));
-  const actionable = accountId === 1 ? followbackAvailable : available;
-  const room = Math.min(followBatchLimit(accountId), remaining);
+  const room = Math.min(followBatchLimit(accountId, now), remaining);
   const gap = Math.max(0, room - actionable);
   return {
     updatedAt,
@@ -107,7 +111,7 @@ export function reserveView(accountId: AccountId, now: Date): FollowReserveView 
       accountId,
       now,
       available: actionable,
-      stale: accountId === 1 ? staleFollowback : stale,
+      stale: blockingStale,
       remaining,
       gap,
     }),
@@ -163,7 +167,7 @@ export function getFollowStatus(accountId: AccountId, now = new Date()) {
     identityConfirmed: getCredentialsRow(accountId)?.user_id === ACCOUNT_USER_ID[accountId],
     londonDay: followCapDay(accountId, now),
     schedule: followSlot(accountId, now) ? "work" : "rest",
-    batchSize: followBatchLimit(accountId),
+    batchSize: followBatchLimit(accountId, now),
     dailyCap: FOLLOW_DAILY_CAP,
     followedToday: followed,
     remainingQuota: Math.max(0, FOLLOW_DAILY_CAP - followed),
@@ -556,19 +560,20 @@ type ReserveRow = {
 
 function selectReserve(accountId: AccountId, now: Date, limit: number): ReserveRow[] {
   const freshAfter = new Date(now.getTime() - RESERVE_FRESH_MS).toISOString();
-  const followbackOnly = accountId === 1 ? 1 : 0;
+  const phase = accountId === 1 ? account1FollowPhase(now) : null;
+  const kindOnly = phase === "new" ? "new" : phase === "followback" ? "followback" : "";
   const rows = getDb()
     .prepare(
       `SELECT target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb
        FROM follow_reserve
        WHERE account_id = ? AND status = 'reserved' AND checked_at >= ?
-         AND (? = 0 OR kind = 'followback')
+         AND (? = '' OR kind = ?)
          AND NOT EXISTS (
            SELECT 1 FROM follow_success s
            WHERE s.account_id = follow_reserve.account_id AND s.target_user_id = follow_reserve.target_user_id
          )`,
     )
-    .all(accountId, freshAfter, followbackOnly) as ReserveRow[];
+    .all(accountId, freshAfter, kindOnly, kindOnly) as ReserveRow[];
   return rows
     .sort((left, right) => reserveRank(left) - reserveRank(right) || left.target_user_id.localeCompare(right.target_user_id))
     .slice(0, limit);
@@ -665,7 +670,9 @@ export async function submitFollowBatch(input: {
   };
 
   const view = reserveView(accountId, now);
-  const actionable = accountId === 1 ? view.followbackAvailable : view.available;
+  const actionable = accountId !== 1
+    ? view.available
+    : account1FollowPhase(now) === "new" ? view.newAvailable : view.followbackAvailable;
   if (actionable === 0) {
     return emptyFollow(accountId, now, slot, view.constraint === "stale_reserve" ? "stale_reserve" : "insufficient_candidates");
   }
@@ -696,7 +703,7 @@ export async function submitFollowBatch(input: {
     return emptyFollow(accountId, now, slot, "overlap");
   }
 
-  const picked = selectReserve(accountId, now, Math.min(followBatchLimit(accountId), remaining));
+  const picked = selectReserve(accountId, now, Math.min(followBatchLimit(accountId, now), remaining));
   try {
     db.prepare(
       `INSERT INTO follow_batches (account_id, slot, status, submitted, followed, results_json, started_at)
@@ -778,8 +785,8 @@ export function listFollowAudit(accountId: AccountId, input?: { limit?: number; 
     throw new AppError(
       "invalid_cursor",
       accountId === 1
-        ? "关注审计 before 必须是台北关注工作窗起点，例如 taipei:2026-11-11T03:00。"
-        : "关注审计 before 必须是伦敦关注工作窗起点。",
+        ? "关注审计 before 必须是台北关注工作窗起点，例如 taipei:2026-11-11T00:00 或 taipei-new:2026-11-11T18:00。"
+        : "关注审计 before 必须是台北 :00 或 :30 的回关工作窗起点，例如 taipei:2026-11-11T00:30。",
     );
   }
   const rows = getDb()

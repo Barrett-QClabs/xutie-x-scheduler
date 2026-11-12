@@ -5,7 +5,7 @@ import { submitUnfollowBatch } from "@/lib/unfollow-queue";
 
 const globalState = globalThis as unknown as { __xutiAutomationRunner?: boolean };
 
-/** One check of each account's follow window and the shared London unfollow windows. Does not read X. */
+/** One check of each account's follow window and unfollow window. Does not read X. */
 export async function runDueAutomation(now = new Date()) {
   const results: Array<{ accountId: AccountId; kind: "follow" | "unfollow"; executed: boolean; reason: string | null; slot: string | null }> = [];
   for (const accountId of [1, 2] as const) {

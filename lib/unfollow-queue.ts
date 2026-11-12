@@ -4,7 +4,7 @@ import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
 import { evidenceUnfollowProfile } from "@/lib/evidence";
-import { londonUnfollowSlot } from "@/lib/london";
+import { unfollowSlot } from "@/lib/london";
 import { unfollowTarget } from "@/lib/unfollow-live";
 import {
   FOLLOWING_PAGE_SIZE,
@@ -39,6 +39,7 @@ const TIER_RANK: Record<UnfollowTier, number> = {
 const NO_RETRY = new Set(["unknown", "failed", "success"]);
 
 export function classifyAction(input: {
+  accountId?: AccountId;
   followedAt: string | null;
   followingRank?: number | null;
   fresh: FreshProfile;
@@ -70,20 +71,26 @@ export function classifyAction(input: {
     else if (input.fresh.followsBack === false) noFollow = "yes";
   }
 
+  const posted = Date.parse(input.fresh.lastPostAt ?? "");
+  const postOlderThan48h = Boolean(input.fresh.lastPostAt) && !Number.isNaN(posted) && input.now.getTime() - posted > INACTIVE_AFTER_MS;
+  // Past the shallowest 1000, a stored post time is enough even when the public-read
+  // window is incomplete. No follow time is written or required. Rank 1000 and shallower stay on the old rule.
+  const deepInactive = beyondShallow && postOlderThan48h;
+
   let inactive: "yes" | "no" | "unknown" = "no";
-  if (!input.fresh.lastPostKnown) inactive = "unknown";
+  if (deepInactive) inactive = "yes";
+  else if (!input.fresh.lastPostKnown) inactive = "unknown";
   else if (!input.fresh.lastPostAt) inactive = "yes";
-  else {
-    const posted = Date.parse(input.fresh.lastPostAt);
-    if (Number.isNaN(posted)) inactive = "unknown";
-    else if (input.now.getTime() - posted > INACTIVE_AFTER_MS) inactive = "yes";
-  }
+  else if (Number.isNaN(posted)) inactive = "unknown";
+  else if (postOlderThan48h) inactive = "yes";
 
   if (nonBlue === "yes") return { proceed: true, result: "success", reason: "non_blue" };
   if (noFollow === "yes") {
     return { proceed: true, result: "success", reason: deepRelation ? "no_followback_beyond_1000" : "no_followback_72h" };
   }
-  if (inactive === "yes") return { proceed: true, result: "success", reason: "inactive_48h" };
+  if (inactive === "yes") {
+    return { proceed: true, result: "success", reason: deepInactive ? "inactive_48h_beyond_1000" : "inactive_48h" };
+  }
   if (nonBlue === "unknown") return { proceed: false, result: "unknown", reason: "blue_unconfirmed" };
   if (noFollow === "unknown") {
     return {
@@ -180,6 +187,11 @@ export type UnfollowAuditBatch = {
   results: UnfollowBatchResult["results"];
 };
 
+function validUnfollowCursor(accountId: AccountId, slot: string): boolean {
+  void accountId;
+  return /^taipei:\d{4}-\d{2}-\d{2}T0[5-8]:(15|45)$/.test(slot);
+}
+
 export function listUnfollowAudit(
   accountId: AccountId,
   input?: { limit?: number; before?: string | null },
@@ -189,8 +201,11 @@ export function listUnfollowAudit(
     throw new AppError("invalid_limit", "审计分页 limit 必须是 1 到 50 的整数。");
   }
   const before = input?.before ?? null;
-  if (before !== null && !/^\d{4}-\d{2}-\d{2}T\d{2}:(15|45)$/.test(before)) {
-    throw new AppError("invalid_cursor", "取关审计 before 必须是伦敦 00:15 起的 30 分钟槽。");
+  if (before !== null && !validUnfollowCursor(accountId, before)) {
+    throw new AppError(
+      "invalid_cursor",
+      "取关审计 before 必须是台北 05:15 到 08:45 的 :15 或 :45 槽，例如 taipei:2026-11-12T05:15。",
+    );
   }
   const rows = getDb()
     .prepare(
@@ -510,7 +525,7 @@ export async function submitUnfollowBatch(input: {
 }): Promise<UnfollowBatchResult> {
   const now = input.now ?? new Date();
   const accountId = input.accountId;
-  const slot = londonUnfollowSlot(now);
+  const slot = unfollowSlot(accountId, now);
   if (!unfollowEnabled(accountId)) return emptyResult(accountId, slot, "disabled");
   if (apiMode() !== "live" && !input.hooks) return emptyResult(accountId, slot, "mock_mode");
   if (!slot) return emptyResult(accountId, null, "outside_window");
@@ -568,6 +583,7 @@ export async function submitUnfollowBatch(input: {
       try {
         const fresh = await hooks.inspect(row.target_user_id);
         const decision = classifyAction({
+          accountId,
           followedAt: row.followed_at,
           followingRank: row.following_rank,
           fresh,

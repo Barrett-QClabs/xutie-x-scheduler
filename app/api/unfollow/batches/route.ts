@@ -11,6 +11,12 @@ function testHooks(): UnfollowHooks | undefined {
   return (globalThis as { __xutiUnfollowHooks?: UnfollowHooks }).__xutiUnfollowHooks;
 }
 
+function testNow(): Date | undefined {
+  if (!process.env.VITEST) return undefined;
+  const value = (globalThis as { __xutiNow?: Date }).__xutiNow;
+  return value instanceof Date ? value : undefined;
+}
+
 function auditQuery(request: Request): { limit?: number; before: string | null } {
   const url = new URL(request.url);
   const rawLimit = url.searchParams.get("limit");
@@ -30,8 +36,9 @@ export async function POST(request: Request) {
     const body = await readJson(request);
     const accountId = accountIdFrom(request, body);
     const injected = process.env.VITEST ? testHooks() : undefined;
-    if (injected) return submitUnfollowBatch({ accountId, hooks: injected });
-    if (apiMode() !== "live") return submitUnfollowBatch({ accountId });
-    return submitUnfollowBatch({ accountId, hooks: liveUnfollowHooks(accountId) });
+    const now = testNow();
+    if (injected) return submitUnfollowBatch({ accountId, hooks: injected, now });
+    if (apiMode() !== "live") return submitUnfollowBatch({ accountId, now });
+    return submitUnfollowBatch({ accountId, hooks: liveUnfollowHooks(accountId), now });
   });
 }
