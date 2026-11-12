@@ -20,14 +20,31 @@ export const ACCOUNT1_CYCLE_MINUTES = ACCOUNT1_WORK_MINUTES + ACCOUNT1_REST_MINU
 
 export const ACCOUNT1_FOLLOW_BATCH_LIMIT = 13;
 
+/** Evening kind=new window. 15 minutes of work, then 20 of rest, anchored at 18:00. */
+export const ACCOUNT1_NEW_ANCHOR_MINUTES = 18 * 60;
+export const ACCOUNT1_NEW_WORK_MINUTES = 15;
+export const ACCOUNT1_NEW_REST_MINUTES = 20;
+export const ACCOUNT1_NEW_CYCLE_MINUTES = ACCOUNT1_NEW_WORK_MINUTES + ACCOUNT1_NEW_REST_MINUTES;
+export const ACCOUNT1_NEW_BATCH_LIMIT = 9;
+
 /** Distinct from historical London keys such as `2026-11-11T03:00`. */
 export const ACCOUNT1_SLOT_PREFIX = "taipei:";
+/** Evening kind=new keys, distinct from follow-back slots. */
+export const ACCOUNT1_NEW_SLOT_PREFIX = "taipei-new:";
 
 const DAY_MINUTES = 24 * 60;
 
 const TAIPEI_SLOT = /^taipei:(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
 
-export function followBatchLimit(accountId: AccountId): number {
+export function account1FollowPhase(now: Date): "followback" | "new" | null {
+  const minutes = zonedClock(now, ACCOUNT1_FOLLOW_ZONE).minutes;
+  if (minutes < ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) return "followback";
+  if (minutes >= ACCOUNT1_NEW_ANCHOR_MINUTES) return "new";
+  return null;
+}
+
+export function followBatchLimit(accountId: AccountId, now?: Date): number {
+  if (accountId === 1 && now && account1FollowPhase(now) === "new") return ACCOUNT1_NEW_BATCH_LIMIT;
   return accountId === 1 ? ACCOUNT1_FOLLOW_BATCH_LIMIT : FOLLOW_BATCH_LIMIT;
 }
 
@@ -48,7 +65,21 @@ export const ACCOUNT2_FOLLOW_WORK_MINUTES = 15;
  */
 export function followSlot(accountId: AccountId, now: Date): string | null {
   if (accountId === 2) return account2FollowSlot(now);
-  return taipeiFollowSlot(now);
+  const phase = account1FollowPhase(now);
+  if (phase === "new") return taipeiNewFollowSlot(now);
+  if (phase === "followback") return taipeiFollowSlot(now);
+  return null;
+}
+
+export function taipeiNewFollowSlot(now: Date): string | null {
+  const clock = zonedClock(now, ACCOUNT1_FOLLOW_ZONE);
+  if (clock.minutes < ACCOUNT1_NEW_ANCHOR_MINUTES) return null;
+  const since = clock.minutes - ACCOUNT1_NEW_ANCHOR_MINUTES;
+  const offset = since % ACCOUNT1_NEW_CYCLE_MINUTES;
+  if (offset >= ACCOUNT1_NEW_WORK_MINUTES) return null;
+  const start = clock.minutes - offset;
+  if (start < ACCOUNT1_NEW_ANCHOR_MINUTES) return null;
+  return `${ACCOUNT1_NEW_SLOT_PREFIX}${clock.day}T${hhmm(start)}`;
 }
 
 export function account2FollowSlot(now: Date): string | null {
@@ -77,8 +108,24 @@ export function taipeiFollowSlot(now: Date): string | null {
 
 /** Audit cursor: each account accepts only its own Taipei work-window starts. */
 export function isFollowAuditCursor(accountId: AccountId, slot: string): boolean {
-  if (accountId === 1) return isAccount1FollowSlot(slot);
+  if (accountId === 1) return isAccount1FollowSlot(slot) || isAccount1NewFollowSlot(slot);
   return isAccount2FollowSlot(slot);
+}
+
+export function isAccount1NewFollowSlot(slot: string): boolean {
+  const match = /^taipei-new:(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(slot);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const date = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59) return false;
+  const probe = new Date(Date.UTC(year, month - 1, date));
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== date) return false;
+  const minutes = hour * 60 + minute;
+  if (minutes < ACCOUNT1_NEW_ANCHOR_MINUTES) return false;
+  return (minutes - ACCOUNT1_NEW_ANCHOR_MINUTES) % ACCOUNT1_NEW_CYCLE_MINUTES === 0;
 }
 
 export function isAccount2FollowSlot(slot: string): boolean {

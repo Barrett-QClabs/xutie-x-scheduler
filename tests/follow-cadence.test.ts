@@ -100,8 +100,12 @@ describe("per-account follow cadence", () => {
       const now = new Date(start + minute * 60_000);
       const taipei = followSlot(1, now);
       if (!taipei) continue;
-      expect(taipei.startsWith("taipei:")).toBe(true);
+      expect(taipei.startsWith("taipei")).toBe(true);
       expect(isFollowAuditCursor(1, taipei)).toBe(true);
+      if (taipei.startsWith("taipei-new:")) {
+        expect(isFollowAuditCursor(2, taipei)).toBe(false);
+        continue;
+      }
       expect(isFollowAuditCursor(2, taipei)).toBe(/T\d{2}:(00|30)$/.test(taipei));
     }
 
