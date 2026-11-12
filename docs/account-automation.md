@@ -27,7 +27,7 @@ X_API_MODE=live
 
 证据持续供给仍是父把免费插件结果 `POST /api/evidence`。程序不搜索、不调用 X 的 GET。信封字段见 `docs/free-evidence.md`。
 
-账号1的取关池由伦敦 00:00 的导入建立。进程之后在每个 `:15` 和 `:45` 槽自己取关，每槽最多 10 人，助手不在线也会继续。证据缺失或过期只跳过，候选保持 `candidate`。取关证据从 `observed_at` 起最长 25 小时。候选和剩余可执行数是 `GET /api/unfollow/candidates?accountId=1`。72 小时只认本账号 `follow_success.succeeded_at`。following 列表名次大于 1000 的没回关候选用 `followingPage: 41` 或 `followingRank` 导入，不再要求关注时间；名次 1000 以内仍要 72 小时。`unknown` 可以靠这次带位置的导入回到 `candidate`。
+账号1的取关池由伦敦 00:00 的导入建立。进程之后在每个 `:15` 和 `:45` 槽自己取关，每槽最多 10 人，助手不在线也会继续。证据缺失或过期只跳过，候选保持 `candidate`。取关证据从 `observed_at` 起最长 25 小时。候选和剩余可执行数是 `GET /api/unfollow/candidates?accountId=1`。72 小时只认本账号 `follow_success.succeeded_at`。following 列表名次大于 1000 的没回关候选用 `followingPage: 41` 或 `followingRank` 导入，不再要求关注时间；名次 1000 以内仍要 72 小时。账号1的 `inactive_48h` 同样只在名次大于 1000 时可以不带关注时间：证据里要有最新公开帖时间，且执行时严格早于 48 小时，`activity_window_complete: false` 也可以。没有帖子时间仍然跳过，不编造 `followedAt`。名次 1000 及以内不取。账号2的不活跃规则不变。`unknown` 可以靠这次带位置的导入回到 `candidate`。
 
 平时只回关。账号1的批次只选 followback。账号2在回关之后仍可以用 new 补位。新关注要先进入活动储备才会被批次执行；把现有 `kind=new` 且 `status=reserved` 的人清出去用：
 

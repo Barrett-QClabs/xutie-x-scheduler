@@ -39,6 +39,7 @@ const TIER_RANK: Record<UnfollowTier, number> = {
 const NO_RETRY = new Set(["unknown", "failed", "success"]);
 
 export function classifyAction(input: {
+  accountId?: AccountId;
   followedAt: string | null;
   followingRank?: number | null;
   fresh: FreshProfile;
@@ -70,20 +71,26 @@ export function classifyAction(input: {
     else if (input.fresh.followsBack === false) noFollow = "yes";
   }
 
+  const posted = Date.parse(input.fresh.lastPostAt ?? "");
+  const postOlderThan48h = Boolean(input.fresh.lastPostAt) && !Number.isNaN(posted) && input.now.getTime() - posted > INACTIVE_AFTER_MS;
+  // Account 1, past the shallowest 1000, can use a stored post time even when the
+  // public-read window is incomplete. No follow time is written or required.
+  const deepInactive = input.accountId === 1 && beyondShallow && postOlderThan48h;
+
   let inactive: "yes" | "no" | "unknown" = "no";
-  if (!input.fresh.lastPostKnown) inactive = "unknown";
+  if (deepInactive) inactive = "yes";
+  else if (!input.fresh.lastPostKnown) inactive = "unknown";
   else if (!input.fresh.lastPostAt) inactive = "yes";
-  else {
-    const posted = Date.parse(input.fresh.lastPostAt);
-    if (Number.isNaN(posted)) inactive = "unknown";
-    else if (input.now.getTime() - posted > INACTIVE_AFTER_MS) inactive = "yes";
-  }
+  else if (Number.isNaN(posted)) inactive = "unknown";
+  else if (postOlderThan48h) inactive = "yes";
 
   if (nonBlue === "yes") return { proceed: true, result: "success", reason: "non_blue" };
   if (noFollow === "yes") {
     return { proceed: true, result: "success", reason: deepRelation ? "no_followback_beyond_1000" : "no_followback_72h" };
   }
-  if (inactive === "yes") return { proceed: true, result: "success", reason: "inactive_48h" };
+  if (inactive === "yes") {
+    return { proceed: true, result: "success", reason: deepInactive ? "inactive_48h_beyond_1000" : "inactive_48h" };
+  }
   if (nonBlue === "unknown") return { proceed: false, result: "unknown", reason: "blue_unconfirmed" };
   if (noFollow === "unknown") {
     return {
@@ -568,6 +575,7 @@ export async function submitUnfollowBatch(input: {
       try {
         const fresh = await hooks.inspect(row.target_user_id);
         const decision = classifyAction({
+          accountId,
           followedAt: row.followed_at,
           followingRank: row.following_rank,
           fresh,

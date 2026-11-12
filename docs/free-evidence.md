@@ -52,7 +52,7 @@
 - `connection_status` 必须是数组才算关系证据。原数组会留下。数组缺失就是未知，不能当成未关注或未回关。
 - `pagination_complete` 为 false 或仍有 `next_token` 时，不在这一页里的人没有结论。
 - 公开帖不排除回复。样本没有命中转帖，所以不把「没看见转帖」说成已经覆盖转帖。
-- 空时间线、不完整页、错误，都不能单独当成 48 小时不活跃。只有 `activity_window_complete`、分页完成、没有 errors、没有 excluded，才可以用「没有更新的帖」作为不活跃。看见一条 48 小时内的帖，则证明仍活跃。
+- 空时间线、不完整页、错误，都不能单独当成 48 小时不活跃。只有 `activity_window_complete`、分页完成、没有 errors、没有 excluded，才可以用「没有更新的帖」作为不活跃。看见一条 48 小时内的帖，则证明仍活跃。账号1另有一条：following 名次大于 1000，且免费公共读里带了最新公开帖的 `created_at`，执行时该时间严格早于 48 小时，则即使 `activity_window_complete` 为 false 也可以取关。不补写 `followedAt`。名次 1000 及以内、没有帖子时间、以及账号2，仍按原规则跳过。成功原因是 `inactive_48h_beyond_1000`。
 - `lang` 没返回就是语言未知，新关注因此跳过。未知不是中文，也不是英文。
 - 取关证据的有效期最长是 `observed_at` 之后 25 小时。`expires_at` 更晚时，取关只认到这 25 小时；过了就当过期。关注储备不使用这 25 小时上限。
 - 取关执行时如果这个人的证据缺失或已经过期，本槽跳过，`status` 保持 `candidate`，`reason` 记 `evidence_missing` 或 `evidence_expired`。这不是不可再打开的 `unknown`。同一天后面的 `:15` / `:45` 槽还会再看。
