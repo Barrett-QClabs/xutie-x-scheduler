@@ -89,7 +89,7 @@ describe("account 1 daily unfollow pool", () => {
       });
       evidence(1, "702", "2026-11-08T00:00:00.000Z", "2026-11-08T12:00:00.000Z");
       const first = await submitUnfollowBatch({ accountId: 1, now: SLOT });
-      expect(first.slot).toBe("2026-11-09T00:15");
+      expect(first.slot).toBe("taipei:2026-11-09T08:15");
       expect(first.unfollowed).toBe(0);
       expect(first.submitted).toBe(0);
       expect(getDb().prepare("SELECT status, reason FROM unfollow_candidates WHERE target_user_id = '701'").get()).toEqual({
@@ -107,7 +107,7 @@ describe("account 1 daily unfollow pool", () => {
       const observed = new Date(SLOT.getTime() - 60 * 1000).toISOString();
       evidence(1, "701", observed, new Date(Date.parse(observed) + UNFOLLOW_EVIDENCE_MAX_MS).toISOString());
       expect(unfollowEvidenceState(1, "701", SLOT)).toBe("fresh");
-      const acted = await submitUnfollowBatch({ accountId: 1, now: new Date("2026-11-09T01:20:00.000Z") });
+      const acted = await submitUnfollowBatch({ accountId: 1, now: new Date("2026-11-08T23:20:00.000Z") });
       expect(acted.unfollowed).toBe(1);
       expect(acted.results[0]).toMatchObject({ targetUserId: "701", result: "success", reason: "non_blue" });
       expect(getDb().prepare("SELECT status FROM unfollow_candidates WHERE target_user_id = '702'").get()).toEqual({ status: "candidate" });

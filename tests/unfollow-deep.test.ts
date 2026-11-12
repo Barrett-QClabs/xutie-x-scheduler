@@ -5,7 +5,7 @@ import { saveCredentials } from "@/lib/service";
 import { UNFOLLOW_BATCH_LIMIT, UNFOLLOW_WHITELIST } from "@/lib/unfollow-policy";
 import { importUnfollowCandidates, setUnfollowPaused, submitUnfollowBatch } from "@/lib/unfollow-queue";
 
-const SLOT = new Date("2026-11-10T14:20:00.000Z");
+const SLOT = new Date("2026-11-10T20:20:00.000Z");
 const NOT_BACK = {
   following: true,
   blue: true,

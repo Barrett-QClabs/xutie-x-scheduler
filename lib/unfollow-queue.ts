@@ -4,7 +4,7 @@ import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
 import { evidenceUnfollowProfile } from "@/lib/evidence";
-import { londonUnfollowSlot } from "@/lib/london";
+import { unfollowSlot } from "@/lib/london";
 import { unfollowTarget } from "@/lib/unfollow-live";
 import {
   FOLLOWING_PAGE_SIZE,
@@ -187,6 +187,11 @@ export type UnfollowAuditBatch = {
   results: UnfollowBatchResult["results"];
 };
 
+function validUnfollowCursor(accountId: AccountId, slot: string): boolean {
+  if (accountId === 1) return /^taipei:\d{4}-\d{2}-\d{2}T0[3-8]:(15|45)$/.test(slot);
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:(15|45)$/.test(slot);
+}
+
 export function listUnfollowAudit(
   accountId: AccountId,
   input?: { limit?: number; before?: string | null },
@@ -196,8 +201,13 @@ export function listUnfollowAudit(
     throw new AppError("invalid_limit", "审计分页 limit 必须是 1 到 50 的整数。");
   }
   const before = input?.before ?? null;
-  if (before !== null && !/^\d{4}-\d{2}-\d{2}T\d{2}:(15|45)$/.test(before)) {
-    throw new AppError("invalid_cursor", "取关审计 before 必须是伦敦 00:15 起的 30 分钟槽。");
+  if (before !== null && !validUnfollowCursor(accountId, before)) {
+    throw new AppError(
+      "invalid_cursor",
+      accountId === 1
+        ? "取关审计 before 必须是台北 03:15 到 08:45 的 :15 或 :45 槽，例如 taipei:2026-11-12T03:15。"
+        : "取关审计 before 必须是伦敦 00:15 起的 30 分钟槽。",
+    );
   }
   const rows = getDb()
     .prepare(
@@ -517,7 +527,7 @@ export async function submitUnfollowBatch(input: {
 }): Promise<UnfollowBatchResult> {
   const now = input.now ?? new Date();
   const accountId = input.accountId;
-  const slot = londonUnfollowSlot(now);
+  const slot = unfollowSlot(accountId, now);
   if (!unfollowEnabled(accountId)) return emptyResult(accountId, slot, "disabled");
   if (apiMode() !== "live" && !input.hooks) return emptyResult(accountId, slot, "mock_mode");
   if (!slot) return emptyResult(accountId, null, "outside_window");
