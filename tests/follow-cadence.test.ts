@@ -81,12 +81,10 @@ describe("per-account follow cadence", () => {
     expect(followSlot(1, new Date("2026-11-10T17:20:00.000Z"))).toBe("taipei:2026-11-11T01:06");
     expect(followSlot(1, new Date("2026-11-10T17:21:00.000Z"))).toBeNull();
     expect(followSlot(1, new Date("2026-11-10T18:45:00.000Z"))).toBe("taipei:2026-11-11T02:45");
-    expect(followSlot(1, new Date("2026-11-10T18:59:00.000Z"))).toBe("taipei:2026-11-11T02:45");
-    expect(followSlot(1, new Date("2026-11-10T19:00:00.000Z"))).toBeNull();
-
-    expect(followSlot(1, new Date("2026-11-11T15:39:00.000Z"))).toBe("taipei:2026-11-11T23:39");
-    expect(followSlot(1, new Date("2026-11-11T15:53:00.000Z"))).toBe("taipei:2026-11-11T23:39");
-    expect(followSlot(1, new Date("2026-11-11T15:54:00.000Z"))).toBeNull();
+    expect(followSlot(1, new Date("2026-11-10T20:57:00.000Z"))).toBe("taipei:2026-11-11T04:57");
+    expect(followSlot(1, new Date("2026-11-10T20:59:00.000Z"))).toBe("taipei:2026-11-11T04:57");
+    expect(followSlot(1, new Date("2026-11-10T21:00:00.000Z"))).toBeNull();
+    expect(followSlot(1, new Date("2026-11-11T15:39:00.000Z"))).toBeNull();
     expect(followSlot(1, new Date("2026-11-11T16:00:00.000Z"))).toBe("taipei:2026-11-12T00:00");
     expect(followSlot(1, new Date("2028-02-29T16:04:00.000Z"))).toBe("taipei:2028-03-01T00:00");
 
@@ -126,7 +124,8 @@ describe("per-account follow cadence", () => {
     expect(listFollowAudit(1, { before: "taipei:2026-11-11T00:00" }).batches).toEqual([]);
     expect(listFollowAudit(1, { before: "taipei:2026-11-11T00:33" }).batches).toEqual([]);
     expect(() => listFollowAudit(1, { before: "taipei:2026-11-11T03:00" })).toThrow(/台北关注工作窗/);
-    expect(listFollowAudit(1, { before: "taipei:2026-11-11T23:39" }).batches).toEqual([]);
+    expect(() => listFollowAudit(1, { before: "taipei:2026-11-11T23:39" })).toThrow(/台北关注工作窗/);
+    expect(listFollowAudit(1, { before: "taipei:2026-11-11T04:57" }).batches).toEqual([]);
     expect(() => listFollowAudit(2, { before: "taipei:2026-11-11T00:00" })).toThrow(/伦敦关注工作窗/);
     expect(() => listFollowAudit(2, { before: "2026-11-11T03:33" })).toThrow(/伦敦关注工作窗/);
     expect(listFollowAudit(2, { before: "2026-11-11T03:00" }).batches).toEqual([]);
@@ -243,7 +242,7 @@ describe("per-account follow cadence", () => {
     enable(1);
     enable(2);
     const early = new Date("2026-11-11T16:05:00.000Z");
-    const afterLondonMidnight = new Date("2026-11-12T00:15:00.000Z");
+    const laterInWindow = new Date("2026-11-11T20:24:00.000Z");
     const calls: string[] = [];
     const hooks = {
       inspect: async () => profile({ tweetLang: "en", name: "Ada", bio: "follow back", tweetText: "hello" }),
@@ -254,9 +253,9 @@ describe("per-account follow cadence", () => {
     stock(1, [{ id: "34001", kind: "followback" }], early.toISOString(), early);
     expect((await submitFollowBatch({ accountId: 1, now: early, hooks })).followed).toBe(1);
 
-    stock(1, [{ id: "34002", kind: "followback" }], afterLondonMidnight.toISOString(), afterLondonMidnight);
-    const second = await submitFollowBatch({ accountId: 1, now: afterLondonMidnight, hooks });
-    expect(second.slot).toBe("taipei:2026-11-12T08:15");
+    stock(1, [{ id: "34002", kind: "followback" }], laterInWindow.toISOString(), laterInWindow);
+    const second = await submitFollowBatch({ accountId: 1, now: laterInWindow, hooks });
+    expect(second.slot).toBe("taipei:2026-11-12T04:24");
     expect(second.followed).toBe(1);
     const taipeiDays = getDb().prepare(
       "SELECT london_day AS day, COUNT(*) AS n FROM follow_success WHERE account_id = 1 GROUP BY london_day",

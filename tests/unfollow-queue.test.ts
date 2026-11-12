@@ -120,9 +120,9 @@ describe("account 1 unfollow batch", () => {
     for (const id of ids) fresh[id] = confirmed;
     fresh["2000"] = { ...confirmed, lastPostAt: new Date().toISOString() };
     fresh["3000"] = confirmed;
-    const now = new Date("2026-11-07T20:00:00.000Z");
+    const now = new Date("2026-11-07T21:30:00.000Z");
     const first = await submitUnfollowBatch({ accountId: 1,  now, hooks: hooks(fresh, calls) });
-    expect(first.slot).toBe("taipei:2026-11-08T03:45");
+    expect(first.slot).toBe("taipei:2026-11-08T05:15");
     expect(londonUnfollowSlot(new Date("2026-11-08T04:00:00.000Z"))).toBe("2026-11-08T03:45");
     expect(first.executed).toBe(true);
     expect(first.submitted).toBe(10);
@@ -134,8 +134,8 @@ describe("account 1 unfollow batch", () => {
     expect(replay.replay).toBe(true);
     expect(calls).toHaveLength(10);
 
-    const later = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-07T20:30:00.000Z"), hooks: hooks(fresh, calls) });
-    expect(later.slot).toBe("taipei:2026-11-08T04:15");
+    const later = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-07T22:00:00.000Z"), hooks: hooks(fresh, calls) });
+    expect(later.slot).toBe("taipei:2026-11-08T05:45");
     expect(later.submitted).toBe(8);
     expect(later.unfollowed).toBe(8);
     expect(calls).toHaveLength(18);
@@ -196,7 +196,7 @@ describe("account 1 unfollow batch", () => {
     });
     const calls: string[] = [];
     const result = await submitUnfollowBatch({ accountId: 1, 
-      now: new Date("2026-11-07T21:00:00.000Z"),
+      now: new Date("2026-11-07T21:20:00.000Z"),
       hooks: hooks(
         {
           "11": { following: null, blue: false, followsBack: false, lastPostAt: null, lastPostKnown: true },
@@ -290,12 +290,12 @@ describe("account 1 unfollow batch", () => {
         throw new Error("delete failed");
       },
     };
-    const first = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-07T21:00:00.000Z"), hooks: failing });
+    const first = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-07T21:20:00.000Z"), hooks: failing });
     expect(first.submitted).toBe(2);
     expect(first.unfollowed).toBe(0);
     expect(first.results.map((item) => item.result)).toEqual(["unknown", "failed"]);
     expect(calls).toEqual(["12"]);
-    const second = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-07T21:30:00.000Z"), hooks: failing });
+    const second = await submitUnfollowBatch({ accountId: 1,  now: new Date("2026-11-07T21:50:00.000Z"), hooks: failing });
     expect(second.executed).toBe(true);
     expect(second.submitted).toBe(0);
     expect(second.unfollowed).toBe(0);
@@ -414,7 +414,7 @@ describe("unfollow network gate", () => {
       }), { status: 200 });
     };
     try {
-      (globalThis as { __xutiNow?: Date }).__xutiNow = new Date("2026-11-07T20:20:00.000Z");
+      (globalThis as { __xutiNow?: Date }).__xutiNow = new Date("2026-11-07T21:20:00.000Z");
       importUnfollowCandidates(1, { candidates: [{ targetUserId: "555", tier: "non_blue" }] });
       const blocked = await submitBatch(new Request("http://local/api/unfollow/batches", {
         method: "POST",
@@ -547,7 +547,7 @@ describe("unfollow contract routes", () => {
       { targetUserId: "25073877", reason: "whitelist" },
       { targetUserId: "559", reason: "invalid_tier" },
     ]);
-    const now = new Date("2026-11-07T20:00:00.000Z");
+    const now = new Date("2026-11-07T21:30:00.000Z");
     const first = await submitUnfollowBatch({ accountId: 1, 
       now,
       hooks: hooks({ "555": confirmed, "556": { ...confirmed, blue: true, followsBack: true, lastPostAt: now.toISOString() }, "557": { ...confirmed, blue: true, followsBack: true, lastPostAt: now.toISOString() }, "558": { ...confirmed, blue: true, followsBack: false, lastPostAt: now.toISOString() } }, []),
@@ -556,19 +556,19 @@ describe("unfollow contract routes", () => {
     expect(first.unfollowed).toBe(1);
     importUnfollowCandidates(1, { candidates: [{ targetUserId: "560", tier: "non_blue" }] });
     await submitUnfollowBatch({ accountId: 1, 
-      now: new Date("2026-11-07T20:30:00.000Z"),
+      now: new Date("2026-11-07T22:00:00.000Z"),
       hooks: hooks({ "560": confirmed }, []),
     });
     const page = await readAudit(new Request("http://local/api/unfollow/batches?accountId=1&limit=1"));
     const audit = await page.json();
     expect(audit.limit).toBe(1);
     expect(audit.batches).toHaveLength(1);
-    expect(audit.batches[0].slot).toBe("taipei:2026-11-08T04:15");
+    expect(audit.batches[0].slot).toBe("taipei:2026-11-08T05:45");
     expect(audit.batches[0].unfollowed).toBe(1);
-    expect(audit.nextBefore).toBe("taipei:2026-11-08T04:15");
-    const older = await readAudit(new Request("http://local/api/unfollow/batches?accountId=1&limit=1&before=taipei:2026-11-08T04:15"));
+    expect(audit.nextBefore).toBe("taipei:2026-11-08T05:45");
+    const older = await readAudit(new Request("http://local/api/unfollow/batches?accountId=1&limit=1&before=taipei:2026-11-08T05:45"));
     const olderBody = await older.json();
-    expect(olderBody.batches[0].slot).toBe("taipei:2026-11-08T03:45");
+    expect(olderBody.batches[0].slot).toBe("taipei:2026-11-08T05:15");
     expect(olderBody.batches[0].submitted).toBe(4);
     expect(olderBody.batches[0].unfollowed).toBe(1);
     expect(olderBody.nextBefore).toBeNull();

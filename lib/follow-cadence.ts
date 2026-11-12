@@ -5,8 +5,11 @@ import { FOLLOW_BATCH_LIMIT } from "@/lib/unfollow-policy";
 /** Account 1 follow clock. No daylight-saving shift; the zone is still read from Intl. */
 export const ACCOUNT1_FOLLOW_ZONE = "Asia/Taipei";
 
-/** First work window of each Taipei day starts at 00:00. External pause is 03:00. */
+/** First work window of each Taipei day starts at 00:00. The window closes at 05:00. */
 export const ACCOUNT1_ANCHOR_MINUTES = 0;
+
+/** Exclusive end of account 1's follow-back window. A round open at 04:57 closes at 05:00. */
+export const ACCOUNT1_FOLLOW_WINDOW_END_MINUTES = 5 * 60;
 
 export const ACCOUNT1_WORK_MINUTES = 15;
 
@@ -46,6 +49,7 @@ export function followSlot(accountId: AccountId, now: Date): string | null {
 
 export function taipeiFollowSlot(now: Date): string | null {
   const clock = zonedClock(now, ACCOUNT1_FOLLOW_ZONE);
+  if (clock.minutes < ACCOUNT1_ANCHOR_MINUTES || clock.minutes >= ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) return null;
   const sinceAnchor = clock.minutes >= ACCOUNT1_ANCHOR_MINUTES
     ? clock.minutes - ACCOUNT1_ANCHOR_MINUTES
     : clock.minutes + DAY_MINUTES - ACCOUNT1_ANCHOR_MINUTES;
@@ -77,7 +81,9 @@ export function isAccount1FollowSlot(slot: string): boolean {
   if (month < 1 || month > 12 || hour > 23 || minute > 59) return false;
   const probe = new Date(Date.UTC(year, month - 1, date));
   if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== date) return false;
-  let since = hour * 60 + minute - ACCOUNT1_ANCHOR_MINUTES;
+  const minutes = hour * 60 + minute;
+  if (minutes < ACCOUNT1_ANCHOR_MINUTES || minutes >= ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) return false;
+  let since = minutes - ACCOUNT1_ANCHOR_MINUTES;
   if (since < 0) since += DAY_MINUTES;
   return since % ACCOUNT1_CYCLE_MINUTES === 0;
 }
