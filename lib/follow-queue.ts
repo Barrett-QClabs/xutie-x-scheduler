@@ -404,6 +404,22 @@ export function listReserveAudit(accountId: AccountId, input?: { limit?: number;
   };
 }
 
+/** Account 1 only. A following_unconfirmed row can return to reserved when newer evidence now qualifies. */
+function reopenUnconfirmedFollow(
+  accountId: AccountId,
+  found: { status: string; reason: string | null },
+  targetUserId: string,
+  kind: FollowKind,
+  checkedAt: string,
+  now: Date,
+): boolean {
+  if (accountId !== 1 || found.status !== "unknown" || found.reason !== "following_unconfirmed") return false;
+  const checked = Date.parse(checkedAt);
+  const fresh = !Number.isNaN(checked) && checked >= now.getTime() - RESERVE_FRESH_MS && checked <= now.getTime() + 5 * 60 * 1000;
+  if (!fresh) return false;
+  return evidenceGate(accountId, { target_user_id: targetUserId, kind, checked_at: checkedAt }, now).executable;
+}
+
 export function stockFollowReserve(
   accountId: AccountId,
   input: {
@@ -474,12 +490,17 @@ export function stockFollowReserve(
       existing.push(id);
       continue;
     }
-    const found = one<{ status: string }>(
-      "SELECT status FROM follow_reserve WHERE account_id = ? AND target_user_id = ?",
+    const found = one<{ status: string; reason: string | null }>(
+      "SELECT status, reason FROM follow_reserve WHERE account_id = ? AND target_user_id = ?",
       accountId,
       id,
     );
     if (found && NO_RETRY.has(found.status)) {
+      if (reopenUnconfirmedFollow(accountId, found, id, kind, checked, now)) {
+        refresh.run(username, kind, checked, followers, lastPostAt, flb, stamp, accountId, id);
+        refreshed.push(id);
+        continue;
+      }
       existing.push(id);
       continue;
     }

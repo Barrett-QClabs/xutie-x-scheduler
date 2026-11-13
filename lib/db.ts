@@ -286,6 +286,7 @@ function ensureAutomationTables(db: DatabaseSync): void {
       verified_type TEXT,
       connection_status_json TEXT,
       connection_explicit INTEGER NOT NULL,
+      connection_omission_empty INTEGER NOT NULL DEFAULT 0,
       followers_count INTEGER,
       last_post_at TEXT,
       tweet_lang TEXT,
@@ -348,6 +349,12 @@ function ensureAutomationTables(db: DatabaseSync): void {
   ensureColumn(db, "evidence_subjects", "actual_source_namespace", "ALTER TABLE evidence_subjects ADD COLUMN actual_source_namespace TEXT");
   ensureColumn(db, "evidence_subjects", "normalized_source", "ALTER TABLE evidence_subjects ADD COLUMN normalized_source TEXT");
   ensureColumn(db, "evidence_subjects", "claimed_activity_window_complete", "ALTER TABLE evidence_subjects ADD COLUMN claimed_activity_window_complete INTEGER");
+  ensureColumn(
+    db,
+    "evidence_subjects",
+    "connection_omission_empty",
+    "ALTER TABLE evidence_subjects ADD COLUMN connection_omission_empty INTEGER NOT NULL DEFAULT 0",
+  );
   ensureColumn(db, "evidence_pages", "actual_source_namespace", "ALTER TABLE evidence_pages ADD COLUMN actual_source_namespace TEXT");
   ensureColumn(db, "evidence_pages", "normalized_source", "ALTER TABLE evidence_pages ADD COLUMN normalized_source TEXT");
   ensureColumn(db, "evidence_pages", "claimed_activity_window_complete", "ALTER TABLE evidence_pages ADD COLUMN claimed_activity_window_complete INTEGER");

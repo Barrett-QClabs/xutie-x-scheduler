@@ -42,14 +42,68 @@
 }
 ```
 
-`source_namespace` 按实际值保存：中文插件 `user-X`，英文插件 `user-X--english`，公共读 `x`。旧名 `x-public` 仍可收，规范化来源记为 `public`，插件记为 `user-plugin`。`source_tool` 原样保存，包括 `get_posts_by_ids` 和 `search_posts_all`，不会改写成 `get_users_posts`。`user-X` 只接受账号1的 id，`user-X--english` 只接受账号2的 id。搜索词里的 `lang:en` 不是帖子的 `lang`。这两种抽样工具即使声明 `activity_window_complete`，入库后的有效完整标记仍是 false。
+`source_namespace` 按实际值保存：中文插件 `user-X`，英文插件 `user-X--english`，公共读 `x`。旧名 `x-public` 仍可收，规范化来源记为 `public`，插件记为 `user-plugin`。`source_tool` 原样保存，包括 `get_posts_by_ids`、`search_posts_all` 和 `search_users`，不会改写成别的工具名。`user-X` 只接受账号1的 id，`user-X--english` 只接受账号2的 id。搜索词里的 `lang:en` 不是帖子的 `lang`。这两种抽样工具即使声明 `activity_window_complete`，入库后的有效完整标记仍是 false。
 
 `GET /api/evidence?accountId=1` 返回最近页面的 `observedAt`、`expiresAt`、`fresh`、`paginationComplete`、`nextToken`、`activityWindowComplete`、`subjectCount`、`errors`，以及 `userDeveloperGets: 0`。
+
+## 账号1晚间新关注：search_users
+
+`user-X` 的 `search_users` 在请求了 `connection_status` 时，没有关系的用户对象不会带这个字段。账号1把这种缺失当成空关系。用户对象不要自己补 `connection_status: []`。`lang` 仍要有，名字或简介里要有中文，否则语言未知，新关注仍然不会执行。蓝 V 仍要 `verified: true` 且 `verified_type: "blue"`。
+
+`POST /api/evidence`
+
+```json
+{
+  "accountId": 1,
+  "evidence": {
+    "schema_version": 1,
+    "account_id": "1933586991612080128",
+    "source_namespace": "user-X",
+    "source_tool": "search_users",
+    "observed_at": "2026-11-12T10:00:00.000Z",
+    "expires_at": "2026-11-12T10:40:00.000Z",
+    "request_fields": ["id", "username", "name", "description", "verified", "verified_type", "connection_status", "lang"],
+    "coverage": {
+      "pagination_complete": true,
+      "next_token": null,
+      "activity_window_complete": false,
+      "excluded": []
+    },
+    "errors": [],
+    "evidence_refs": ["search_users:connection_status"],
+    "subjects": [
+      {
+        "id": "91001",
+        "username": "xinren",
+        "name": "中文名",
+        "description": "人工智能",
+        "verified": true,
+        "verified_type": "blue",
+        "lang": "zh"
+      }
+    ]
+  }
+}
+```
+
+`POST /api/follow/reserve`
+
+```json
+{
+  "accountId": 1,
+  "checkedAt": "2026-11-12T10:00:00.000Z",
+  "candidates": [
+    { "targetUserId": "91001", "username": "xinren", "kind": "new" }
+  ]
+}
+```
+
+`checkedAt` 是 `2026-11-12` 台北 18:00。晚间窗口只执行 `kind=new`。若该人已经是 `unknown` / `following_unconfirmed`，先送上面的证据，再用一份仍在 45 分钟内的储备把同一 id 重新放回 `reserved`。
 
 ## 不推断
 
 - 蓝 V 只在 `verified` 为 true 且 `verified_type` 为 `blue` 时成立。只有 `verified`、或工具不支持的 `is_blue_verified`，都是未知。
-- `connection_status` 必须是数组才算关系证据。原数组会留下。数组缺失就是未知，不能当成未关注或未回关。
+- `connection_status` 必须是数组才算关系证据。原数组会留下。数组缺失就是未知，不能当成未关注或未回关。唯一例外是账号1、`source_tool` 为 `search_users`、并且 `request_fields` 含 `connection_status`：该用户对象没有这个字段时，记为空关系（未关注、未回关）。程序不补写 `[]`。`source_tool` 和 `connection_omission_empty` 留在 `evidence_subjects` 里。带 `following` 的数组仍是已关注。账号2以及其他工具缺字段时仍是未知。账号1里因 `following_unconfirmed` 变成 `unknown` 的储备，之后若新证据已经合格，再次 `POST /api/follow/reserve` 可以回到 `reserved`。账号2的 unknown 不会因此重开。
 - `pagination_complete` 为 false 或仍有 `next_token` 时，不在这一页里的人没有结论。
 - 公开帖不排除回复。样本没有命中转帖，所以不把「没看见转帖」说成已经覆盖转帖。
 - 空时间线、不完整页、错误，都不能单独当成 48 小时不活跃。只有 `activity_window_complete`、分页完成、没有 errors、没有 excluded，才可以用「没有更新的帖」作为不活跃。看见一条 48 小时内的帖，则证明仍活跃。账号1另有一条：following 名次大于 1000，且免费公共读里带了最新公开帖的 `created_at`，执行时该时间严格早于 48 小时，则即使 `activity_window_complete` 为 false 也可以取关。不补写 `followedAt`。名次 1000 及以内、没有帖子时间、以及账号2，仍按原规则跳过。成功原因是 `inactive_48h_beyond_1000`。
