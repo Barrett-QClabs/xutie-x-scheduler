@@ -100,6 +100,40 @@
 
 `checkedAt` 是 `2026-11-12` 台北 18:00。晚间窗口只执行 `kind=new`。若该人已经是 `unknown` / `following_unconfirmed`，先送上面的证据，再用一份仍在 45 分钟内的储备把同一 id 重新放回 `reserved`。
 
+## 账号1新关注入池
+
+账号1、`kind=new` 可以不靠 45 分钟储备新鲜度，也不在每个槽重读蓝 V、语言或关系。`POST /api/follow/new-admission` 只收账号1。资格用请求里的快照核一次。`qualificationCheckedAt` 和 `admittedAt` 必须是可解析时间，不能晚于现在 5 分钟以上；服务端不会改成导入时间。已关注、白名单、非蓝 V、仍在关注、或不是中文的人会被拒绝。重复 id 不改原来的核实时间。
+
+执行还要当天的 `POST /api/follow/new-approval`。起止必须在同一个台北日内，结束不晚于当天 24:00。没有这份授权时，人留在池里，`executable` 为 0，批次原因是 `approval_required`。授权不刷新证据。没用完的人留到以后；下一天要新的授权才会再执行。节奏仍是台北 18:00–24:00、每 35 分钟最多 9 人。429 或 403 会暂停账号1的关注并停下这一批，剩下的人保持 `admitted`。账号2、回关和取关仍走原来的 45 分钟储备和执行时证据。
+
+`GET /api/follow?accountId=1` 的 `newAdmission` 给出 `admitted`、`executable`、`succeeded`。
+
+```json
+{
+  "accountId": 1,
+  "candidates": [{
+    "targetUserId": "91001",
+    "username": "xinren",
+    "qualificationCheckedAt": "2026-11-13T06:00:00.000Z",
+    "admittedAt": "2026-11-13T06:00:00.000Z",
+    "snapshot": {
+      "verified": true,
+      "verifiedType": "blue",
+      "following": false,
+      "lang": "zh",
+      "name": "中文名",
+      "description": "人工智能"
+    }
+  }]
+}
+```
+
+```json
+{ "accountId": 1, "approvedStart": "2026-11-13T10:00:00.000Z", "approvedEnd": "2026-11-13T16:00:00.000Z" }
+```
+
+`10:00Z` 到 `16:00Z` 是台北 18:00–24:00。
+
 ## 不推断
 
 - 蓝 V 只在 `verified` 为 true 且 `verified_type` 为 `blue` 时成立。只有 `verified`、或工具不支持的 `is_blue_verified`，都是未知。

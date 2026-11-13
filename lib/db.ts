@@ -359,6 +359,7 @@ function ensureAutomationTables(db: DatabaseSync): void {
   ensureColumn(db, "evidence_pages", "normalized_source", "ALTER TABLE evidence_pages ADD COLUMN normalized_source TEXT");
   ensureColumn(db, "evidence_pages", "claimed_activity_window_complete", "ALTER TABLE evidence_pages ADD COLUMN claimed_activity_window_complete INTEGER");
   ensureColumn(db, "unfollow_candidates", "following_rank", "ALTER TABLE unfollow_candidates ADD COLUMN following_rank INTEGER");
+  ensureNewAdmissionTables(db);
   const now = new Date().toISOString();
   for (const id of [1, 2]) {
     db.prepare(
@@ -431,6 +432,36 @@ function widenAccountTables(db: DatabaseSync): void {
 }
 
 /** Local results for DELETE /2/tweets/:id. Independent of the post queue. */
+function ensureNewAdmissionTables(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS follow_new_admission (
+      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      target_user_id TEXT NOT NULL,
+      username TEXT,
+      sequence INTEGER NOT NULL,
+      admitted_at TEXT NOT NULL,
+      qualification_checked_at TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      follow_reason TEXT NOT NULL,
+      status TEXT NOT NULL,
+      result TEXT,
+      reason TEXT,
+      slot TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+    CREATE TABLE IF NOT EXISTS follow_new_approval (
+      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      pool_day TEXT NOT NULL,
+      approved_start TEXT NOT NULL,
+      approved_end TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, pool_day)
+    );
+  `);
+}
+
 function ensurePostDeleteLog(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS post_delete_log (
@@ -864,6 +895,8 @@ export function resetAllData(): void {
     DELETE FROM follow_reserve_audit;
     DELETE FROM follow_batches;
     DELETE FROM follow_success;
+    DELETE FROM follow_new_admission;
+    DELETE FROM follow_new_approval;
     DELETE FROM evidence_subjects;
     DELETE FROM evidence_pages;
   `);

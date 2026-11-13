@@ -2,7 +2,13 @@ import type { AccountId } from "@/lib/account";
 import { audienceMatch, preferFlb, spamText } from "@/lib/audience";
 import { evidenceFollowProfile } from "@/lib/evidence";
 import { followTarget } from "@/lib/follow-live";
-import { ACCOUNT_USER_ID, audienceFor, followEnabled } from "@/lib/automation-account";
+import {
+  approvalCoversAccount1New,
+  markNewAdmission,
+  newAdmissionView,
+  pendingNewAdmissions,
+} from "@/lib/follow-new-admission";
+import { ACCOUNT_USER_ID, UNFOLLOW_WHITELIST, audienceFor, followEnabled } from "@/lib/automation-account";
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
@@ -157,6 +163,11 @@ export function getFollowStatus(accountId: AccountId, now = new Date()) {
     london_day: string;
   }>;
   const followed = followedToday(accountId, now);
+  const openForNewAdmission = accountId === 1
+    && followEnabled(1)
+    && control?.paused === 0
+    && getCredentialsRow(1)?.user_id === ACCOUNT_USER_ID[1]
+    && account1FollowPhase(now) === "new";
   return {
     accountId,
     audience: audienceFor(accountId),
@@ -171,6 +182,7 @@ export function getFollowStatus(accountId: AccountId, now = new Date()) {
     dailyCap: FOLLOW_DAILY_CAP,
     followedToday: followed,
     remainingQuota: Math.max(0, FOLLOW_DAILY_CAP - followed),
+    newAdmission: newAdmissionView(accountId, now, openForNewAdmission),
     reserve,
     recentSuccess: recent.map((row) => ({
       targetUserId: row.target_user_id,
@@ -691,13 +703,6 @@ export async function submitFollowBatch(input: {
   };
 
   const view = reserveView(accountId, now);
-  const actionable = accountId !== 1
-    ? view.available
-    : account1FollowPhase(now) === "new" ? view.newAvailable : view.followbackAvailable;
-  if (actionable === 0) {
-    return emptyFollow(accountId, now, slot, view.constraint === "stale_reserve" ? "stale_reserve" : "insufficient_candidates");
-  }
-
   const db = getDb();
   const existing = one<{ status: string; submitted: number; followed: number; results_json: string | null }>(
     "SELECT status, submitted, followed, results_json FROM follow_batches WHERE account_id = ? AND slot = ?",
@@ -724,7 +729,21 @@ export async function submitFollowBatch(input: {
     return emptyFollow(accountId, now, slot, "overlap");
   }
 
-  const picked = selectReserve(accountId, now, Math.min(followBatchLimit(accountId, now), remaining));
+  const admissionMode = accountId === 1 && account1FollowPhase(now) === "new" && pendingNewAdmissions(1).length > 0;
+  if (admissionMode && !approvalCoversAccount1New(now)) {
+    return emptyFollow(accountId, now, slot, "approval_required");
+  }
+  const actionable = accountId !== 1
+    ? view.available
+    : account1FollowPhase(now) === "new" ? view.newAvailable : view.followbackAvailable;
+  if (!admissionMode && actionable === 0) {
+    return emptyFollow(accountId, now, slot, view.constraint === "stale_reserve" ? "stale_reserve" : "insufficient_candidates");
+  }
+
+  const admitted = admissionMode
+    ? pendingNewAdmissions(Math.min(followBatchLimit(accountId, now), remaining))
+    : [];
+  const picked = admissionMode ? [] : selectReserve(accountId, now, Math.min(followBatchLimit(accountId, now), remaining));
   try {
     db.prepare(
       `INSERT INTO follow_batches (account_id, slot, status, submitted, followed, results_json, started_at)
@@ -736,6 +755,38 @@ export async function submitFollowBatch(input: {
 
   const results: FollowBatchResult["results"] = [];
   try {
+    for (const row of admitted) {
+      if (one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", accountId)?.paused !== 0) break;
+      if (followedToday(accountId, now) >= FOLLOW_DAILY_CAP) break;
+      if (UNFOLLOW_WHITELIST.has(row.targetUserId)) {
+        markNewAdmission(row.targetUserId, "failed", "whitelist", slot, now);
+        results.push({ targetUserId: row.targetUserId, kind: "new", result: "failed", reason: "whitelist" });
+        continue;
+      }
+      let outcome: { result: FollowOutcome; reason: string };
+      try {
+        await hooks.follow(row.targetUserId);
+        const succeeded = new Date().toISOString();
+        db.prepare(
+          `INSERT INTO follow_success (account_id, target_user_id, username, kind, succeeded_at, slot, london_day)
+           VALUES (1, ?, ?, 'new', ?, ?, ?)`,
+        ).run(row.targetUserId, row.username, succeeded, slot, followCapDay(accountId, now));
+        db.prepare(
+          `UPDATE follow_reserve SET status = 'followed', result = 'success', reason = ?, updated_at = ?
+           WHERE account_id = 1 AND target_user_id = ?`,
+        ).run(row.followReason, succeeded, row.targetUserId);
+        markNewAdmission(row.targetUserId, "followed", row.followReason, slot, now);
+        outcome = { result: "success", reason: row.followReason };
+      } catch (error) {
+        const risk = riskStop(error);
+        markNewAdmission(row.targetUserId, "failed", risk ?? "action_failed", slot, now);
+        outcome = { result: "failed", reason: risk ?? "action_failed" };
+        results.push({ targetUserId: row.targetUserId, kind: "new", result: outcome.result, reason: outcome.reason });
+        if (risk) setFollowPaused(1, true, risk);
+        break;
+      }
+      results.push({ targetUserId: row.targetUserId, kind: "new", result: outcome.result, reason: outcome.reason });
+    }
     for (const row of picked) {
       if (one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", accountId)?.paused !== 0) break;
       if (followedToday(accountId, now) >= FOLLOW_DAILY_CAP) break;
@@ -784,6 +835,15 @@ export async function submitFollowBatch(input: {
     constraint: after.constraint,
     results,
   };
+}
+
+function riskStop(error: unknown): "rate_limit" | "auth" | null {
+  if (!error || typeof error !== "object") return null;
+  const status = (error as { status?: unknown }).status;
+  const kind = (error as { kind?: unknown }).kind;
+  if (status === 429 || kind === "rate_limit") return "rate_limit";
+  if (status === 403 || kind === "auth") return "auth";
+  return null;
 }
 
 function parseFollowResults(raw: string | null): FollowBatchResult["results"] {
