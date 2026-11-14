@@ -36,6 +36,37 @@ const DAY_MINUTES = 24 * 60;
 
 const TAIPEI_SLOT = /^taipei:(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
 
+const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function taipeiMidnightUtc(day: string): number {
+  const [year, month, date] = day.split("-").map(Number);
+  return Date.UTC(year, month - 1, date, 0, 0, 0) - TAIPEI_OFFSET_MS;
+}
+
+/**
+ * Account 1 follow-back checked before 05:00 is usable until that 05:00.
+ * A check at 23:00 is usable until 05:00 the next Taipei morning, then stops.
+ * This does not extend evidence expiry.
+ */
+export function account1FollowbackDeadline(checkedAt: string): number | null {
+  const checked = Date.parse(checkedAt);
+  if (Number.isNaN(checked)) return null;
+  const clock = zonedClock(new Date(checked), ACCOUNT1_FOLLOW_ZONE);
+  const sameMorning = taipeiMidnightUtc(clock.day) + ACCOUNT1_FOLLOW_WINDOW_END_MINUTES * 60 * 1000;
+  if (checked < sameMorning) return sameMorning;
+  const nextMidnight = sameMorning + (24 * 60 - ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) * 60 * 1000;
+  const nextDay = zonedClock(new Date(nextMidnight), ACCOUNT1_FOLLOW_ZONE).day;
+  return taipeiMidnightUtc(nextDay) + ACCOUNT1_FOLLOW_WINDOW_END_MINUTES * 60 * 1000;
+}
+
+/** True only inside the 00:00–05:00 window that this real checkedAt belongs to. */
+export function account1FollowbackHeld(checkedAt: string, now: Date): boolean {
+  if (account1FollowPhase(now) !== "followback") return false;
+  const deadline = account1FollowbackDeadline(checkedAt);
+  if (deadline === null) return false;
+  return now.getTime() < deadline && Date.parse(checkedAt) < deadline;
+}
+
 export function account1FollowPhase(now: Date): "followback" | "new" | null {
   const minutes = zonedClock(now, ACCOUNT1_FOLLOW_ZONE).minutes;
   if (minutes < ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) return "followback";

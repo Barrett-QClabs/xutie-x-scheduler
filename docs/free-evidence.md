@@ -100,6 +100,10 @@
 
 `checkedAt` 是 `2026-11-12` 台北 18:00。晚间窗口只执行 `kind=new`。若该人已经是 `unknown` / `following_unconfirmed`，先送上面的证据，再用一份仍在 45 分钟内的储备把同一 id 重新放回 `reserved`。
 
+## 账号1回关跨夜储备
+
+账号1的 `kind=followback` 在台北 00:00–05:00 消费时，不再要求 `checkedAt` 落在 45 分钟内。23:00 记下的真实 `checkedAt` 可以用到次日 05:00，05:00 起不再选。执行仍读本地证据：`expires_at` 已过就当未知，不关注，也不把 `checkedAt` 改成现在。关系必须是蓝 V、`followed_by`、且不是 `following`。账号2和新关注的 45 分钟门不变。取关证据仍是 `min(expires_at, observed_at + 25h)`；23:00 的证据只要 `expires_at` 盖过次日 09:00，并且不超过这 25 小时，09:00 仍然有效。
+
 ## 账号1新关注入池
 
 账号1、`kind=new` 可以不靠 45 分钟储备新鲜度，也不在每个槽重读蓝 V、语言或关系。`POST /api/follow/new-admission` 只收账号1。资格用请求里的快照核一次。`qualificationCheckedAt` 和 `admittedAt` 必须是可解析时间，不能晚于现在 5 分钟以上；服务端不会改成导入时间。已关注、白名单、非蓝 V、仍在关注、或不是中文的人会被拒绝。重复 id 不改原来的核实时间。

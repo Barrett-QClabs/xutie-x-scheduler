@@ -299,7 +299,7 @@ describe("per-account follow cadence", () => {
     expect(getFollowStatus(2, now).followedToday).toBe(0);
   });
 
-  it("keeps a reserve checked 33 minutes ago and drops one checked 46 minutes ago", async () => {
+  it("keeps an account 1 follow-back checked 46 minutes ago until 05:00 and drops the previous morning", async () => {
     enable(1);
     const now = TAIPEI_0000;
     stock(1, [{ id: "35001", kind: "followback" }], new Date(now.getTime() - 33 * 60 * 1000).toISOString(), now);
@@ -311,14 +311,17 @@ describe("per-account follow cadence", () => {
     expect(fresh.followed).toBe(1);
 
     const later = new Date("2026-11-10T16:33:00.000Z");
+    const calls: string[] = [];
     stock(1, [{ id: "35002", kind: "followback" }], new Date(later.getTime() - 46 * 60 * 1000).toISOString(), later);
-    const stale = await submitFollowBatch({
+    stock(1, [{ id: "35003", kind: "followback" }], "2026-11-09T20:00:00.000Z", later);
+    const held = await submitFollowBatch({
       accountId: 1,
       now: later,
-      hooks: { inspect: async () => profile(), follow: async () => { throw new Error("stale"); } },
+      hooks: { inspect: async () => profile(), follow: async (id) => { calls.push(id); } },
     });
-    expect(stale.executed).toBe(false);
-    expect(stale.reason).toBe("stale_reserve");
+    expect(held.followed).toBe(1);
+    expect(calls).toEqual(["35002"]);
+    expect(getDb().prepare("SELECT status FROM follow_reserve WHERE target_user_id = '35003'").get()).toEqual({ status: "reserved" });
   });
 
   it("still lets account 2 take a batch of 10, including kind=new", async () => {
