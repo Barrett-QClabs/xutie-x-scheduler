@@ -102,6 +102,7 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, "tweets", "account_id", "ALTER TABLE tweets ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1");
   db.exec("CREATE INDEX IF NOT EXISTS idx_tweets_account_sched ON tweets(account_id, status, scheduled_at)");
   ensureAutomationTables(db);
+  ensurePostDeleteLog(db);
   const now = new Date().toISOString();
   for (const id of ACCOUNT_IDS) {
     db.prepare(
@@ -285,6 +286,7 @@ function ensureAutomationTables(db: DatabaseSync): void {
       verified_type TEXT,
       connection_status_json TEXT,
       connection_explicit INTEGER NOT NULL,
+      connection_omission_empty INTEGER NOT NULL DEFAULT 0,
       followers_count INTEGER,
       last_post_at TEXT,
       tweet_lang TEXT,
@@ -347,10 +349,17 @@ function ensureAutomationTables(db: DatabaseSync): void {
   ensureColumn(db, "evidence_subjects", "actual_source_namespace", "ALTER TABLE evidence_subjects ADD COLUMN actual_source_namespace TEXT");
   ensureColumn(db, "evidence_subjects", "normalized_source", "ALTER TABLE evidence_subjects ADD COLUMN normalized_source TEXT");
   ensureColumn(db, "evidence_subjects", "claimed_activity_window_complete", "ALTER TABLE evidence_subjects ADD COLUMN claimed_activity_window_complete INTEGER");
+  ensureColumn(
+    db,
+    "evidence_subjects",
+    "connection_omission_empty",
+    "ALTER TABLE evidence_subjects ADD COLUMN connection_omission_empty INTEGER NOT NULL DEFAULT 0",
+  );
   ensureColumn(db, "evidence_pages", "actual_source_namespace", "ALTER TABLE evidence_pages ADD COLUMN actual_source_namespace TEXT");
   ensureColumn(db, "evidence_pages", "normalized_source", "ALTER TABLE evidence_pages ADD COLUMN normalized_source TEXT");
   ensureColumn(db, "evidence_pages", "claimed_activity_window_complete", "ALTER TABLE evidence_pages ADD COLUMN claimed_activity_window_complete INTEGER");
   ensureColumn(db, "unfollow_candidates", "following_rank", "ALTER TABLE unfollow_candidates ADD COLUMN following_rank INTEGER");
+  ensureNewAdmissionTables(db);
   const now = new Date().toISOString();
   for (const id of [1, 2]) {
     db.prepare(
@@ -420,6 +429,50 @@ function widenAccountTables(db: DatabaseSync): void {
   );
   db.exec("DROP TABLE queue_settings");
   db.exec("ALTER TABLE queue_settings_new RENAME TO queue_settings");
+}
+
+/** Local results for DELETE /2/tweets/:id. Independent of the post queue. */
+function ensureNewAdmissionTables(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS follow_new_admission (
+      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      target_user_id TEXT NOT NULL,
+      username TEXT,
+      sequence INTEGER NOT NULL,
+      admitted_at TEXT NOT NULL,
+      qualification_checked_at TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      follow_reason TEXT NOT NULL,
+      status TEXT NOT NULL,
+      result TEXT,
+      reason TEXT,
+      slot TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+    CREATE TABLE IF NOT EXISTS follow_new_approval (
+      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      pool_day TEXT NOT NULL,
+      approved_start TEXT NOT NULL,
+      approved_end TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, pool_day)
+    );
+  `);
+}
+
+function ensurePostDeleteLog(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS post_delete_log (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      tweet_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('deleted', 'already_gone', 'error')),
+      http_status INTEGER,
+      recorded_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, tweet_id)
+    );
+  `);
 }
 
 function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
@@ -765,12 +818,76 @@ export function deleteTweet(id: string, accountId: AccountId): boolean {
   return result.changes > 0;
 }
 
+export type PostDeleteLogStatus = "deleted" | "already_gone" | "error";
+
+export type PostDeleteLogRecord = {
+  tweetId: string;
+  status: PostDeleteLogStatus;
+  httpStatus: number | null;
+  at: string;
+};
+
+type PostDeleteLogRow = {
+  tweet_id: string;
+  status: string;
+  http_status: number | null;
+  recorded_at: string;
+};
+
+function postDeleteLogRecord(row: PostDeleteLogRow): PostDeleteLogRecord | null {
+  if (row.status !== "deleted" && row.status !== "already_gone" && row.status !== "error") return null;
+  return {
+    tweetId: row.tweet_id,
+    status: row.status,
+    httpStatus: row.http_status,
+    at: row.recorded_at,
+  };
+}
+
+export function getPostDeleteLog(accountId: AccountId, tweetId: string): PostDeleteLogRecord | null {
+  const row = one<PostDeleteLogRow>(
+    `SELECT tweet_id, status, http_status, recorded_at
+     FROM post_delete_log WHERE account_id = ? AND tweet_id = ?`,
+    accountId,
+    tweetId,
+  );
+  return row ? postDeleteLogRecord(row) : null;
+}
+
+export function listPostDeleteLog(accountId: AccountId): PostDeleteLogRecord[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT tweet_id, status, http_status, recorded_at
+       FROM post_delete_log WHERE account_id = ?
+       ORDER BY recorded_at ASC, tweet_id ASC`,
+    )
+    .all(accountId) as PostDeleteLogRow[];
+  return rows.flatMap((row) => {
+    const record = postDeleteLogRecord(row);
+    return record ? [record] : [];
+  });
+}
+
+export function upsertPostDeleteLog(accountId: AccountId, record: PostDeleteLogRecord): void {
+  getDb()
+    .prepare(
+      `INSERT INTO post_delete_log (account_id, tweet_id, status, http_status, recorded_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(account_id, tweet_id) DO UPDATE SET
+         status = excluded.status,
+         http_status = excluded.http_status,
+         recorded_at = excluded.recorded_at`,
+    )
+    .run(accountId, record.tweetId, record.status, record.httpStatus, record.at);
+}
+
 /** Test helper. Production first boot stays paused; this puts the fixture queue back into the unpaused path. */
 export function resetAllData(): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.exec(`
     DELETE FROM tweets;
+    DELETE FROM post_delete_log;
     DELETE FROM credentials;
     DELETE FROM unfollow_candidates;
     DELETE FROM unfollow_batches;
@@ -778,6 +895,8 @@ export function resetAllData(): void {
     DELETE FROM follow_reserve_audit;
     DELETE FROM follow_batches;
     DELETE FROM follow_success;
+    DELETE FROM follow_new_admission;
+    DELETE FROM follow_new_approval;
     DELETE FROM evidence_subjects;
     DELETE FROM evidence_pages;
   `);
