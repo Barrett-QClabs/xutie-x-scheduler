@@ -236,7 +236,10 @@ describe("account 1 new-follow admission", () => {
 
   it("does not consume the new pool during follow-back, and carries unused people to the next approved day", async () => {
     enable(1);
-    admitAccount1NewFollows([candidate("94001")], taipei(17, 0));
+    const overnight = "2026-11-12T15:00:00.000Z";
+    admitAccount1NewFollows([
+      candidate("94001", { qualificationCheckedAt: overnight, admittedAt: overnight }),
+    ], taipei(23, 0));
     approveDay();
     stockFollowReserve(1, {
       checkedAt: taipei(0, 5).toISOString(),
@@ -264,7 +267,7 @@ describe("account 1 new-follow admission", () => {
     });
     expect(carried.reason).toBe("approval_required");
     expect(getDb().prepare("SELECT qualification_checked_at, status FROM follow_new_admission WHERE target_user_id = '94001'").get()).toEqual({
-      qualification_checked_at: CHECKED,
+      qualification_checked_at: overnight,
       status: "admitted",
     });
     approveDay("2026-11-13");

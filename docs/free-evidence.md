@@ -100,6 +100,26 @@
 
 `checkedAt` 是 `2026-11-12` 台北 18:00。晚间窗口只执行 `kind=new`。若该人已经是 `unknown` / `following_unconfirmed`，先送上面的证据，再用一份仍在 45 分钟内的储备把同一 id 重新放回 `reserved`。
 
+## 账号1日池开关
+
+账号1的运营数字存在 `follow_account_config.ops_json`。没有这份 JSON 时，账号1按已批准的日池默认运行；账号2读到 `{ "dailyPool": false, "locked": true }`，保存 `ops` 会得到 400。`GET /api/follow/config?accountId=1` 返回当前值。`PUT` 只在请求带 `ops` 时改开关，不带 `ops` 时仍只保存关键词。管理页账号1有「每天一次候选池」、回关每轮、新关注每轮、取关每批、取关日上限。保存不开始运行，也不写晚间新关注授权。
+
+批量是 1–20 的整数，取关日上限是 0–380 的整数。时区固定 `Asia/Taipei`。`slotClock` 固定 `compiled`：00:00–05:00、05:15–08:45、18:00–24:00 的槽位键不随保存移动，工作/休息分钟只能是回关 15/18、新关注 15/20。`validUntil` 分别是回关 `next_05`、取关 `next_09_capped_25h`、新关注 `next_evening_24`。关闭 `dailyPool` 后，账号1回关和新关注储备回到 45 分钟门，取关不再使用这里的日上限。
+
+日池打开时，台北 23:00 写入的真实 `checkedAt`：回关可用到次日 05:00；新关注可用到再次日 00:00，所以下一次 23:00 不会覆盖仍在使用的回关或新关注行，也不会覆盖仍在窗口内的新关注快照。窗口结束后，同一 id 可以用新的真实核实时间换上。执行不发起新的外部读取。回关和取关仍用本地证据做硬判断：未知不合格，取关仍是 `min(expires_at, observed_at + 25h)`。新关注快照不在执行时重算蓝 V 或语言；跨过 45 分钟的新关注还必须有当天、且不晚于 24:00 的人工授权。白名单、已关注、越窗、暂停、429/403 即停都保留。
+
+```json
+{
+  "accountId": 1,
+  "ops": {
+    "dailyPool": true,
+    "followback": { "batchSize": 13, "workMinutes": 15, "restMinutes": 18 },
+    "newFollow": { "batchSize": 9, "workMinutes": 15, "restMinutes": 20 },
+    "unfollow": { "batchSize": 10, "dailyCap": 80 }
+  }
+}
+```
+
 ## 账号1回关跨夜储备
 
 账号1的 `kind=followback` 在台北 00:00–05:00 消费时，不再要求 `checkedAt` 落在 45 分钟内。23:00 记下的真实 `checkedAt` 可以用到次日 05:00，05:00 起不再选。执行仍读本地证据：`expires_at` 已过就当未知，不关注，也不把 `checkedAt` 改成现在。关系必须是蓝 V、`followed_by`、且不是 `following`。账号2和新关注的 45 分钟门不变。取关证据仍是 `min(expires_at, observed_at + 25h)`；23:00 的证据只要 `expires_at` 盖过次日 09:00，并且不超过这 25 小时，09:00 仍然有效。

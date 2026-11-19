@@ -67,6 +67,29 @@ export function account1FollowbackHeld(checkedAt: string, now: Date): boolean {
   return now.getTime() < deadline && Date.parse(checkedAt) < deadline;
 }
 
+/** A 23:00 new-follow check stays usable through 24:00 the next Taipei day. */
+export function account1NewFollowDeadline(checkedAt: string): number | null {
+  const checked = Date.parse(checkedAt);
+  if (Number.isNaN(checked)) return null;
+  const clock = zonedClock(new Date(checked), ACCOUNT1_FOLLOW_ZONE);
+  const midnight = taipeiMidnightUtc(clock.day);
+  const days = clock.minutes >= ACCOUNT1_NEW_ANCHOR_MINUTES ? 2 : 1;
+  return midnight + days * 24 * 60 * 60 * 1000;
+}
+
+export function account1NewFollowHeld(checkedAt: string, now: Date): boolean {
+  if (account1FollowPhase(now) !== "new") return false;
+  const deadline = account1NewFollowDeadline(checkedAt);
+  if (deadline === null) return false;
+  return now.getTime() < deadline && Date.parse(checkedAt) < deadline;
+}
+
+/** True while a stored check is still inside its consumption window, even outside the live slot. */
+export function account1PoolInUse(kind: "followback" | "new", checkedAt: string, now: Date): boolean {
+  const deadline = kind === "followback" ? account1FollowbackDeadline(checkedAt) : account1NewFollowDeadline(checkedAt);
+  return deadline !== null && now.getTime() < deadline && Date.parse(checkedAt) < deadline;
+}
+
 export function account1FollowPhase(now: Date): "followback" | "new" | null {
   const minutes = zonedClock(now, ACCOUNT1_FOLLOW_ZONE).minutes;
   if (minutes < ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) return "followback";

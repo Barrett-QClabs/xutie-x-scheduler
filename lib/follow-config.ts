@@ -1,5 +1,6 @@
 import type { AccountId } from "@/lib/account";
 import { audienceFor } from "@/lib/automation-account";
+import { readAccountOps, saveAccountOps } from "@/lib/account-ops";
 import { getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { reserveView } from "@/lib/follow-queue";
@@ -47,7 +48,13 @@ export function getFollowConfig(accountId: AccountId, now = new Date()) {
     running: followEnabled(accountId) && control?.paused === 0,
     dailyCap: FOLLOW_DAILY_CAP,
     reserve,
+    ops: readAccountOps(accountId),
   };
+}
+
+export function saveFollowOps(accountId: AccountId, ops: unknown) {
+  const saved = saveAccountOps(accountId, ops);
+  return { ...getFollowConfig(accountId), ops: saved };
 }
 
 export function saveFollowConfig(accountId: AccountId, keywords: unknown) {

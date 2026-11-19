@@ -70,7 +70,7 @@ describe("account 1 unfollow batch", () => {
       accountId: 1,
       source: "把我取关的人，不要和我说话",
       format: "text",
-      startAt: "2026-11-08T06:25:46.000Z",
+      startAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
       intervalMinutes: 15,
       randomMinSeconds: 0,
       randomMaxSeconds: 0,

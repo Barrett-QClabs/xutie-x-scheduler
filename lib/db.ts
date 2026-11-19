@@ -359,6 +359,7 @@ function ensureAutomationTables(db: DatabaseSync): void {
   ensureColumn(db, "evidence_pages", "normalized_source", "ALTER TABLE evidence_pages ADD COLUMN normalized_source TEXT");
   ensureColumn(db, "evidence_pages", "claimed_activity_window_complete", "ALTER TABLE evidence_pages ADD COLUMN claimed_activity_window_complete INTEGER");
   ensureColumn(db, "unfollow_candidates", "following_rank", "ALTER TABLE unfollow_candidates ADD COLUMN following_rank INTEGER");
+  ensureColumn(db, "follow_account_config", "ops_json", "ALTER TABLE follow_account_config ADD COLUMN ops_json TEXT");
   ensureNewAdmissionTables(db);
   const now = new Date().toISOString();
   for (const id of [1, 2]) {
@@ -895,6 +896,7 @@ export function resetAllData(): void {
     DELETE FROM follow_reserve_audit;
     DELETE FROM follow_batches;
     DELETE FROM follow_success;
+    DELETE FROM follow_account_config;
     DELETE FROM follow_new_admission;
     DELETE FROM follow_new_approval;
     DELETE FROM evidence_subjects;

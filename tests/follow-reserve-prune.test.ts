@@ -66,7 +66,7 @@ describe("follow reserve prune", () => {
         accountId: 2,
         source: "approved english post",
         format: "text",
-        startAt: "2026-11-09T16:00:00.000Z",
+        startAt: "2026-11-18T12:00:00.000Z",
         intervalMinutes: 15,
         randomMinSeconds: 0,
         randomMaxSeconds: 0,

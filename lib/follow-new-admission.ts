@@ -1,7 +1,8 @@
 import type { AccountId } from "@/lib/account";
 import { audienceMatch, preferFlb, spamText } from "@/lib/audience";
 import { UNFOLLOW_WHITELIST } from "@/lib/automation-account";
-import { ACCOUNT1_FOLLOW_ZONE } from "@/lib/follow-cadence";
+import { dailyPoolOn } from "@/lib/account-ops";
+import { ACCOUNT1_FOLLOW_ZONE, account1NewFollowHeld, account1PoolInUse } from "@/lib/follow-cadence";
 import { getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { zonedClock } from "@/lib/london";
@@ -142,9 +143,13 @@ export function approvalCoversAccount1New(now: Date): { poolDay: string; approve
 
 export function newAdmissionView(accountId: AccountId, now: Date, executableGate: boolean): NewAdmissionView {
   if (accountId !== 1) return { admitted: 0, executable: 0, succeeded: 0, approval: null };
-  const admitted = (getDb().prepare(
-    "SELECT COUNT(*) AS n FROM follow_new_admission WHERE account_id = 1 AND status = 'admitted'",
-  ).get() as { n: number }).n;
+  const admittedRows = getDb().prepare(
+    "SELECT qualification_checked_at FROM follow_new_admission WHERE account_id = 1 AND status = 'admitted'",
+  ).all() as Array<{ qualification_checked_at: string }>;
+  const admitted = admittedRows.length;
+  const live = dailyPoolOn(1)
+    ? admittedRows.filter((row) => account1NewFollowHeld(row.qualification_checked_at, now)).length
+    : admitted;
   const succeeded = (getDb().prepare(
     "SELECT COUNT(*) AS n FROM follow_new_admission WHERE account_id = 1 AND status = 'followed'",
   ).get() as { n: number }).n;
@@ -155,7 +160,7 @@ export function newAdmissionView(accountId: AccountId, now: Date, executableGate
   const active = approvalCoversAccount1New(now);
   return {
     admitted,
-    executable: executableGate && active && admitted > 0 ? admitted : 0,
+    executable: executableGate && active && live > 0 ? live : 0,
     succeeded,
     approval: row
       ? { poolDay: row.pool_day, approvedStart: row.approved_start, approvedEnd: row.approved_end, active: Boolean(active) }
@@ -255,10 +260,21 @@ export function admitAccount1NewFollows(
       continue;
     }
     const prior = getDb().prepare(
-      "SELECT status, qualification_checked_at FROM follow_new_admission WHERE account_id = 1 AND target_user_id = ?",
-    ).get(id) as { status: string; qualification_checked_at: string } | undefined;
+      "SELECT status, qualification_checked_at, sequence FROM follow_new_admission WHERE account_id = 1 AND target_user_id = ?",
+    ).get(id) as { status: string; qualification_checked_at: string; sequence: number } | undefined;
     if (prior) {
-      existing.push(id);
+      const replaceExpired = prior.status === "admitted" && dailyPoolOn(1) && !account1PoolInUse("new", prior.qualification_checked_at, now);
+      if (!replaceExpired) {
+        existing.push(id);
+        continue;
+      }
+      const username = typeof record?.username === "string" ? record.username.slice(0, 64) : null;
+      getDb().prepare(
+        `UPDATE follow_new_admission
+         SET username = ?, admitted_at = ?, qualification_checked_at = ?, snapshot_json = ?, follow_reason = ?, updated_at = ?
+         WHERE account_id = 1 AND target_user_id = ? AND status = 'admitted'`,
+      ).run(username, admittedAt, checked, JSON.stringify(decision.stored), decision.followReason, stamp, id);
+      accepted.push({ targetUserId: id, qualificationCheckedAt: checked, sequence: prior.sequence });
       continue;
     }
     const followed = getDb().prepare(
