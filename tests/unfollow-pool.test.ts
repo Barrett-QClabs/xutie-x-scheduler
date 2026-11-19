@@ -76,7 +76,7 @@ describe("account 1 daily unfollow pool", () => {
         accountId: 1,
         source: "approved chinese post",
         format: "text",
-        startAt: "2026-11-09T15:58:07.868Z",
+        startAt: "2026-11-18T12:00:00.000Z",
         intervalMinutes: 15,
         randomMinSeconds: 0,
         randomMaxSeconds: 0,

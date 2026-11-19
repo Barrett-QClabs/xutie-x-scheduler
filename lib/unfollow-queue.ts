@@ -1,5 +1,7 @@
 import type { AccountId } from "@/lib/account";
+import { unfollowDailyCap, unfollowLimits } from "@/lib/account-ops";
 import { ACCOUNT_USER_ID, unfollowEnabled, unfollowWhitelist } from "@/lib/automation-account";
+import { zonedClock } from "@/lib/london";
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
@@ -426,7 +428,7 @@ function selectable(accountId: AccountId, row: CandidateRow): boolean {
   return Boolean(normalizeTier(row.tier)) && !unfollowWhitelist(accountId).has(row.target_user_id);
 }
 
-function selectBatch(accountId: AccountId, now?: Date, evidenceBacked = false): CandidateRow[] {
+function selectBatch(accountId: AccountId, now?: Date, evidenceBacked = false, limit = UNFOLLOW_BATCH_LIMIT): CandidateRow[] {
   return candidateRows(accountId)
     .filter((row) => selectable(accountId, row))
     .filter((row) => !evidenceBacked || !now || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh")
@@ -434,7 +436,18 @@ function selectBatch(accountId: AccountId, now?: Date, evidenceBacked = false): 
       const rank = TIER_RANK[normalizeTier(left.tier) ?? "inactive_48h"] - TIER_RANK[normalizeTier(right.tier) ?? "inactive_48h"];
       return rank || left.target_user_id.localeCompare(right.target_user_id);
     })
-    .slice(0, UNFOLLOW_BATCH_LIMIT);
+    .slice(0, limit);
+}
+
+function unfollowedOnTaipeiDay(accountId: AccountId, now: Date): number {
+  const day = zonedClock(now, "Asia/Taipei").day;
+  const row = getDb()
+    .prepare(
+      `SELECT COALESCE(SUM(unfollowed), 0) AS n FROM unfollow_batches
+       WHERE account_id = ? AND status = 'completed' AND slot LIKE ?`,
+    )
+    .get(accountId, `taipei:${day}%`) as { n: number };
+  return row.n;
 }
 
 function noteStaleEvidence(accountId: AccountId, now: Date) {
@@ -514,6 +527,15 @@ export function listUnfollowCandidates(
   };
 }
 
+function riskStop(error: unknown): "rate_limit" | "auth" | "" {
+  if (!error || typeof error !== "object") return "";
+  const status = (error as { status?: unknown }).status;
+  const kind = (error as { kind?: unknown }).kind;
+  if (status === 429 || kind === "rate_limit") return "rate_limit";
+  if (status === 403 || kind === "auth") return "auth";
+  return "";
+}
+
 function emptyResult(accountId: AccountId, slot: string | null, reason: string): UnfollowBatchResult {
   return { executed: false, replay: false, reason, slot, accountId, submitted: 0, unfollowed: 0, results: [] };
 }
@@ -533,6 +555,14 @@ export async function submitUnfollowBatch(input: {
     return emptyResult(accountId, slot, "identity_unconfirmed");
   }
   if (controlPaused(accountId)) return emptyResult(accountId, slot, "paused");
+  const limits = unfollowLimits(accountId);
+  const cap = unfollowDailyCap(accountId);
+  let room = limits?.batchSize ?? UNFOLLOW_BATCH_LIMIT;
+  if (cap !== null) {
+    const done = unfollowedOnTaipeiDay(accountId, now);
+    if (done >= cap) return emptyResult(accountId, slot, "daily_cap");
+    room = Math.min(room, cap - done);
+  }
   const sourceUserId = getCredentialsRow(accountId)?.user_id ?? "";
   const hooks = input.hooks ?? {
     inspect: async (targetUserId: string) => evidenceUnfollowProfile(accountId, targetUserId, now),
@@ -562,7 +592,7 @@ export async function submitUnfollowBatch(input: {
 
   const evidenceBacked = !input.hooks;
   if (evidenceBacked) noteStaleEvidence(accountId, now);
-  const picked = selectBatch(accountId, now, evidenceBacked);
+  const picked = selectBatch(accountId, now, evidenceBacked, room);
   try {
     db.prepare(
       `INSERT INTO unfollow_batches (account_id, slot, status, submitted, unfollowed, results_json, started_at)
@@ -595,8 +625,22 @@ export async function submitUnfollowBatch(input: {
           await hooks.unfollow(row.target_user_id);
           outcome = { result: "success", reason: decision.reason };
         }
-      } catch {
-        outcome = { result: "failed", reason: "action_failed" };
+      } catch (error) {
+        const risk = limits && riskStop(error);
+        outcome = { result: "failed", reason: risk || "action_failed" };
+        if (risk) {
+          db.prepare(
+            `UPDATE unfollow_candidates SET status = 'failed', result = 'failed', reason = ?, updated_at = ? WHERE account_id = ? AND target_user_id = ?`,
+          ).run(risk, new Date().toISOString(), accountId, row.target_user_id);
+          results.push({
+            targetUserId: row.target_user_id,
+            tier: normalizeTier(row.tier) ?? "inactive_48h",
+            result: "failed",
+            reason: risk,
+          });
+          setUnfollowPaused(accountId, true, risk);
+          break;
+        }
       }
       db.prepare(
         `UPDATE unfollow_candidates SET status = ?, result = ?, reason = ?, updated_at = ? WHERE account_id = ? AND target_user_id = ?`,

@@ -15,6 +15,7 @@ const ALLOWED_TOOLS = new Set([
   "get_user",
   "get_posts_by_ids",
   "search_posts_all",
+  "search_users",
 ]);
 const SAMPLE_POST_TOOLS = new Set(["get_posts_by_ids", "search_posts_all"]);
 
@@ -28,6 +29,8 @@ export type EvidenceSubjectView = {
   following: boolean | null;
   followsBack: boolean | null;
   connectionExplicit: boolean;
+  /** True when account 1 search_users omitted a requested connection_status. The array itself was not stored. */
+  connectionOmission: boolean;
   paginationComplete: boolean;
   activityWindowComplete: boolean;
   lastPostAt: string | null;
@@ -49,6 +52,7 @@ type SubjectRow = {
   verified: number | null;
   verified_type: string | null;
   connection_explicit: number;
+  connection_omission_empty: number | null;
   connection_status_json: string | null;
   followers_count: number | null;
   last_post_at: string | null;
@@ -153,8 +157,8 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
   );
   const insertSubject = db.prepare(
     `INSERT OR REPLACE INTO evidence_subjects
-      (account_id, source_user_id, target_user_id, observed_at, expires_at, source_namespace, actual_source_namespace, normalized_source, source_tool, pagination_complete, next_token, activity_window_complete, claimed_activity_window_complete, errors_json, verified, verified_type, connection_status_json, connection_explicit, followers_count, last_post_at, tweet_lang, name, bio, username, tweet_text, raw_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (account_id, source_user_id, target_user_id, observed_at, expires_at, source_namespace, actual_source_namespace, normalized_source, source_tool, pagination_complete, next_token, activity_window_complete, claimed_activity_window_complete, errors_json, verified, verified_type, connection_status_json, connection_explicit, connection_omission_empty, followers_count, last_post_at, tweet_lang, name, bio, username, tweet_text, raw_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const stored = getCredentialsRow(slot);
   let identityUpdated = false;
@@ -163,7 +167,12 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
     const subject = asRecord(item);
     const id = text(subject?.id);
     if (!subject || !id || !/^\d+$/.test(id)) continue;
+    const connectionPresent = Object.prototype.hasOwnProperty.call(subject, "connection_status");
     const connectionExplicit = Array.isArray(subject.connection_status);
+    const requestedConnection = (envelope.request_fields as string[]).includes("connection_status");
+    // Account 1 search_users omits connection_status when there is no relationship.
+    // Store the source and the omission. Do not write an empty array that the payload did not contain.
+    const connectionOmissionEmpty = slot === 1 && tool === "search_users" && requestedConnection && !connectionPresent ? 1 : 0;
     const blue = blueFrom(subject.verified, subject.verified_type);
     const metrics = asRecord(subject.public_metrics);
     const followers = metrics && typeof metrics.followers_count === "number" ? Math.trunc(metrics.followers_count) : null;
@@ -188,6 +197,7 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
       blue.verifiedType,
       connectionExplicit ? JSON.stringify(subject.connection_status) : null,
       connectionExplicit ? 1 : 0,
+      connectionOmissionEmpty,
       followers,
       posts.at,
       lang,
@@ -242,7 +252,7 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
 function latestRows(slot: AccountId, targetUserId: string, now: Date): SubjectRow[] {
   return getDb()
     .prepare(
-      `SELECT target_user_id, observed_at, expires_at, source_tool, pagination_complete, activity_window_complete, verified, verified_type, connection_explicit, connection_status_json, followers_count, last_post_at, tweet_lang, name, bio, username, tweet_text
+      `SELECT target_user_id, observed_at, expires_at, source_tool, pagination_complete, activity_window_complete, verified, verified_type, connection_explicit, connection_omission_empty, connection_status_json, followers_count, last_post_at, tweet_lang, name, bio, username, tweet_text
        FROM evidence_subjects
        WHERE account_id = ? AND source_user_id = ? AND target_user_id = ? AND expires_at > ?
        ORDER BY observed_at DESC`,
@@ -256,7 +266,9 @@ function interpret(rows: SubjectRow[], now: Date): EvidenceSubjectView | null {
   let blue: boolean | null = null;
   let following: boolean | null = null;
   let followsBack: boolean | null = null;
+  let relationshipKnown = false;
   let connectionExplicit = false;
+  let connectionOmission = false;
   let paginationComplete = false;
   let activityWindowComplete = false;
   let lastPostAt: string | null = null;
@@ -270,12 +282,20 @@ function interpret(rows: SubjectRow[], now: Date): EvidenceSubjectView | null {
     if (row.verified !== null && row.verified_type && blue === null) {
       blue = row.verified === 1 && row.verified_type.toLowerCase() === "blue";
     }
-    if (row.connection_explicit && !connectionExplicit) {
-      connectionExplicit = true;
-      paginationComplete = row.pagination_complete === 1;
-      const list = row.connection_status_json ? (JSON.parse(row.connection_status_json) as string[]) : [];
-      following = list.includes("following");
-      followsBack = list.includes("followed_by");
+    const omissionKnown = row.connection_omission_empty === 1 && row.source_tool === "search_users";
+    if (!relationshipKnown && (row.connection_explicit || omissionKnown)) {
+      relationshipKnown = true;
+      if (row.connection_explicit) {
+        connectionExplicit = true;
+        paginationComplete = row.pagination_complete === 1;
+        const list = row.connection_status_json ? (JSON.parse(row.connection_status_json) as string[]) : [];
+        following = list.includes("following");
+        followsBack = list.includes("followed_by");
+      } else {
+        connectionOmission = true;
+        following = false;
+        followsBack = false;
+      }
     }
     if (row.activity_window_complete === 1) activityWindowComplete = true;
     if (row.last_post_at && (!lastPostAt || row.last_post_at > lastPostAt)) lastPostAt = row.last_post_at;
@@ -293,9 +313,10 @@ function interpret(rows: SubjectRow[], now: Date): EvidenceSubjectView | null {
     sourceTool: newest.source_tool,
     fresh: Date.parse(newest.expires_at) > now.getTime(),
     blue,
-    following: connectionExplicit ? following : null,
-    followsBack: connectionExplicit ? followsBack : null,
+    following: relationshipKnown ? following : null,
+    followsBack: relationshipKnown ? followsBack : null,
     connectionExplicit,
+    connectionOmission,
     paginationComplete,
     activityWindowComplete,
     lastPostAt,

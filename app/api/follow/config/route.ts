@@ -1,5 +1,5 @@
 import { accountIdFrom } from "@/lib/account";
-import { getFollowConfig, saveFollowConfig } from "@/lib/follow-config";
+import { ensureFollowConfig, getFollowConfig, saveFollowConfig, saveFollowOps } from "@/lib/follow-config";
 import { handle, readJson } from "@/lib/http";
 
 export const runtime = "nodejs";
@@ -12,6 +12,11 @@ export function GET(request: Request) {
 export async function PUT(request: Request) {
   return handle(async () => {
     const body = await readJson(request);
-    return saveFollowConfig(accountIdFrom(request, body), body.keywords);
+    const accountId = accountIdFrom(request, body);
+    if (body.ops !== undefined) {
+      ensureFollowConfig(accountId);
+      return saveFollowOps(accountId, body.ops);
+    }
+    return saveFollowConfig(accountId, body.keywords);
   });
 }

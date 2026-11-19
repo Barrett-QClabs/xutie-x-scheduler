@@ -111,7 +111,7 @@ describe("free evidence contract", () => {
         accountId: 1,
         source: "把我取关的人，不要和我说话",
         format: "text",
-        startAt: "2026-11-08T06:25:46.000Z",
+        startAt: "2026-11-18T12:00:00.000Z",
         intervalMinutes: 15,
         randomMinSeconds: 0,
         randomMaxSeconds: 0,
@@ -170,7 +170,7 @@ describe("free evidence contract", () => {
       expect(followBody.followed ?? followBody.reason).toBeDefined();
       expect(calls.filter((item) => item.startsWith("GET"))).toEqual([]);
       expect(getQueueSettings(1).paused).toBe(false);
-      expect(posted.queued[0].scheduledAt).toBe("2026-11-08T06:25:46.000Z");
+      expect(posted.queued[0].scheduledAt).toBe("2026-11-18T12:00:00.000Z");
     });
     process.env.X_API_MODE = previous;
   });

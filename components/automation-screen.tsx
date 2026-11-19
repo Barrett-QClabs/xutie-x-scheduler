@@ -62,6 +62,11 @@ export function AutomationScreen() {
   const [err, setErr] = useState<string | null>(null);
   const [kw, setKw] = useState("");
   const [accountNote, setAccountNote] = useState("");
+  const [dailyPool, setDailyPool] = useState(true);
+  const [followBatch, setFollowBatch] = useState("13");
+  const [newBatch, setNewBatch] = useState("9");
+  const [unfollowBatch, setUnfollowBatch] = useState("10");
+  const [unfollowCap, setUnfollowCap] = useState("80");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -74,10 +79,17 @@ export function AutomationScreen() {
   useEffect(() => {
     let cancel = false;
     setKw("");
-    void api<{ keywords: string[]; running: boolean; reserve: { gap: number; constraint: string | null }; dailyCap: number; savesDoNotStart: boolean }>(`/api/follow/config?accountId=${accountId}`)
+    void api<{ keywords: string[]; running: boolean; reserve: { gap: number; constraint: string | null }; dailyCap: number; savesDoNotStart: boolean; ops?: { dailyPool?: boolean; locked?: boolean; followback?: { batchSize: number }; newFollow?: { batchSize: number }; unfollow?: { batchSize: number; dailyCap: number } } }>(`/api/follow/config?accountId=${accountId}`)
       .then((config) => {
         if (cancel) return;
         setKw(config.keywords.join(", "));
+        if (config.ops && !config.ops.locked) {
+          setDailyPool(config.ops.dailyPool !== false);
+          setFollowBatch(String(config.ops.followback?.batchSize ?? 13));
+          setNewBatch(String(config.ops.newFollow?.batchSize ?? 9));
+          setUnfollowBatch(String(config.ops.unfollow?.batchSize ?? 10));
+          setUnfollowCap(String(config.ops.unfollow?.dailyCap ?? 80));
+        }
         setAccountNote(locale === "zh"
           ? `账号${accountId} 单独配置。保存不会开始运行。运行中：${config.running ? "是" : "否"}。${accountId === 1 ? "台北日历日" : "伦敦每日"}关注加回关上限 ${config.dailyCap}。证据或候选缺口 ${config.reserve.gap}${config.reserve.constraint ? `（${config.reserve.constraint}）` : ""}。`
           : `Account ${accountId} has its own keywords. Saving does not start a run. Running: ${config.running ? "yes" : "no"}. ${accountId === 1 ? "Taipei-day" : "London daily"} follow cap ${config.dailyCap}. Evidence or candidate gap ${config.reserve.gap}${config.reserve.constraint ? ` (${config.reserve.constraint})` : ""}.`);
@@ -209,6 +221,34 @@ export function AutomationScreen() {
               finally { setBusy(false); }
             }}>{t.save}</Button>
           </div>
+          {accountId === 1 && (
+            <div className="space-y-2 text-sm">
+              <p>账号1可调：日池开关、回关每轮、新关注每轮、取关每批、取关日上限（0–80，关闭日池仍然生效）。时区、窗口和工作/休息间隔只展示，不能改。保存不会开始运行。晚间新关注无论是否在 45 分钟内，都要当天另行授权。</p>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={dailyPool} onChange={(event) => setDailyPool(event.target.checked)} /> 每天一次候选池</label>
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                <label className="space-y-1">回关每轮<Input value={followBatch} onChange={(event) => setFollowBatch(event.target.value)} aria-label="回关每轮" /></label>
+                <label className="space-y-1">新关注每轮<Input value={newBatch} onChange={(event) => setNewBatch(event.target.value)} aria-label="新关注每轮" /></label>
+                <label className="space-y-1">取关每批<Input value={unfollowBatch} onChange={(event) => setUnfollowBatch(event.target.value)} aria-label="取关每批" /></label>
+                <label className="space-y-1">取关日上限<Input value={unfollowCap} onChange={(event) => setUnfollowCap(event.target.value)} aria-label="取关日上限" /></label>
+              </div>
+              <Button disabled={busy} variant="outline" onClick={async () => {
+                setBusy(true);
+                try {
+                  await api("/api/follow/config", { method: "PUT", body: JSON.stringify({
+                    accountId: 1,
+                    ops: {
+                      dailyPool,
+                      followback: { batchSize: Number(followBatch), workMinutes: 15, restMinutes: 18 },
+                      newFollow: { batchSize: Number(newBatch), workMinutes: 15, restMinutes: 20 },
+                      unfollow: { batchSize: Number(unfollowBatch), dailyCap: Number(unfollowCap) },
+                    },
+                  }) });
+                  setAccountNote("已保存账号1的日池开关和批量。这只是配置，没有开始运行。");
+                } catch (error) { setErr(error instanceof Error ? error.message : String(error)); }
+                finally { setBusy(false); }
+              }}>保存日池</Button>
+            </div>
+          )}
           {s.pool && (
             <div className="text-sm">
               <p>{t.pool} {s.pool.date}: {s.pool.count}/{s.pool.target} · {t.remaining} {s.pool.remaining}</p>
