@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getDb, updateAccount } from "@/lib/db";
 import { evidenceFollowProfile, importEvidence, readEvidence } from "@/lib/evidence";
 import { followBatchLimit, followSlot } from "@/lib/follow-cadence";
+import { approveAccount1NewFollow } from "@/lib/follow-new-admission";
 import { stockFollowReserve, submitFollowBatch } from "@/lib/follow-queue";
 import { saveCredentials } from "@/lib/service";
 
@@ -104,6 +105,10 @@ describe("account 1 search_users relationship omission", () => {
       });
       expect(readEvidence(1, "91003", EVENING)?.following).toBeNull();
 
+      approveAccount1NewFollow({
+        approvedStart: taipei(18, 0).toISOString(),
+        approvedEnd: new Date(taipei(0, 0).getTime() + 24 * 60 * 60 * 1000).toISOString(),
+      }, EVENING);
       stockFollowReserve(1, {
         checkedAt: "2026-11-12T10:00:00.000Z",
         candidates: [
@@ -149,6 +154,10 @@ describe("account 1 search_users relationship omission", () => {
     enable(1);
     enable(2);
     importEvidence(1, envelope(1, "get_user", [user("91021")]));
+    approveAccount1NewFollow({
+      approvedStart: taipei(18, 0).toISOString(),
+      approvedEnd: new Date(taipei(0, 0).getTime() + 24 * 60 * 60 * 1000).toISOString(),
+    }, EVENING);
     stockFollowReserve(1, {
       checkedAt: "2026-11-12T10:00:00.000Z",
       candidates: [{ targetUserId: "91021", kind: "new" }],

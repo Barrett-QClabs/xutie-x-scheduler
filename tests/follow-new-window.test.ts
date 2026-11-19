@@ -6,6 +6,7 @@ import {
   followBatchLimit,
   followSlot,
 } from "@/lib/follow-cadence";
+import { approveAccount1NewFollow } from "@/lib/follow-new-admission";
 import { listFollowAudit, stockFollowReserve, submitFollowBatch, type FollowProfile } from "@/lib/follow-queue";
 import { saveCredentials } from "@/lib/service";
 
@@ -101,6 +102,10 @@ describe("account 1 evening new-follow window", () => {
     stockFollowReserve(1, {
       checkedAt: evening.toISOString(),
       candidates: Array.from({ length: 11 }, (_, index) => ({ targetUserId: String(82000 + index), kind: "new" as const })),
+    }, evening);
+    approveAccount1NewFollow({
+      approvedStart: taipei(18, 0).toISOString(),
+      approvedEnd: taipei(0, 0, "2026-11-13").toISOString(),
     }, evening);
     const eveningBatch = await submitFollowBatch({
       accountId: 1,

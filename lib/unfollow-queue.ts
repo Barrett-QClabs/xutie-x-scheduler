@@ -1,5 +1,5 @@
 import type { AccountId } from "@/lib/account";
-import { unfollowLimits } from "@/lib/account-ops";
+import { unfollowDailyCap, unfollowLimits } from "@/lib/account-ops";
 import { ACCOUNT_USER_ID, unfollowEnabled, unfollowWhitelist } from "@/lib/automation-account";
 import { zonedClock } from "@/lib/london";
 import { getCredentialsRow, getDb } from "@/lib/db";
@@ -556,11 +556,12 @@ export async function submitUnfollowBatch(input: {
   }
   if (controlPaused(accountId)) return emptyResult(accountId, slot, "paused");
   const limits = unfollowLimits(accountId);
+  const cap = unfollowDailyCap(accountId);
   let room = limits?.batchSize ?? UNFOLLOW_BATCH_LIMIT;
-  if (limits) {
+  if (cap !== null) {
     const done = unfollowedOnTaipeiDay(accountId, now);
-    if (done >= limits.dailyCap) return emptyResult(accountId, slot, "daily_cap");
-    room = Math.min(room, limits.dailyCap - done);
+    if (done >= cap) return emptyResult(accountId, slot, "daily_cap");
+    room = Math.min(room, cap - done);
   }
   const sourceUserId = getCredentialsRow(accountId)?.user_id ?? "";
   const hooks = input.hooks ?? {

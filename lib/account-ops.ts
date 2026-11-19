@@ -5,6 +5,9 @@ import { AppError } from "@/lib/errors";
 /** Compiled slot clock. Saved window numbers are shown, not used to move slot keys. */
 export const COMPILED_SLOT_CLOCK = "compiled" as const;
 
+/** Authorized account 1 unfollow cap. Config may tighten it, not raise it. */
+export const ACCOUNT1_UNFOLLOW_CAP = 80;
+
 export type AccountOps = {
   dailyPool: boolean;
   timezone: "Asia/Taipei";
@@ -39,6 +42,7 @@ export function readAccountOps(accountId: AccountId): AccountOps | { dailyPool: 
   try {
     const parsed = JSON.parse(row.ops_json) as AccountOps;
     if (typeof parsed?.dailyPool !== "boolean" || !parsed.followback || !parsed.unfollow || !parsed.newFollow) return cloneDefault();
+    parsed.unfollow = { ...ACCOUNT1_DEFAULT.unfollow, ...parsed.unfollow, dailyCap: storedUnfollowCap(parsed) };
     return parsed;
   } catch {
     return cloneDefault();
@@ -71,9 +75,9 @@ export function saveAccountOps(accountId: AccountId, input: unknown): AccountOps
   const followBatch = integer(followback?.batchSize, 1, 20);
   const newBatch = integer(fresh?.batchSize, 1, 20);
   const unfollowBatch = integer(unfollow?.batchSize, 1, 20);
-  const unfollowCap = integer(unfollow?.dailyCap, 0, 380);
+  const unfollowCap = integer(unfollow?.dailyCap, 0, ACCOUNT1_UNFOLLOW_CAP);
   if (followBatch === null || newBatch === null || unfollowBatch === null || unfollowCap === null) {
-    throw new AppError("invalid_ops", "批量必须是 1 到 20 的整数，取关日上限必须是 0 到 380 的整数。");
+    throw new AppError("invalid_ops", "批量必须是 1 到 20 的整数，取关日上限必须是 0 到 80 的整数。");
   }
   if (followback?.workMinutes !== 15 || followback?.restMinutes !== 18 || fresh?.workMinutes !== 15 || fresh?.restMinutes !== 20) {
     throw new AppError("slot_clock_fixed", "工作/休息分钟和窗口时刻固定在已编译的槽位上，只能改开关、批量和日上限。");
@@ -98,8 +102,22 @@ export function followBatchSize(accountId: AccountId, phase: "followback" | "new
   return phase === "new" ? ops.newFollow.batchSize : ops.followback.batchSize;
 }
 
+function storedUnfollowCap(ops: AccountOps): number {
+  const cap = ops.unfollow.dailyCap;
+  if (!Number.isInteger(cap) || cap < 0 || cap > ACCOUNT1_UNFOLLOW_CAP) return ACCOUNT1_UNFOLLOW_CAP;
+  return cap;
+}
+
+/** Account 1 cap stays in force when the daily pool is off. Account 2 has no cap here. */
+export function unfollowDailyCap(accountId: AccountId): number | null {
+  if (accountId !== 1) return null;
+  const ops = readAccountOps(1);
+  if (!("unfollow" in ops)) return ACCOUNT1_UNFOLLOW_CAP;
+  return storedUnfollowCap(ops);
+}
+
 export function unfollowLimits(accountId: AccountId): { batchSize: number; dailyCap: number } | null {
   const ops = accountOps(accountId);
   if (!ops) return null;
-  return { batchSize: ops.unfollow.batchSize, dailyCap: ops.unfollow.dailyCap };
+  return { batchSize: ops.unfollow.batchSize, dailyCap: storedUnfollowCap(ops) };
 }

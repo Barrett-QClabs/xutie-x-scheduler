@@ -79,6 +79,16 @@ describe("account ops", () => {
       body: JSON.stringify({ accountId: 1, ops: opsBody({ followback: { batchSize: 13, workMinutes: 10, restMinutes: 18 } }) }),
     }));
     expect(clock.status).toBe(400);
+    const overCap = await saveConfig(new Request("http://local/api/follow/config", {
+      method: "PUT",
+      body: JSON.stringify({ accountId: 1, ops: opsBody({ unfollow: { batchSize: 10, dailyCap: 81 } }) }),
+    }));
+    expect(overCap.status).toBe(400);
+    const oldCap = await saveConfig(new Request("http://local/api/follow/config", {
+      method: "PUT",
+      body: JSON.stringify({ accountId: 1, ops: opsBody({ unfollow: { batchSize: 10, dailyCap: 380 } }) }),
+    }));
+    expect(oldCap.status).toBe(400);
     const ok = await saveConfig(new Request("http://local/api/follow/config", {
       method: "PUT",
       body: JSON.stringify({ accountId: 1, ops: opsBody({ dailyPool: false, unfollow: { batchSize: 10, dailyCap: 40 } }) }),
@@ -166,6 +176,29 @@ describe("account ops", () => {
       hooks: { inspect: async () => { throw new Error("cap"); }, unfollow: async () => { throw new Error("cap"); } },
     });
     expect(capped.reason).toBe("daily_cap");
+    await saveConfig(new Request("http://local/api/follow/config", {
+      method: "PUT",
+      body: JSON.stringify({ accountId: 1, ops: opsBody({ dailyPool: false }) }),
+    }));
+    const stillCapped = await submitUnfollowBatch({
+      accountId: 1,
+      now: taipei(5, 45, "2026-11-15"),
+      hooks: { inspect: async () => { throw new Error("cap"); }, unfollow: async () => { throw new Error("cap"); } },
+    });
+    expect(stillCapped.reason).toBe("daily_cap");
+    expect(stillCapped.unfollowed).toBe(0);
+    getDb().prepare("UPDATE follow_account_config SET ops_json = ? WHERE account_id = 1").run(JSON.stringify({
+      ...opsBody({ dailyPool: false }),
+      unfollow: { batchSize: 10, dailyCap: 380 },
+    }));
+    const clamped = await (await readConfig(new Request("http://local/api/follow/config?accountId=1"))).json();
+    expect(clamped.ops.unfollow.dailyCap).toBe(80);
+    const clampedRun = await submitUnfollowBatch({
+      accountId: 1,
+      now: taipei(6, 15, "2026-11-15"),
+      hooks: { inspect: async () => { throw new Error("cap"); }, unfollow: async () => { throw new Error("cap"); } },
+    });
+    expect(clampedRun.reason).toBe("daily_cap");
     const other = await submitUnfollowBatch({
       accountId: 2,
       now: taipei(5, 20, "2026-11-15"),
@@ -175,6 +208,67 @@ describe("account ops", () => {
       },
     });
     expect(other.unfollowed).toBe(1);
+  });
+
+  it("blocks a fresh kind=new follow without today's approval and does not reuse yesterday's approval", async () => {
+    enable(1);
+    await saveConfig(new Request("http://local/api/follow/config", {
+      method: "PUT",
+      body: JSON.stringify({ accountId: 1, ops: opsBody({ dailyPool: false }) }),
+    }));
+    const evening = taipei(18, 5, "2026-11-15");
+    approveAccount1NewFollow({
+      approvedStart: taipei(18, 0, "2026-11-14").toISOString(),
+      approvedEnd: taipei(0, 0, "2026-11-15").toISOString(),
+    }, taipei(18, 5, "2026-11-14"));
+    stockFollowReserve(1, {
+      checkedAt: evening.toISOString(),
+      candidates: [{ targetUserId: "91021", kind: "new" }],
+    }, evening);
+    const calls: string[] = [];
+    const blocked = await submitFollowBatch({
+      accountId: 1,
+      now: evening,
+      hooks: { inspect: async () => profile(), follow: async (id) => { calls.push(id); } },
+    });
+    expect(blocked.reason).toBe("approval_required");
+    expect(blocked.followed).toBe(0);
+    expect(calls).toEqual([]);
+    expect(getDb().prepare("SELECT pool_day FROM follow_new_approval WHERE account_id = 1").all()).toEqual([{ pool_day: "2026-11-14" }]);
+    const morning = await submitFollowBatch({
+      accountId: 1,
+      now: taipei(0, 5, "2026-11-15"),
+      hooks: {
+        inspect: async () => ({ ...profile(), followsBack: true }),
+        follow: async (id) => { calls.push(id); },
+      },
+    });
+    expect(morning.followed).toBe(0);
+    stockFollowReserve(1, {
+      checkedAt: taipei(0, 5, "2026-11-15").toISOString(),
+      candidates: [{ targetUserId: "91022", kind: "followback" }],
+    }, taipei(0, 5, "2026-11-15"));
+    const followback = await submitFollowBatch({
+      accountId: 1,
+      now: taipei(0, 5, "2026-11-15"),
+      hooks: {
+        inspect: async () => ({ ...profile(), followsBack: true }),
+        follow: async (id) => { calls.push(id); },
+      },
+    });
+    expect(followback.followed).toBe(1);
+    expect(calls).toEqual(["91022"]);
+    approveAccount1NewFollow({
+      approvedStart: taipei(18, 0, "2026-11-15").toISOString(),
+      approvedEnd: taipei(0, 0, "2026-11-16").toISOString(),
+    }, evening);
+    const allowed = await submitFollowBatch({
+      accountId: 1,
+      now: evening,
+      hooks: { inspect: async () => profile(), follow: async (id) => { calls.push(id); } },
+    });
+    expect(allowed.followed).toBe(1);
+    expect(calls).toEqual(["91022", "91021"]);
   });
 
   it("keeps a 23:00 new-follow snapshot through the next evening, then lets the following 23:00 replace it", () => {

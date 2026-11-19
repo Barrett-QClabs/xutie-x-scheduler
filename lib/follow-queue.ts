@@ -609,7 +609,7 @@ function batchLimit(accountId: AccountId, now: Date): number {
   return followBatchSize(accountId, phase) ?? followBatchLimit(accountId, now);
 }
 
-function selectReserve(accountId: AccountId, now: Date, limit: number, dropUnapprovedHeldNew = false): ReserveRow[] {
+function selectReserve(accountId: AccountId, now: Date, limit: number): ReserveRow[] {
   const freshAfterMs = now.getTime() - RESERVE_FRESH_MS;
   const freshAfter = new Date(freshAfterMs).toISOString();
   const phase = accountId === 1 ? account1FollowPhase(now) : null;
@@ -630,10 +630,7 @@ function selectReserve(accountId: AccountId, now: Date, limit: number, dropUnapp
   const usable = hold
     ? rows.filter((row) => Date.parse(row.checked_at) >= freshAfterMs || reserveHeld(accountId, row.kind, row.checked_at, now))
     : rows;
-  const allowed = dropUnapprovedHeldNew
-    ? usable.filter((row) => Date.parse(row.checked_at) >= freshAfterMs || row.kind !== "new")
-    : usable;
-  return allowed
+  return usable
     .sort((left, right) => reserveRank(left) - reserveRank(right) || left.target_user_id.localeCompare(right.target_user_id))
     .slice(0, limit);
 }
@@ -763,7 +760,7 @@ export async function submitFollowBatch(input: {
     ? pending.filter((row) => account1NewFollowHeld(row.qualificationCheckedAt, now))
     : pending;
   const admissionMode = admitted.length > 0;
-  if (admissionMode && !approvalCoversAccount1New(now)) {
+  if (accountId === 1 && phase === "new" && !approvalCoversAccount1New(now) && (admissionMode || view.newAvailable > 0)) {
     return emptyFollow(accountId, now, slot, "approval_required");
   }
   const actionable = accountId !== 1
@@ -773,11 +770,7 @@ export async function submitFollowBatch(input: {
     return emptyFollow(accountId, now, slot, view.constraint === "stale_reserve" ? "stale_reserve" : "insufficient_candidates");
   }
 
-  const dropHeldNew = phase === "new" && dailyPoolOn(1) && !approvalCoversAccount1New(now);
-  const picked = admissionMode ? [] : selectReserve(accountId, now, Math.min(batchLimit(accountId, now), remaining), dropHeldNew);
-  if (!admissionMode && dropHeldNew && !picked.length && view.newAvailable > 0) {
-    return emptyFollow(accountId, now, slot, "approval_required");
-  }
+  const picked = admissionMode ? [] : selectReserve(accountId, now, Math.min(batchLimit(accountId, now), remaining));
   try {
     db.prepare(
       `INSERT INTO follow_batches (account_id, slot, status, submitted, followed, results_json, started_at)

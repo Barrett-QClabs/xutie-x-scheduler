@@ -223,7 +223,7 @@ export function AutomationScreen() {
           </div>
           {accountId === 1 && (
             <div className="space-y-2 text-sm">
-              <p>日池开关只作用于账号1。槽位时刻仍是已编译的 00–05 / 05:15–08:45 / 18–24，改工作分钟不会移动槽位。保存不会开始运行，也不会自动批准晚间新关注。</p>
+              <p>账号1可调：日池开关、回关每轮、新关注每轮、取关每批、取关日上限（0–80，关闭日池仍然生效）。时区、窗口和工作/休息间隔只展示，不能改。保存不会开始运行。晚间新关注无论是否在 45 分钟内，都要当天另行授权。</p>
               <label className="flex items-center gap-2"><input type="checkbox" checked={dailyPool} onChange={(event) => setDailyPool(event.target.checked)} /> 每天一次候选池</label>
               <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                 <label className="space-y-1">回关每轮<Input value={followBatch} onChange={(event) => setFollowBatch(event.target.value)} aria-label="回关每轮" /></label>
