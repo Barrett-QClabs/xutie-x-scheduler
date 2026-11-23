@@ -13,6 +13,7 @@ import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
 import { followBatchSize } from "@/lib/account-ops";
+import { account1ExecutionAllowed } from "@/lib/follow-allowlist";
 import { followBlocked } from "@/lib/follow-blocklist";
 import { account1FollowPhase, account1PoolInUse, followBatchLimit, followCapDay, followDailyCap, followSlot, isFollowAuditCursor } from "@/lib/follow-cadence";
 import { MAX_FOLLOWERS, RESERVE_FRESH_MS } from "@/lib/unfollow-policy";
@@ -664,6 +665,16 @@ function shuffleRows<T>(rows: T[], random: () => number): T[] {
   return copy;
 }
 
+const ACCOUNT1_ALLOWLIST_SQL = `
+  AND (
+    COALESCE((SELECT enforced FROM follow_allowlist_control WHERE account_id = 1), 0) = 0
+    OR EXISTS (
+      SELECT 1 FROM follow_execution_allowlist a
+      WHERE a.account_id = 1 AND a.target_user_id = __TARGET__
+    )
+  )
+`;
+
 function account1NewWaiting(): boolean {
   const reserved = one(
     `SELECT 1 AS ok FROM follow_reserve
@@ -671,7 +682,8 @@ function account1NewWaiting(): boolean {
        AND NOT EXISTS (
          SELECT 1 FROM follow_blocklist b
          WHERE b.account_id = 1 AND b.target_user_id = follow_reserve.target_user_id
-       )`,
+       )
+       ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_reserve.target_user_id")}`,
   );
   if (reserved) return true;
   return Boolean(one(
@@ -680,7 +692,8 @@ function account1NewWaiting(): boolean {
        AND NOT EXISTS (
          SELECT 1 FROM follow_blocklist b
          WHERE b.account_id = 1 AND b.target_user_id = follow_new_admission.target_user_id
-       )`,
+       )
+       ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_new_admission.target_user_id")}`,
   ));
 }
 
@@ -699,6 +712,7 @@ function selectAccount1Picks(now: Date, limit: number, random: () => number, app
            SELECT 1 FROM follow_blocklist b
            WHERE b.account_id = 1 AND b.target_user_id = follow_reserve.target_user_id
          )
+         ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_reserve.target_user_id")}
        ORDER BY target_user_id ASC`,
     )
     .all() as ReserveRow[];
@@ -722,6 +736,7 @@ function selectAccount1Picks(now: Date, limit: number, random: () => number, app
   if (approved) {
     for (const row of pendingNewAdmissions(100_000)) {
       if (seen.has(row.targetUserId) || followBlocked(1, row.targetUserId)) continue;
+      if (!account1ExecutionAllowed(row.targetUserId)) continue;
       if (!account1PoolInUse("new", row.qualificationCheckedAt, now)) continue;
       seen.add(row.targetUserId);
       picks.push({
@@ -974,6 +989,7 @@ export async function submitFollowBatch(input: {
     if (accountId === 1) {
       for (const pick of account1Picks) {
         if (one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", accountId)?.paused !== 0) break;
+        if (!account1ExecutionAllowed(pick.targetUserId)) continue;
         if (followBlocked(1, pick.targetUserId)) {
           if (pick.reserve) reserveStatus(pick.targetUserId, "skipped", "skipped", "unfollowed");
           markNewAdmission(pick.targetUserId, "failed", "unfollowed", slot, now);

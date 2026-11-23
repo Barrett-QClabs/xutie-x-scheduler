@@ -104,6 +104,7 @@ function migrate(db: DatabaseSync): void {
   ensureAutomationTables(db);
   ensurePostDeleteLog(db);
   ensureFollowBlocklist(db);
+  ensureFollowAllowlist(db);
   const now = new Date().toISOString();
   for (const id of ACCOUNT_IDS) {
     db.prepare(
@@ -492,6 +493,26 @@ function ensureFollowBlocklist(db: DatabaseSync): void {
      FROM unfollow_candidates
      WHERE account_id = 1 AND result = 'success'`,
   ).run();
+}
+
+/** Account 1 execution allowlist. Empty and enforced means nobody is followed. History tables are not changed. */
+function ensureFollowAllowlist(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS follow_allowlist_control (
+      account_id INTEGER PRIMARY KEY CHECK (account_id = 1),
+      enforced INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS follow_execution_allowlist (
+      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      target_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+  `);
+  db.prepare(
+    `INSERT OR IGNORE INTO follow_allowlist_control (account_id, enforced, updated_at) VALUES (1, 1, ?)`,
+  ).run(new Date().toISOString());
 }
 
 function ensurePostDeleteLog(db: DatabaseSync): void {
@@ -932,11 +953,13 @@ export function resetAllData(): void {
     DELETE FROM follow_account_config;
     DELETE FROM follow_new_admission;
     DELETE FROM follow_new_approval;
+    DELETE FROM follow_execution_allowlist;
     DELETE FROM evidence_subjects;
     DELETE FROM evidence_pages;
   `);
   db.prepare(`UPDATE unfollow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
   db.prepare(`UPDATE follow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
+  db.prepare(`UPDATE follow_allowlist_control SET enforced = 0, updated_at = ? WHERE account_id = 1`).run(now);
   const reset = (accountId: AccountId, paused: number, reason: string | null) => {
     db.prepare(
       `UPDATE queue_settings SET
