@@ -4,7 +4,7 @@ import { readAccountOps, saveAccountOps } from "@/lib/account-ops";
 import { getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { reserveView } from "@/lib/follow-queue";
-import { FOLLOW_DAILY_CAP } from "@/lib/unfollow-policy";
+import { followDailyCap } from "@/lib/follow-cadence";
 import { followEnabled } from "@/lib/automation-account";
 
 /** Production shared list, kept on account 1 only. */
@@ -46,7 +46,7 @@ export function getFollowConfig(accountId: AccountId, now = new Date()) {
     enabled: followEnabled(accountId),
     paused: control?.paused !== 0,
     running: followEnabled(accountId) && control?.paused === 0,
-    dailyCap: FOLLOW_DAILY_CAP,
+    dailyCap: followDailyCap(accountId),
     reserve,
     ops: readAccountOps(accountId),
   };

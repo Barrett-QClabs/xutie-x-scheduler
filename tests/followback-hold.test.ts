@@ -89,34 +89,39 @@ describe("account 1 follow-back overnight hold", () => {
       follow: async (id: string) => { follows.push(id); },
     };
     try {
-      expect(getFollowStatus(1, taipei(0, 5)).reserve.followbackAvailable).toBe(14);
-      const first = await submitFollowBatch({ accountId: 1, now: taipei(0, 5), hooks });
-      expect(first.slot).toBe("taipei:2026-11-15T00:00");
+      expect(getFollowStatus(1, taipei(0, 5)).reserve.followbackAvailable).toBe(15);
+      const first = await submitFollowBatch({ accountId: 1, now: taipei(0, 5), random: () => 0.99, hooks });
+      expect(first.slot).toBe("taipei:2026-11-14T23:51");
       expect(first.followed).toBe(13);
       expect(first.results.every((item) => item.kind === "followback" && item.reason === "followback")).toBe(true);
       const mid = await submitFollowBatch({
         accountId: 1,
-        now: taipei(2, 12),
+        now: taipei(0, 24),
         hooks: {
           inspect: async (id) => {
             const { evidenceFollowProfile } = await import("@/lib/evidence");
-            return evidenceFollowProfile(1, id, taipei(2, 12));
+            return evidenceFollowProfile(1, id, taipei(0, 24));
           },
           follow: async (id) => { follows.push(id); },
         },
+        random: () => 0.99,
       });
-      expect(mid.slot).toBe("taipei:2026-11-15T02:12");
+      expect(mid.slot).toBe("taipei:2026-11-15T00:24");
       expect(mid.followed).toBe(1);
+      expect(mid.results.find((item) => item.targetUserId === "81999")).toMatchObject({ result: "skipped", reason: "evidence_pending" });
       const late = await submitFollowBatch({
         accountId: 1,
-        now: taipei(4, 57),
+        now: taipei(0, 57),
         hooks: {
-          inspect: async () => { throw new Error("none left"); },
+          inspect: async (id) => {
+            const { evidenceFollowProfile } = await import("@/lib/evidence");
+            return evidenceFollowProfile(1, id, taipei(0, 57));
+          },
           follow: async () => { throw new Error("none left"); },
         },
       });
       expect(late.followed).toBe(0);
-      expect(late.reason).toBe("stale_reserve");
+      expect(late.results[0]).toMatchObject({ targetUserId: "81999", reason: "evidence_pending" });
       expect(getDb().prepare("SELECT status, checked_at FROM follow_reserve WHERE target_user_id = '81999'").get()).toEqual({
         status: "reserved",
         checked_at: "2026-11-13T15:00:00.000Z",
@@ -136,7 +141,7 @@ describe("account 1 follow-back overnight hold", () => {
       expect(stored.checked_at).toBe(CHECKED);
       const replay = await submitFollowBatch({
         accountId: 1,
-        now: taipei(0, 10),
+        now: taipei(0, 4),
         hooks: { inspect: async () => { throw new Error("replay"); }, follow: async () => { throw new Error("replay"); } },
       });
       expect(replay.replay).toBe(true);
@@ -166,7 +171,8 @@ describe("account 1 follow-back overnight hold", () => {
       },
     });
     expect(follows).toEqual([]);
-    expect(batch.results[0]).toMatchObject({ result: "unknown", reason: "blue_unconfirmed" });
+    expect(batch.results[0]).toMatchObject({ result: "skipped", reason: "evidence_pending" });
+    expect(getDb().prepare("SELECT status FROM follow_reserve WHERE target_user_id = '82001'").get()).toEqual({ status: "reserved" });
     expect(getDb().prepare("SELECT checked_at FROM follow_reserve WHERE target_user_id = '82001'").get()).toEqual({
       checked_at: CHECKED,
     });
@@ -190,6 +196,7 @@ describe("account 1 follow-back overnight hold", () => {
     const batch = await submitFollowBatch({
       accountId: 1,
       now: taipei(0, 5),
+      random: () => 0.99,
       hooks: {
         inspect: async (id) => {
           const { evidenceFollowProfile } = await import("@/lib/evidence");

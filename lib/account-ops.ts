@@ -12,18 +12,18 @@ export type AccountOps = {
   dailyPool: boolean;
   timezone: "Asia/Taipei";
   slotClock: typeof COMPILED_SLOT_CLOCK;
-  followback: { batchSize: number; workMinutes: 15; restMinutes: 18; windowStartMinute: 0; windowEndMinute: 300; validUntil: "next_05" };
+  followback: { batchSize: number; workMinutes: 15; restMinutes: 18; windowStartMinute: 540; windowEndMinute: 300; validUntil: "permanent" };
   unfollow: { batchSize: number; dailyCap: number; evidenceMaxHours: 25; validUntil: "next_09_capped_25h" };
-  newFollow: { batchSize: number; workMinutes: 15; restMinutes: 20; windowStartMinute: 1080; windowEndMinute: 1440; requiresApproval: true; validUntil: "next_evening_24" };
+  newFollow: { batchSize: number; workMinutes: 15; restMinutes: 20; windowStartMinute: 540; windowEndMinute: 300; requiresApproval: true; validUntil: "permanent" };
 };
 
 const ACCOUNT1_DEFAULT: AccountOps = {
   dailyPool: true,
   timezone: "Asia/Taipei",
   slotClock: COMPILED_SLOT_CLOCK,
-  followback: { batchSize: 13, workMinutes: 15, restMinutes: 18, windowStartMinute: 0, windowEndMinute: 300, validUntil: "next_05" },
+  followback: { batchSize: 13, workMinutes: 15, restMinutes: 18, windowStartMinute: 540, windowEndMinute: 300, validUntil: "permanent" },
   unfollow: { batchSize: 10, dailyCap: 80, evidenceMaxHours: 25, validUntil: "next_09_capped_25h" },
-  newFollow: { batchSize: 9, workMinutes: 15, restMinutes: 20, windowStartMinute: 1080, windowEndMinute: 1440, requiresApproval: true, validUntil: "next_evening_24" },
+  newFollow: { batchSize: 9, workMinutes: 15, restMinutes: 20, windowStartMinute: 540, windowEndMinute: 300, requiresApproval: true, validUntil: "permanent" },
 };
 
 function cloneDefault(): AccountOps {
@@ -42,8 +42,15 @@ export function readAccountOps(accountId: AccountId): AccountOps | { dailyPool: 
   try {
     const parsed = JSON.parse(row.ops_json) as AccountOps;
     if (typeof parsed?.dailyPool !== "boolean" || !parsed.followback || !parsed.unfollow || !parsed.newFollow) return cloneDefault();
-    parsed.unfollow = { ...ACCOUNT1_DEFAULT.unfollow, ...parsed.unfollow, dailyCap: storedUnfollowCap(parsed) };
-    return parsed;
+    const followBatch = integer(parsed.followback.batchSize, 1, 20) ?? ACCOUNT1_DEFAULT.followback.batchSize;
+    const newBatch = integer(parsed.newFollow.batchSize, 1, 20) ?? ACCOUNT1_DEFAULT.newFollow.batchSize;
+    return {
+      ...cloneDefault(),
+      dailyPool: parsed.dailyPool,
+      followback: { ...ACCOUNT1_DEFAULT.followback, batchSize: followBatch },
+      unfollow: { ...ACCOUNT1_DEFAULT.unfollow, batchSize: integer(parsed.unfollow.batchSize, 1, 20) ?? ACCOUNT1_DEFAULT.unfollow.batchSize, dailyCap: storedUnfollowCap(parsed) },
+      newFollow: { ...ACCOUNT1_DEFAULT.newFollow, batchSize: newBatch },
+    };
   } catch {
     return cloneDefault();
   }
@@ -96,7 +103,7 @@ export function saveAccountOps(accountId: AccountId, input: unknown): AccountOps
   return ops;
 }
 
-export function followBatchSize(accountId: AccountId, phase: "followback" | "new" | null): number | null {
+export function followBatchSize(accountId: AccountId, phase: "followback" | "new" | "unified" | null): number | null {
   const ops = accountOps(accountId);
   if (!ops || !phase) return null;
   return phase === "new" ? ops.newFollow.batchSize : ops.followback.batchSize;

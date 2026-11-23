@@ -1,6 +1,6 @@
 import type { AccountId } from "@/lib/account";
 import { londonClock, zonedClock } from "@/lib/london";
-import { FOLLOW_BATCH_LIMIT } from "@/lib/unfollow-policy";
+import { FOLLOW_BATCH_LIMIT, FOLLOW_DAILY_CAP } from "@/lib/unfollow-policy";
 
 /** Account 1 follow clock. No daylight-saving shift; the zone is still read from Intl. */
 export const ACCOUNT1_FOLLOW_ZONE = "Asia/Taipei";
@@ -8,8 +8,20 @@ export const ACCOUNT1_FOLLOW_ZONE = "Asia/Taipei";
 /** First work window of each Taipei day starts at 00:00. The window closes at 05:00. */
 export const ACCOUNT1_ANCHOR_MINUTES = 0;
 
-/** Exclusive end of account 1's follow-back window. A round open at 04:57 closes at 05:00. */
+/** Quiet hours start. Account 1 does not follow from 05:00 inclusive until 09:00. */
 export const ACCOUNT1_FOLLOW_WINDOW_END_MINUTES = 5 * 60;
+
+/** Work resumes at 09:00 Taipei. The 15/18 cycle is anchored here, including across midnight until 05:00. */
+export const ACCOUNT1_OPEN_START_MINUTES = 9 * 60;
+
+/** Account 1 combined follow + follow-back cap for one Taipei civil day. Account 2 stays on FOLLOW_DAILY_CAP. */
+export const ACCOUNT1_FOLLOW_DAILY_CAP = 350;
+
+/**
+ * History before 2026-11-23 14:27 Asia/Taipei is not backfilled.
+ * Confirmed unfollow successes already stored are kept; later successes are recorded as they happen.
+ */
+export const ACCOUNT1_UNFOLLOW_BASELINE_AT = "2026-11-23T06:27:00.000Z";
 
 export const ACCOUNT1_WORK_MINUTES = 15;
 
@@ -59,12 +71,11 @@ export function account1FollowbackDeadline(checkedAt: string): number | null {
   return taipeiMidnightUtc(nextDay) + ACCOUNT1_FOLLOW_WINDOW_END_MINUTES * 60 * 1000;
 }
 
-/** True only inside the 00:00–05:00 window that this real checkedAt belongs to. */
+/** The morning hold no longer gates execution. Inventory stays until it is used or blocked. */
 export function account1FollowbackHeld(checkedAt: string, now: Date): boolean {
-  if (account1FollowPhase(now) !== "followback") return false;
-  const deadline = account1FollowbackDeadline(checkedAt);
-  if (deadline === null) return false;
-  return now.getTime() < deadline && Date.parse(checkedAt) < deadline;
+  void checkedAt;
+  void now;
+  return false;
 }
 
 /** A 23:00 new-follow check stays usable through 24:00 the next Taipei day. */
@@ -77,28 +88,41 @@ export function account1NewFollowDeadline(checkedAt: string): number | null {
   return midnight + days * 24 * 60 * 60 * 1000;
 }
 
+/** The evening hold no longer gates execution. Inventory stays until it is used or blocked. */
 export function account1NewFollowHeld(checkedAt: string, now: Date): boolean {
-  if (account1FollowPhase(now) !== "new") return false;
-  const deadline = account1NewFollowDeadline(checkedAt);
-  if (deadline === null) return false;
-  return now.getTime() < deadline && Date.parse(checkedAt) < deadline;
+  void checkedAt;
+  void now;
+  return false;
 }
 
-/** True while a stored check is still inside its consumption window, even outside the live slot. */
+/**
+ * Account 1 inventory does not expire by calendar day.
+ * A real checked time stays in the permanent pool; a missing or future stamp does not.
+ */
 export function account1PoolInUse(kind: "followback" | "new", checkedAt: string, now: Date): boolean {
-  const deadline = kind === "followback" ? account1FollowbackDeadline(checkedAt) : account1NewFollowDeadline(checkedAt);
-  return deadline !== null && now.getTime() < deadline && Date.parse(checkedAt) < deadline;
+  void kind;
+  const checked = Date.parse(checkedAt);
+  if (Number.isNaN(checked)) return false;
+  return checked <= now.getTime() + 5 * 60 * 1000;
 }
 
-export function account1FollowPhase(now: Date): "followback" | "new" | null {
+export function account1QuietHours(minutes: number): boolean {
+  return minutes >= ACCOUNT1_FOLLOW_WINDOW_END_MINUTES && minutes < ACCOUNT1_OPEN_START_MINUTES;
+}
+
+/** Open during the 20 hours outside 05:00–09:00. Kind no longer selects a separate window. */
+export function account1FollowPhase(now: Date): "unified" | null {
   const minutes = zonedClock(now, ACCOUNT1_FOLLOW_ZONE).minutes;
-  if (minutes < ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) return "followback";
-  if (minutes >= ACCOUNT1_NEW_ANCHOR_MINUTES) return "new";
-  return null;
+  if (account1QuietHours(minutes)) return null;
+  return "unified";
+}
+
+export function followDailyCap(accountId: AccountId): number {
+  return accountId === 1 ? ACCOUNT1_FOLLOW_DAILY_CAP : FOLLOW_DAILY_CAP;
 }
 
 export function followBatchLimit(accountId: AccountId, now?: Date): number {
-  if (accountId === 1 && now && account1FollowPhase(now) === "new") return ACCOUNT1_NEW_BATCH_LIMIT;
+  void now;
   return accountId === 1 ? ACCOUNT1_FOLLOW_BATCH_LIMIT : FOLLOW_BATCH_LIMIT;
 }
 
@@ -114,15 +138,30 @@ export const ACCOUNT2_FOLLOW_WORK_MINUTES = 15;
 
 /**
  * Work-window start for this account, or null during rest.
- * Account 1 is the 33-minute Taipei cycle, open only until 05:00.
- * Account 2 is 15/15 from 00:00 Taipei. The 05:00 pause is external.
+ * Account 1 works 15 minutes and rests 18, anchored at 09:00, and is closed 05:00–09:00.
+ * The cycle continues from 09:00 through midnight until 05:00. Account 2 is unchanged.
  */
 export function followSlot(accountId: AccountId, now: Date): string | null {
   if (accountId === 2) return account2FollowSlot(now);
-  const phase = account1FollowPhase(now);
-  if (phase === "new") return taipeiNewFollowSlot(now);
-  if (phase === "followback") return taipeiFollowSlot(now);
-  return null;
+  return account1UnifiedSlot(now);
+}
+
+export function account1UnifiedSlot(now: Date): string | null {
+  const clock = zonedClock(now, ACCOUNT1_FOLLOW_ZONE);
+  if (account1QuietHours(clock.minutes)) return null;
+  const since = clock.minutes >= ACCOUNT1_OPEN_START_MINUTES
+    ? clock.minutes - ACCOUNT1_OPEN_START_MINUTES
+    : clock.minutes + DAY_MINUTES - ACCOUNT1_OPEN_START_MINUTES;
+  const offset = since % ACCOUNT1_CYCLE_MINUTES;
+  if (offset >= ACCOUNT1_WORK_MINUTES) return null;
+  let start = clock.minutes - offset;
+  let day = clock.day;
+  if (start < 0) {
+    start += DAY_MINUTES;
+    day = previousCivilDay(day);
+  }
+  if (account1QuietHours(start)) return null;
+  return `${ACCOUNT1_SLOT_PREFIX}${day}T${hhmm(start)}`;
 }
 
 export function taipeiNewFollowSlot(now: Date): string | null {
@@ -160,7 +199,7 @@ export function taipeiFollowSlot(now: Date): string | null {
   return `${ACCOUNT1_SLOT_PREFIX}${day}T${hhmm(start)}`;
 }
 
-/** Audit cursor: each account accepts only its own Taipei work-window starts. */
+/** Audit cursor: account 1 still accepts completed historical keys plus the unified grid. */
 export function isFollowAuditCursor(accountId: AccountId, slot: string): boolean {
   if (accountId === 1) return isAccount1FollowSlot(slot) || isAccount1NewFollowSlot(slot);
   return isAccount2FollowSlot(slot);
@@ -196,21 +235,37 @@ export function isAccount2FollowSlot(slot: string): boolean {
 }
 
 export function isAccount1FollowSlot(slot: string): boolean {
+  return isAccount1UnifiedSlot(slot) || isLegacyAccount1FollowbackSlot(slot);
+}
+
+export function isAccount1UnifiedSlot(slot: string): boolean {
+  const minutes = taipeiSlotMinutes(slot);
+  if (minutes === null || account1QuietHours(minutes)) return false;
+  if (minutes >= ACCOUNT1_OPEN_START_MINUTES) {
+    return (minutes - ACCOUNT1_OPEN_START_MINUTES) % ACCOUNT1_CYCLE_MINUTES === 0;
+  }
+  return (minutes + DAY_MINUTES - ACCOUNT1_OPEN_START_MINUTES) % ACCOUNT1_CYCLE_MINUTES === 0;
+}
+
+/** Completed 00:00–05:00 keys stay valid cursors. They are not generated again. */
+function isLegacyAccount1FollowbackSlot(slot: string): boolean {
+  const minutes = taipeiSlotMinutes(slot);
+  if (minutes === null || minutes >= ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) return false;
+  return minutes % ACCOUNT1_CYCLE_MINUTES === 0;
+}
+
+function taipeiSlotMinutes(slot: string): number | null {
   const match = TAIPEI_SLOT.exec(slot);
-  if (!match) return false;
+  if (!match) return null;
   const year = Number(match[1]);
   const month = Number(match[2]);
   const date = Number(match[3]);
   const hour = Number(match[4]);
   const minute = Number(match[5]);
-  if (month < 1 || month > 12 || hour > 23 || minute > 59) return false;
+  if (month < 1 || month > 12 || hour > 23 || minute > 59) return null;
   const probe = new Date(Date.UTC(year, month - 1, date));
-  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== date) return false;
-  const minutes = hour * 60 + minute;
-  if (minutes < ACCOUNT1_ANCHOR_MINUTES || minutes >= ACCOUNT1_FOLLOW_WINDOW_END_MINUTES) return false;
-  let since = minutes - ACCOUNT1_ANCHOR_MINUTES;
-  if (since < 0) since += DAY_MINUTES;
-  return since % ACCOUNT1_CYCLE_MINUTES === 0;
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== date) return null;
+  return hour * 60 + minute;
 }
 
 function hhmm(totalMinutes: number): string {

@@ -140,7 +140,7 @@ describe.skipIf(!chrome)("settings account switch in the browser", () => {
     await page.setViewport({ width: 1280, height: 800 });
     await page.goto(`${origin}/automation`, { waitUntil: "networkidle0" });
     await page.click('[data-testid="nav-slot-1"]');
-    await page.waitForFunction(() => document.body.innerText.includes("台北日历日关注加回关上限 380"));
+    await page.waitForFunction(() => document.body.innerText.includes("台北日历日关注加回关上限 350"));
     expect(await page.evaluate(() => document.body.innerText.includes("伦敦每日关注加回关上限"))).toBe(false);
 
     await page.click('[data-testid="nav-slot-2"]');
@@ -153,7 +153,7 @@ describe.skipIf(!chrome)("settings account switch in the browser", () => {
     });
     await page.waitForFunction(() => document.body.innerText.includes("London daily follow cap 380"));
     await page.click('[data-testid="nav-slot-1"]');
-    await page.waitForFunction(() => document.body.innerText.includes("Taipei-day follow cap 380"));
+    await page.waitForFunction(() => document.body.innerText.includes("Taipei-day follow cap 350"));
     expect(await page.evaluate(() => document.body.innerText.includes("London daily follow cap"))).toBe(false);
   }, 60_000);
 });

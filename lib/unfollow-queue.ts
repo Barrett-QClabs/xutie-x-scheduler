@@ -1,6 +1,7 @@
 import type { AccountId } from "@/lib/account";
 import { unfollowDailyCap, unfollowLimits } from "@/lib/account-ops";
 import { ACCOUNT_USER_ID, unfollowEnabled, unfollowWhitelist } from "@/lib/automation-account";
+import { recordAccount1UnfollowBlock } from "@/lib/follow-blocklist";
 import { zonedClock } from "@/lib/london";
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
@@ -624,6 +625,7 @@ export async function submitUnfollowBatch(input: {
         else {
           await hooks.unfollow(row.target_user_id);
           outcome = { result: "success", reason: decision.reason };
+          if (accountId === 1) recordAccount1UnfollowBlock(row.target_user_id, now);
         }
       } catch (error) {
         const risk = limits && riskStop(error);

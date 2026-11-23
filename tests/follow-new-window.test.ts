@@ -50,20 +50,20 @@ afterEach(() => {
   delete process.env.XUTIE_ACCOUNT2_FOLLOW;
 });
 
-describe("account 1 evening new-follow window", () => {
-  it("runs kind=new only from 18:00 to 24:00, nine per round, with a 20-minute rest", () => {
+describe("account 1 unified follow window", () => {
+  it("keeps the 15/18 cadence outside 05:00–09:00 and still accepts old evening cursors", () => {
     expect(ACCOUNT1_NEW_CYCLE_MINUTES).toBe(35);
     expect(ACCOUNT1_NEW_BATCH_LIMIT).toBe(9);
-    expect(followSlot(1, taipei(17, 59))).toBeNull();
-    expect(followSlot(1, taipei(18, 0))).toBe("taipei-new:2026-11-12T18:00");
-    expect(followSlot(1, taipei(18, 14))).toBe("taipei-new:2026-11-12T18:00");
-    expect(followSlot(1, taipei(18, 15))).toBeNull();
-    expect(followSlot(1, taipei(18, 34))).toBeNull();
-    expect(followSlot(1, taipei(18, 35))).toBe("taipei-new:2026-11-12T18:35");
-    expect(followSlot(1, taipei(23, 50))).toBe("taipei-new:2026-11-12T23:50");
-    expect(followSlot(1, taipei(23, 59))).toBe("taipei-new:2026-11-12T23:50");
-    expect(followSlot(1, taipei(0, 0, "2026-11-13"))).toBe("taipei:2026-11-13T00:00");
-    expect(followBatchLimit(1, taipei(18, 0))).toBe(9);
+    expect(followSlot(1, taipei(5, 0))).toBeNull();
+    expect(followSlot(1, taipei(8, 59))).toBeNull();
+    expect(followSlot(1, taipei(17, 48))).toBe("taipei:2026-11-12T17:48");
+    expect(followSlot(1, taipei(18, 0))).toBe("taipei:2026-11-12T17:48");
+    expect(followSlot(1, taipei(18, 2))).toBe("taipei:2026-11-12T17:48");
+    expect(followSlot(1, taipei(18, 3))).toBeNull();
+    expect(followSlot(1, taipei(18, 21))).toBe("taipei:2026-11-12T18:21");
+    expect(followSlot(1, taipei(23, 51))).toBe("taipei:2026-11-12T23:51");
+    expect(followSlot(1, taipei(0, 0, "2026-11-13"))).toBe("taipei:2026-11-12T23:51");
+    expect(followBatchLimit(1, taipei(18, 0))).toBe(13);
     expect(followBatchLimit(1, taipei(0, 5))).toBe(13);
     expect(followSlot(2, taipei(18, 0))).toBe("taipei:2026-11-12T18:00");
     expect(followBatchLimit(2, taipei(18, 0))).toBe(10);
@@ -75,7 +75,7 @@ describe("account 1 evening new-follow window", () => {
   it("does not follow kind=new in the follow-back window or follow-backs in the evening", async () => {
     enable(1);
     const morning = taipei(0, 5);
-    const evening = taipei(18, 5);
+    const evening = taipei(18, 0);
     stockFollowReserve(1, {
       checkedAt: morning.toISOString(),
       candidates: [
@@ -92,7 +92,7 @@ describe("account 1 evening new-follow window", () => {
         follow: async (id) => { calls.push(id); },
       },
     });
-    expect(morningBatch.slot).toBe("taipei:2026-11-12T00:00");
+    expect(morningBatch.slot).toBe("taipei:2026-11-11T23:51");
     expect(morningBatch.results.map((item) => item.targetUserId)).toEqual(["81002"]);
     expect(getDb().prepare("SELECT status, kind FROM follow_reserve WHERE target_user_id = '81001'").get()).toEqual({
       status: "reserved",
@@ -115,16 +115,16 @@ describe("account 1 evening new-follow window", () => {
         follow: async (id) => { calls.push(id); },
       },
     });
-    expect(eveningBatch.slot).toBe("taipei-new:2026-11-12T18:00");
-    expect(eveningBatch.followed).toBe(9);
+    expect(eveningBatch.slot).toBe("taipei:2026-11-12T17:48");
+    expect(eveningBatch.followed).toBe(12);
     expect(eveningBatch.results.every((item) => item.kind === "new")).toBe(true);
     expect(calls[0]).toBe("81002");
-    expect(calls.slice(1)).toHaveLength(9);
-    expect(calls.slice(1)).not.toContain("81002");
+    expect(calls).toContain("81001");
+    expect(calls.filter((id) => id !== "81002")).toHaveLength(12);
     expect(getDb().prepare("SELECT status FROM follow_reserve WHERE target_user_id = '81002'").get()).toEqual({ status: "followed" });
     const leftNew = getDb().prepare(
       "SELECT COUNT(*) AS n FROM follow_reserve WHERE account_id = 1 AND kind = 'new' AND status = 'reserved'",
     ).get() as { n: number };
-    expect(leftNew.n).toBe(3);
+    expect(leftNew.n).toBe(0);
   });
 });
