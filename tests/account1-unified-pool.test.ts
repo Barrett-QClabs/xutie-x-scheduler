@@ -279,6 +279,57 @@ describe("account 1 unified permanent pool", () => {
     expect(batch.reason).toBe("insufficient_candidates");
   });
 
+  it("does not replay today's completed legacy slots on the new grid", async () => {
+    enable(1);
+    const day = "2026-11-23";
+    const legacy: string[] = [];
+    for (let minutes = 0; minutes < 5 * 60; minutes += 33) {
+      const hour = Math.floor(minutes / 60);
+      const minute = minutes % 60;
+      legacy.push(`taipei:${day}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`);
+    }
+    for (let minutes = 18 * 60; minutes < 24 * 60; minutes += 35) {
+      const hour = Math.floor(minutes / 60);
+      const minute = minutes % 60;
+      legacy.push(`taipei-new:${day}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`);
+    }
+    const insert = getDb().prepare(
+      `INSERT INTO follow_batches (account_id, slot, status, submitted, followed, results_json, started_at, finished_at)
+       VALUES (1, ?, 'completed', 1, 1, '[]', ?, ?)`,
+    );
+    const stamp = taipei(0, 0, day).toISOString();
+    for (const slot of legacy) insert.run(slot, stamp, stamp);
+    const emitted = new Set<string>();
+    for (let minute = 0; minute < 24 * 60; minute += 1) {
+      const slot = followSlot(1, taipei(Math.floor(minute / 60), minute % 60, day));
+      if (!slot) continue;
+      expect(legacy).not.toContain(slot);
+      emitted.add(slot);
+    }
+    expect(emitted.has("taipei:2026-11-23T14:30")).toBe(true);
+    expect(emitted.has("taipei:2026-11-23T09:00")).toBe(true);
+    expect(followSlot(1, taipei(0, 0, day))).toBe("taipei:2026-11-22T23:51");
+    expect(followSlot(1, taipei(5, 0, day))).toBeNull();
+    stock([{ id: "88001", kind: "followback" }], taipei(14, 35, day));
+    const calls: string[] = [];
+    const batch = await submitFollowBatch({
+      accountId: 1,
+      now: taipei(14, 35, day),
+      hooks: { inspect: async () => profile(), follow: async (id) => { calls.push(id); } },
+    });
+    expect(batch.replay).toBe(false);
+    expect(batch.slot).toBe("taipei:2026-11-23T14:30");
+    expect(calls).toEqual(["88001"]);
+    expect(getDb().prepare("SELECT status, followed FROM follow_batches WHERE slot = 'taipei:2026-11-23T00:00'").get()).toEqual({
+      status: "completed",
+      followed: 1,
+    });
+    expect(getDb().prepare("SELECT status, followed FROM follow_batches WHERE slot = 'taipei-new:2026-11-23T18:00'").get()).toEqual({
+      status: "completed",
+      followed: 1,
+    });
+  });
+
   it("stops the account 1 batch on a rate limit and leaves account 2 off that blocklist", async () => {
     enable(1);
     enable(2);

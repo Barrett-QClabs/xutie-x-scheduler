@@ -1,47 +1,102 @@
-# 账号1统一关注池升级与回滚
+# 账号1统一关注池：升级命令、控制项和回滚
 
-这份说明只覆盖账号1的关注和回关。发帖、取关节奏、取关白名单和账号2的调度都不变。不要用落后于 `0fbb2db34ca3327b703df88c87d3e8929c953583` 的 `main` 覆盖生产。
+只改账号1的关注和回关。发帖队列、取关窗口和白名单、账号2的调度都不要动。不要用落后于 `0fbb2db34ca3327b703df88c87d3e8929c953583` 的 `main` 覆盖生产。
 
-本包不访问 X，不连接用户机器，也不把 `X_API_MODE` 改成 `live`。父级部署后自行核验。
+已登记、可复制的源码包：
 
-## 行为
+- `/opt/cursor/artifacts/xutie-account1-unified-0d8a.tar.gz`
+- sha256 `11a232b2e260b9fdc0ab919c50f60966603fa48def7a92535567f8b9d54fbcbc`
+- 对应提交 `ccd9bc26c12252b36ad35d825524911049cf1bfa`，CI 已通过
 
-- 账号1在台北 05:00–09:00 不关注。09:00 恢复，锚点是 09:00，15 分钟工作、18 分钟休息。14:35 属于 `taipei:当天T14:30`。
-- 关注和回关从同一永久池随机抽取。`followed_by` 只保留为资格，不再分成两个执行窗口。
-- 合计上限 350，按台北自然日，包含尚未落账的在途名额。350 不是要追满的目标。
-- 未使用的候选跨日保留。已成功关注的人、同一请求里的重复 id，以及确认取关过的人不再执行。
-- `kind=new` 仍要当天授权。没有授权时回关继续，不会把整池停住。
-- 蓝 V、语言、垃圾文本、已关注和白名单核验保持原样。证据缺失时跳过此人并留在池中。
-- 429 或 403 暂停账号1关注并停止这一批。
-- 历史新基线是 2026-11-23 14:27 台北（`2026-11-23T06:27:00.000Z`）。基线前没有落成 `result=success` 的取关不补查、不阻塞全池。库里已经确认的取关成功会进入黑名单。此后每次账号1取关成功都写入黑名单。
+这个包不含本段补充说明的后续文档提交。运行行为与该提交相同。部署前先核对 sha256。
 
-## 迁移
+本说明不访问 X，不在用户机器上执行。`X_API_MODE` 维持现场原值，不要为了这次升级改它。
 
-进程打开现有 SQLite 时自动执行，可重复运行：
+## 已完成槽不会被新网格重跑
 
-1. 创建 `follow_blocklist` 和 `follow_inflight`（已存在则跳过）。
-2. 把账号1 `unfollow_candidates.result = 'success'` 的行 `INSERT OR IGNORE` 进黑名单，来源 `unfollow_confirmed`。
-3. 不删除、不改写 `follow_success`、`follow_batches`、发帖队列、取关批次或账号2的行。
-4. 已完成的关注槽保持完成。新槽键与旧的 `00:00` 系列和 `taipei-new:` 不重合，因此不会重跑已完成关注。
+旧回关键是当天 `taipei:YYYY-MM-DDT` 加上 00:00、00:33、01:06、01:39、02:12、02:45、03:18、03:51、04:24、04:57。旧新关注键用前缀 `taipei-new:`。新网格不生成这些键。00:00 现在属于前一天的 `taipei:前一天T23:51`，14:35 属于 `taipei:当天T14:30`。
 
-升级前先复制数据库文件。不要运行 `install.sh`，不要清空数据卷，不要更换 `CREDENTIALS_ENCRYPTION_KEY`。
+因此 2026-11-23 已经写成 `completed` 的旧槽保持 `completed`，`followed` 不变。新槽是另一条主键，只会处理还没成功关注、也不在取关黑名单里的人。同一条新槽再次调用只回放，不第二次关注。
 
-## 构建
+## 控制项：要改的和不要动的
 
-在干净目录用本分支源码：
+程序本身不会在 05:00 把账号1关注写成暂停，也不会等到 18:00 才给槽。05:00–09:00 只是 `followSlot` 为空，原因 `rest`。09:00 只要 `follow_control` 仍是未暂停，就会自己进入 `taipei:当天T09:00`。
+
+要改的只有账号1关注这一侧：
+
+1. 停掉还会在 05:00 调用 `POST /api/follow/pause` 且 `accountId` 为 1、并要等到 00:00 才 `resume` 的外部例程。那个例程会把 09:00–24:00 整段关掉。05:00–09:00 的空窗由槽钟负责，不需要暂停开关。
+2. 若升级时账号1关注已经是暂停，只对账号1调用一次下面的 resume。不要对账号2调用。
+3. 每个台北日用现有的审批接口写一条覆盖当天 00:00 到次日 00:00 的 `kind=new` 授权。这不是绕过审批。18:00 才授权会让 09:00–18:00 的新人停着；回关不看这份授权，所以缺授权不会关掉回关。程序不会自动补授权，昨日授权也不能用到今天。
+
+不要改这些：
+
+- `POST /api/queue/resume` 或发帖暂停。那是发帖。
+- `XUTIE_ACCOUNT2_FOLLOW`、`XUTIE_ACCOUNT2_UNFOLLOW`、账号2的 `follow_control`。
+- `XUTIE_ACCOUNT1_UNFOLLOW` 和取关暂停。取关仍只在台北 05:00–09:00 的 :15 和 :45。
+- `XUTIE_AUTOMATION_SUPERVISOR`，保持 `off`。不要启动 `automation/*.mjs`。
+- 白名单、关键词是否降低资格、`CREDENTIALS_ENCRYPTION_KEY`。
+
+## 顺序
+
+下面的地址按现场反代替换。只在已确认身份的本机或现有管理入口上调用。
+
+1. 复制数据库，例如 `data/xqueue.sqlite` 和它的 `-wal`、`-shm`。不要运行 `install.sh`。
+2. 用本包构建并换上进程，挂载原数据卷和原加密密钥。进程打开数据库时自动做迁移，重复启动不会再插同一条黑名单，也不会改已完成关注。
 
 ```bash
-docker build -t xutie-account1-unified:TAG .
+docker build -t xutie-account1-unified:ccd9bc2 .
 ```
 
-镜像沿用仓库 `Dockerfile`。默认 `X_API_MODE=mock`，四个账号开关默认关闭。部署时挂载原来的数据卷和原来的加密密钥，不要把密钥写进镜像或仓库。
+3. 核对迁移没有改写成功账。`follow_success` 和已完成 `follow_batches` 的行数应与升级前一致。`follow_blocklist` 里账号1、`source=unfollow_confirmed` 的人数应等于升级前 `unfollow_candidates` 中账号1且 `result=success` 的人数。
 
-`.env.example` 里的密钥占位符是 `replace_me`。它不是生产密钥。
+4. 只在账号1关注仍暂停时恢复它：
+
+```bash
+curl -sS -X POST http://127.0.0.1:3847/api/follow/resume \
+  -H 'content-type: application/json' \
+  -d '{"accountId":1}'
+```
+
+5. 写当天的新人授权。2026-11-23 的整段开放时间都在这一条里，不必再等 18:00。次日 00:00 之后要另写 2026-11-24 的授权，才能在 00:00–05:00 执行新人。
+
+```bash
+curl -sS -X POST http://127.0.0.1:3847/api/follow/new-approval \
+  -H 'content-type: application/json' \
+  -d '{"accountId":1,"approvedStart":"2026-11-22T16:00:00.000Z","approvedEnd":"2026-11-23T16:00:00.000Z"}'
+```
+
+`2026-11-22T16:00:00.000Z` 是台北 2026-11-23 00:00，结束是台北次日 00:00。接口拒绝跨出同一个台北日的授权。
+
+6. 把用户给出的名单导入永久池。调度器不会自己搜索。两条接口可以都用，同一个人只执行一次。
+
+回关或已经带 `kind` 的明确名单：
+
+```bash
+curl -sS -X POST http://127.0.0.1:3847/api/follow/reserve \
+  -H 'content-type: application/json' \
+  -d '{"accountId":1,"checkedAt":"2026-11-23T06:35:00.000Z","candidates":[{"targetUserId":"123","kind":"followback"},{"targetUserId":"456","kind":"new"}]}'
+```
+
+带快照的新人：
+
+```bash
+curl -sS -X POST http://127.0.0.1:3847/api/follow/new-admission \
+  -H 'content-type: application/json' \
+  -d '{"accountId":1,"candidates":[{"targetUserId":"456","username":"example","qualificationCheckedAt":"2026-11-23T06:35:00.000Z","snapshot":{"verified":true,"verifiedType":"blue","following":false,"lang":"zh","name":"示例","description":"人工智能"}}]}'
+```
+
+`checkedAt` 和 `qualificationCheckedAt` 必须是真实核实时间，不能晚于现在 5 分钟以上。已关注返回 `already_followed`，已确认取关返回 `unfollowed`，重复的在库 id 进入 `existing` 且不改原来的核实时间。
+
+7. 读状态确认。09:00–09:14、14:30–14:44 应看到账号1 `schedule` 为 `work`；05:00–08:59 为 `rest`，且 `paused` 仍是升级后那一次 resume 的结果，而不是被 05:00 例程改回去。
+
+```bash
+curl -sS 'http://127.0.0.1:3847/api/follow?accountId=1'
+```
 
 ## 回滚
 
-1. 停掉新进程，换回由 `0fbb2db34ca3327b703df88c87d3e8929c953583` 构建的镜像。
-2. 继续使用同一数据卷和同一加密密钥。
-3. 不要删除 `follow_success`、`follow_batches` 或取关表。旧程序不读取 `follow_blocklist` 和 `follow_inflight`，这两张表可以留下。
-4. 若要去掉黑名单，只在确认不再需要这套规则后执行 `DROP TABLE follow_blocklist;` 和 `DROP TABLE follow_inflight;`。这不会重跑已完成关注。
-5. 回滚后账号1会回到 00:00–05:00 回关和 18:00–24:00 新关注，合计上限回到 380。已经在新槽完成的批次不会被旧槽键重放。
+1. 停掉新进程，换回 `0fbb2db34ca3327b703df88c87d3e8929c953583` 的镜像。
+2. 继续用同一数据卷和同一加密密钥。
+3. 不要删除 `follow_success`、`follow_batches` 或取关表。旧程序不读 `follow_blocklist` 和 `follow_inflight`。
+4. 只有确定不再需要黑名单时才 `DROP TABLE follow_blocklist;` 和 `DROP TABLE follow_inflight;`。这不会重跑已完成关注。
+5. 回滚后若外部 05:00 暂停例程还指着账号1，白天仍会被关掉；那是旧例程，不是这次槽钟。
