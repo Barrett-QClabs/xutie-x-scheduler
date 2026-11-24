@@ -70,29 +70,26 @@ describe("per-account follow cadence", () => {
     expect(RESERVE_FRESH_MS).toBe(45 * 60 * 1000);
     expect(RESERVE_FRESH_MS).toBeGreaterThan(ACCOUNT1_CYCLE_MINUTES * 60 * 1000);
 
-    expect(followSlot(1, TAIPEI_0000)).toBe("taipei:2026-11-11T00:00");
-    expect(followSlot(1, new Date("2026-11-10T16:14:00.000Z"))).toBe("taipei:2026-11-11T00:00");
-    expect(followSlot(1, new Date("2026-11-10T16:15:00.000Z"))).toBeNull();
-    expect(followSlot(1, new Date("2026-11-10T16:32:00.000Z"))).toBeNull();
-    expect(followSlot(1, new Date("2026-11-10T16:33:00.000Z"))).toBe("taipei:2026-11-11T00:33");
-    expect(followSlot(1, new Date("2026-11-10T16:47:00.000Z"))).toBe("taipei:2026-11-11T00:33");
-    expect(followSlot(1, new Date("2026-11-10T16:48:00.000Z"))).toBeNull();
-    expect(followSlot(1, new Date("2026-11-10T17:06:00.000Z"))).toBe("taipei:2026-11-11T01:06");
-    expect(followSlot(1, new Date("2026-11-10T17:20:00.000Z"))).toBe("taipei:2026-11-11T01:06");
-    expect(followSlot(1, new Date("2026-11-10T17:21:00.000Z"))).toBeNull();
-    expect(followSlot(1, new Date("2026-11-10T18:45:00.000Z"))).toBe("taipei:2026-11-11T02:45");
-    expect(followSlot(1, new Date("2026-11-10T20:57:00.000Z"))).toBe("taipei:2026-11-11T04:57");
-    expect(followSlot(1, new Date("2026-11-10T20:59:00.000Z"))).toBe("taipei:2026-11-11T04:57");
+    expect(followSlot(1, TAIPEI_0000)).toBe("taipei:2026-11-10T23:51");
+    expect(followSlot(1, new Date("2026-11-10T16:05:00.000Z"))).toBe("taipei:2026-11-10T23:51");
+    expect(followSlot(1, new Date("2026-11-10T16:06:00.000Z"))).toBeNull();
+    expect(followSlot(1, new Date("2026-11-10T16:23:00.000Z"))).toBeNull();
+    expect(followSlot(1, new Date("2026-11-10T16:24:00.000Z"))).toBe("taipei:2026-11-11T00:24");
+    expect(followSlot(1, new Date("2026-11-10T16:38:00.000Z"))).toBe("taipei:2026-11-11T00:24");
+    expect(followSlot(1, new Date("2026-11-10T16:39:00.000Z"))).toBeNull();
+    expect(followSlot(1, new Date("2026-11-10T20:48:00.000Z"))).toBe("taipei:2026-11-11T04:48");
+    expect(followSlot(1, new Date("2026-11-10T20:59:00.000Z"))).toBe("taipei:2026-11-11T04:48");
     expect(followSlot(1, new Date("2026-11-10T21:00:00.000Z"))).toBeNull();
-    expect(followSlot(1, new Date("2026-11-11T15:39:00.000Z"))).toBeNull();
-    expect(followSlot(1, new Date("2026-11-11T16:00:00.000Z"))).toBe("taipei:2026-11-12T00:00");
-    expect(followSlot(1, new Date("2028-02-29T16:04:00.000Z"))).toBe("taipei:2028-03-01T00:00");
+    expect(followSlot(1, new Date("2026-11-11T00:59:00.000Z"))).toBeNull();
+    expect(followSlot(1, new Date("2026-11-11T01:00:00.000Z"))).toBe("taipei:2026-11-11T09:00");
+    expect(followSlot(1, new Date("2026-11-11T06:35:00.000Z"))).toBe("taipei:2026-11-11T14:30");
+    expect(followSlot(1, new Date("2026-11-11T16:00:00.000Z"))).toBe("taipei:2026-11-11T23:51");
 
     expect(followSlot(2, new Date("2026-11-10T16:00:00.000Z"))).toBe("taipei:2026-11-11T00:00");
     expect(followSlot(2, new Date("2026-11-10T16:14:00.000Z"))).toBe("taipei:2026-11-11T00:00");
     expect(followSlot(2, new Date("2026-11-10T16:15:00.000Z"))).toBeNull();
     expect(followSlot(2, new Date("2026-11-10T16:30:00.000Z"))).toBe("taipei:2026-11-11T00:30");
-    expect(followSlot(1, new Date("2026-11-10T16:30:00.000Z"))).toBeNull();
+    expect(followSlot(1, new Date("2026-11-10T16:30:00.000Z"))).toBe("taipei:2026-11-11T00:24");
     expect(londonFollowSlot(new Date("2026-07-15T23:00:00.000Z"))).toBe("2026-07-16T00:00");
 
     const start = Date.parse("2026-11-10T16:00:00.000Z");
@@ -109,7 +106,7 @@ describe("per-account follow cadence", () => {
       expect(isFollowAuditCursor(2, taipei)).toBe(/T\d{2}:(00|30)$/.test(taipei));
     }
 
-    const duringTaipeiRest = new Date("2026-11-10T17:00:00.000Z");
+    const duringTaipeiRest = new Date("2026-11-10T16:10:00.000Z");
     expect(getFollowStatus(1, duringTaipeiRest).schedule).toBe("rest");
     expect(getFollowStatus(1, duringTaipeiRest).batchSize).toBe(ACCOUNT1_FOLLOW_BATCH_LIMIT);
     expect(getFollowStatus(1, duringTaipeiRest).londonDay).toBe("2026-11-11");
@@ -151,7 +148,7 @@ describe("per-account follow cadence", () => {
         follow: async (id) => { calls.push(id); },
       },
     });
-    expect(result.slot).toBe("taipei:2026-11-11T00:00");
+    expect(result.slot).toBe("taipei:2026-11-10T23:51");
     expect(result.submitted).toBe(13);
     expect(result.followed).toBe(13);
     expect(result.results.every((item) => item.kind === "followback")).toBe(true);
@@ -168,7 +165,7 @@ describe("per-account follow cadence", () => {
 
   it("does not spend account 1's slot on kind=new, then follows a later follow-back in that same window", async () => {
     enable(1);
-    const now = new Date("2026-11-10T16:10:00.000Z");
+    const now = new Date("2026-11-10T16:05:00.000Z");
     stock(1, [{ id: "32001", kind: "new" }], now.toISOString(), now);
     const calls: string[] = [];
     const skipped = await submitFollowBatch({
@@ -180,7 +177,7 @@ describe("per-account follow cadence", () => {
       },
     });
     expect(skipped.executed).toBe(false);
-    expect(skipped.reason).toBe("insufficient_candidates");
+    expect(skipped.reason).toBe("approval_required");
     expect(calls).toEqual([]);
     expect(getDb().prepare("SELECT COUNT(*) AS n FROM follow_batches WHERE account_id = 1").get()).toEqual({ n: 0 });
     const reserved = getDb().prepare("SELECT status, kind FROM follow_reserve WHERE account_id = 1 AND target_user_id = '32001'").get();
@@ -208,7 +205,7 @@ describe("per-account follow cadence", () => {
       },
     });
     expect(replay.replay).toBe(true);
-    expect(replay.slot).toBe("taipei:2026-11-11T00:00");
+    expect(replay.slot).toBe("taipei:2026-11-10T23:51");
     expect(replay.followed).toBe(1);
     expect(calls).toEqual(["32002"]);
     const stillNew = getDb().prepare("SELECT status FROM follow_reserve WHERE account_id = 1 AND target_user_id = '32001'").get();
@@ -233,11 +230,11 @@ describe("per-account follow cadence", () => {
       },
     });
     expect(result.replay).toBe(false);
-    expect(result.slot).toBe("taipei:2026-11-11T00:00");
+    expect(result.slot).toBe("taipei:2026-11-10T23:51");
     expect(result.followed).toBe(1);
     expect(calls).toEqual(["33001"]);
     const slots = getDb().prepare("SELECT slot FROM follow_batches WHERE account_id = 1 ORDER BY slot").all();
-    expect(slots).toEqual([{ slot: "2026-11-11T00:00" }, { slot: "taipei:2026-11-11T00:00" }]);
+    expect(slots).toEqual([{ slot: "2026-11-11T00:00" }, { slot: "taipei:2026-11-10T23:51" }]);
   });
 
   it("counts account 1 across London midnight by the Taipei day and keeps account 2 on the London day", async () => {
@@ -251,13 +248,13 @@ describe("per-account follow cadence", () => {
       follow: async (id: string) => { calls.push(id); },
     };
     const first = await submitFollowBatch({ accountId: 1, now: early, hooks });
-    expect(first.slot).toBe("taipei:2026-11-12T00:00");
+    expect(first.slot).toBe("taipei:2026-11-11T23:51");
     stock(1, [{ id: "34001", kind: "followback" }], early.toISOString(), early);
     expect((await submitFollowBatch({ accountId: 1, now: early, hooks })).followed).toBe(1);
 
     stock(1, [{ id: "34002", kind: "followback" }], laterInWindow.toISOString(), laterInWindow);
     const second = await submitFollowBatch({ accountId: 1, now: laterInWindow, hooks });
-    expect(second.slot).toBe("taipei:2026-11-12T04:24");
+    expect(second.slot).toBe("taipei:2026-11-12T04:15");
     expect(second.followed).toBe(1);
     const taipeiDays = getDb().prepare(
       "SELECT london_day AS day, COUNT(*) AS n FROM follow_success WHERE account_id = 1 GROUP BY london_day",
@@ -282,7 +279,7 @@ describe("per-account follow cadence", () => {
       `INSERT INTO follow_success (account_id, target_user_id, username, kind, succeeded_at, slot, london_day)
        VALUES (1, ?, NULL, 'followback', ?, 'taipei:2026-11-12T00:00', '2026-11-12')`,
     );
-    for (let index = 0; index < 380; index += 1) insert.run(String(50000 + index), now.toISOString());
+    for (let index = 0; index < 350; index += 1) insert.run(String(50000 + index), now.toISOString());
     stock(1, [{ id: "34100", kind: "followback" }], now.toISOString(), now);
     const calls: string[] = [];
     const capped = await submitFollowBatch({
@@ -291,10 +288,11 @@ describe("per-account follow cadence", () => {
       hooks: { inspect: async () => profile(), follow: async (id) => { calls.push(id); } },
     });
     expect(capped.reason).toBe("daily_cap");
-    expect(capped.slot).toBe("taipei:2026-11-12T00:00");
+    expect(capped.slot).toBe("taipei:2026-11-11T23:51");
     expect(calls).toEqual([]);
     expect(getFollowStatus(1, now).londonDay).toBe("2026-11-12");
-    expect(getFollowStatus(1, now).followedToday).toBe(380);
+    expect(getFollowStatus(1, now).dailyCap).toBe(350);
+    expect(getFollowStatus(1, now).followedToday).toBe(350);
     expect(getFollowStatus(2, now).londonDay).toBe("2026-11-11");
     expect(getFollowStatus(2, now).followedToday).toBe(0);
   });
@@ -319,9 +317,9 @@ describe("per-account follow cadence", () => {
       now: later,
       hooks: { inspect: async () => profile(), follow: async (id) => { calls.push(id); } },
     });
-    expect(held.followed).toBe(1);
-    expect(calls).toEqual(["35002"]);
-    expect(getDb().prepare("SELECT status FROM follow_reserve WHERE target_user_id = '35003'").get()).toEqual({ status: "reserved" });
+    expect(held.followed).toBe(2);
+    expect(calls.slice().sort()).toEqual(["35002", "35003"]);
+    expect(getDb().prepare("SELECT status FROM follow_reserve WHERE target_user_id = '35003'").get()).toEqual({ status: "followed" });
   });
 
   it("still lets account 2 take a batch of 10, including kind=new", async () => {

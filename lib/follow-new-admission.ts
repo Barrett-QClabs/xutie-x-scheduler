@@ -2,7 +2,8 @@ import type { AccountId } from "@/lib/account";
 import { audienceMatch, preferFlb, spamText } from "@/lib/audience";
 import { UNFOLLOW_WHITELIST } from "@/lib/automation-account";
 import { dailyPoolOn } from "@/lib/account-ops";
-import { ACCOUNT1_FOLLOW_ZONE, account1NewFollowHeld, account1PoolInUse } from "@/lib/follow-cadence";
+import { followBlocked } from "@/lib/follow-blocklist";
+import { ACCOUNT1_FOLLOW_ZONE, account1PoolInUse } from "@/lib/follow-cadence";
 import { getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { zonedClock } from "@/lib/london";
@@ -147,9 +148,7 @@ export function newAdmissionView(accountId: AccountId, now: Date, executableGate
     "SELECT qualification_checked_at FROM follow_new_admission WHERE account_id = 1 AND status = 'admitted'",
   ).all() as Array<{ qualification_checked_at: string }>;
   const admitted = admittedRows.length;
-  const live = dailyPoolOn(1)
-    ? admittedRows.filter((row) => account1NewFollowHeld(row.qualification_checked_at, now)).length
-    : admitted;
+  const live = admittedRows.filter((row) => account1PoolInUse("new", row.qualification_checked_at, now)).length;
   const succeeded = (getDb().prepare(
     "SELECT COUNT(*) AS n FROM follow_new_admission WHERE account_id = 1 AND status = 'followed'",
   ).get() as { n: number }).n;
@@ -237,6 +236,10 @@ export function admitAccount1NewFollows(
     seen.add(id);
     if (UNFOLLOW_WHITELIST.has(id)) {
       rejected.push({ targetUserId: id, reason: "whitelist" });
+      continue;
+    }
+    if (followBlocked(1, id)) {
+      rejected.push({ targetUserId: id, reason: "unfollowed" });
       continue;
     }
     const checked = frozenInstant(record?.qualificationCheckedAt, now);

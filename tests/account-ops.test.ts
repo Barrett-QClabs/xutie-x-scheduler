@@ -111,7 +111,7 @@ describe("account ops", () => {
       checkedAt: checked,
       candidates: [{ targetUserId: "91001", kind: "new" }, { targetUserId: whitelist, kind: "new" }],
     }, taipei(23, 0, "2026-11-14"));
-    const evening = taipei(19, 10, "2026-11-15");
+    const evening = taipei(18, 0, "2026-11-15");
     const calls: string[] = [];
     const unapproved = await submitFollowBatch({
       accountId: 1,
@@ -149,7 +149,7 @@ describe("account ops", () => {
       hooks: { inspect: async () => profile(), follow: async () => { throw new Error("new pool closed"); } },
     });
     expect(morning.followed).toBe(0);
-    expect(getFollowStatus(1, taipei(0, 5, "2026-11-16")).reserve.newAvailable).toBe(0);
+    expect(getFollowStatus(1, taipei(0, 5, "2026-11-16")).reserve.newAvailable).toBe(1);
   });
 
   it("caps account 1 unfollows at the saved daily number and leaves account 2 uncapped by that switch", async () => {
@@ -216,7 +216,7 @@ describe("account ops", () => {
       method: "PUT",
       body: JSON.stringify({ accountId: 1, ops: opsBody({ dailyPool: false }) }),
     }));
-    const evening = taipei(18, 5, "2026-11-15");
+    const evening = taipei(18, 0, "2026-11-15");
     approveAccount1NewFollow({
       approvedStart: taipei(18, 0, "2026-11-14").toISOString(),
       approvedEnd: taipei(0, 0, "2026-11-15").toISOString(),
@@ -297,9 +297,9 @@ describe("account ops", () => {
       qualificationCheckedAt: later,
       admittedAt: later,
     }], taipei(23, 0, "2026-11-16"));
-    expect(replaced.accepted.map((item) => item.qualificationCheckedAt)).toEqual([later]);
+    expect(replaced.existing).toEqual(["91011"]);
     expect(getDb().prepare("SELECT qualification_checked_at FROM follow_new_admission WHERE target_user_id = '91011'").get()).toEqual({
-      qualification_checked_at: later,
+      qualification_checked_at: checked,
     });
   });
 

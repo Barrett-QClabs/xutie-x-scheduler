@@ -75,7 +75,7 @@ describe("account 1 new-follow admission", () => {
     approveDay();
     const inspects: string[] = [];
     const follows: string[] = [];
-    const evening = taipei(18, 5);
+    const evening = taipei(18, 0);
     const status = getFollowStatus(1, evening);
     expect(status.newAdmission.admitted).toBe(1);
     expect(status.newAdmission.executable).toBe(1);
@@ -88,7 +88,7 @@ describe("account 1 new-follow admission", () => {
         follow: async (id) => { follows.push(id); },
       },
     });
-    expect(batch.slot).toBe("taipei-new:2026-11-12T18:00");
+    expect(batch.slot).toBe("taipei:2026-11-12T17:48");
     expect(batch.followed).toBe(1);
     expect(follows).toEqual(["91001"]);
     expect(inspects).toEqual([]);
@@ -115,22 +115,22 @@ describe("account 1 new-follow admission", () => {
       inspect: async () => { throw new Error("rescreen"); },
       follow: async () => { throw new Error("should not follow"); },
     };
-    const unapproved = await submitFollowBatch({ accountId: 1, now: taipei(18, 5), hooks });
+    const unapproved = await submitFollowBatch({ accountId: 1, now: taipei(18, 0), hooks });
     expect(unapproved.reason).toBe("approval_required");
-    expect(getFollowStatus(1, taipei(18, 5)).newAdmission.executable).toBe(0);
+    expect(getFollowStatus(1, taipei(18, 0)).newAdmission.executable).toBe(0);
     approveDay();
-    expect((await submitFollowBatch({ accountId: 1, now: taipei(17, 59), hooks })).reason).toBe("rest");
+    expect((await submitFollowBatch({ accountId: 1, now: taipei(18, 4), hooks })).reason).toBe("rest");
     expect((await submitFollowBatch({ accountId: 1, now: taipei(18, 15), hooks })).reason).toBe("rest");
     getDb().prepare("UPDATE follow_control SET paused = 1, pause_reason = 'test' WHERE account_id = 1").run();
-    expect((await submitFollowBatch({ accountId: 1, now: taipei(18, 5), hooks })).reason).toBe("paused");
+    expect((await submitFollowBatch({ accountId: 1, now: taipei(18, 0), hooks })).reason).toBe("paused");
     getDb().prepare("UPDATE follow_control SET paused = 0 WHERE account_id = 1").run();
     const day = "2026-11-12";
     const insert = getDb().prepare(
       `INSERT INTO follow_success (account_id, target_user_id, username, kind, succeeded_at, slot, london_day)
        VALUES (1, ?, NULL, 'new', ?, 'taipei-new:2026-11-12T18:00', ?)`,
     );
-    for (let index = 0; index < 380; index += 1) insert.run(String(30000 + index), CHECKED, day);
-    expect((await submitFollowBatch({ accountId: 1, now: taipei(18, 40), hooks })).reason).toBe("daily_cap");
+    for (let index = 0; index < 350; index += 1) insert.run(String(30000 + index), CHECKED, day);
+    expect((await submitFollowBatch({ accountId: 1, now: taipei(18, 0), hooks })).reason).toBe("daily_cap");
     expect(getDb().prepare("SELECT status FROM follow_new_admission WHERE target_user_id = '91002'").get()).toEqual({ status: "admitted" });
   });
 
@@ -142,7 +142,8 @@ describe("account 1 new-follow admission", () => {
     const follows: string[] = [];
     const stopped = await submitFollowBatch({
       accountId: 1,
-      now: taipei(18, 5),
+      now: taipei(18, 0),
+      random: () => 0.99,
       hooks: {
         inspect: async () => { throw new Error("rescreen"); },
         follow: async () => { throw Object.assign(new Error("limited"), { status: 429, kind: "rate_limit" }); },
@@ -159,25 +160,25 @@ describe("account 1 new-follow admission", () => {
     getDb().prepare("DELETE FROM follow_batches WHERE account_id = 1").run();
     const round = await submitFollowBatch({
       accountId: 1,
-      now: taipei(18, 40),
+      now: taipei(18, 25),
       hooks: {
         inspect: async () => { throw new Error("rescreen"); },
         follow: async (id) => { follows.push(id); },
       },
     });
-    expect(round.followed).toBe(9);
-    expect(follows).toHaveLength(9);
-    expect(getFollowStatus(1, taipei(18, 40)).newAdmission.admitted).toBe(1);
+    expect(round.followed).toBe(10);
+    expect(follows).toHaveLength(10);
+    expect(getFollowStatus(1, taipei(18, 25)).newAdmission.admitted).toBe(0);
     const next = await submitFollowBatch({
       accountId: 1,
-      now: taipei(18, 40),
+      now: taipei(18, 25),
       hooks: {
         inspect: async () => { throw new Error("rescreen"); },
         follow: async (id) => { follows.push(id); },
       },
     });
     expect(next.replay).toBe(true);
-    expect(follows).toHaveLength(9);
+    expect(follows).toHaveLength(10);
   });
 
   it("rejects a bad snapshot, a future check time, an empty pool, and account 2", async () => {
@@ -201,11 +202,11 @@ describe("account 1 new-follow admission", () => {
     approveDay();
     const empty = await submitFollowBatch({
       accountId: 1,
-      now: taipei(18, 5),
+      now: taipei(18, 0),
       hooks: { inspect: async () => { throw new Error("rescreen"); }, follow: async () => undefined },
     });
     expect(empty.reason).toBe("insufficient_candidates");
-    expect(getFollowStatus(1, taipei(18, 5)).newAdmission).toMatchObject({ admitted: 0, executable: 0, succeeded: 0 });
+    expect(getFollowStatus(1, taipei(18, 0)).newAdmission).toMatchObject({ admitted: 0, executable: 0, succeeded: 0 });
     const other = await postAdmission(new Request("http://local/api/follow/new-admission", {
       method: "POST",
       body: JSON.stringify({ accountId: 2, candidates: [candidate("93001")] }),
@@ -222,12 +223,12 @@ describe("account 1 new-follow admission", () => {
     expect(otherApproval.status).toBe(400);
     enable(2);
     stockFollowReserve(2, {
-      checkedAt: new Date(taipei(18, 5).getTime() - 3 * 60 * 60 * 1000).toISOString(),
+      checkedAt: new Date(taipei(18, 0).getTime() - 3 * 60 * 60 * 1000).toISOString(),
       candidates: [{ targetUserId: "93002", kind: "new" }],
-    }, taipei(18, 5));
+    }, taipei(18, 0));
     const stale = await submitFollowBatch({
       accountId: 2,
-      now: taipei(18, 5),
+      now: taipei(18, 0),
       hooks: { inspect: async () => { throw new Error("account2"); }, follow: async () => { throw new Error("account2"); } },
     });
     expect(stale.executed).toBe(false);
@@ -240,7 +241,6 @@ describe("account 1 new-follow admission", () => {
     admitAccount1NewFollows([
       candidate("94001", { qualificationCheckedAt: overnight, admittedAt: overnight }),
     ], taipei(23, 0));
-    approveDay();
     stockFollowReserve(1, {
       checkedAt: taipei(0, 5).toISOString(),
       candidates: [{ targetUserId: "94002", kind: "followback" }],
@@ -262,7 +262,7 @@ describe("account 1 new-follow admission", () => {
     expect(getDb().prepare("SELECT status FROM follow_new_admission WHERE target_user_id = '94001'").get()).toEqual({ status: "admitted" });
     const carried = await submitFollowBatch({
       accountId: 1,
-      now: taipei(18, 5, "2026-11-13"),
+      now: taipei(18, 0, "2026-11-13"),
       hooks: { inspect: async () => { throw new Error("rescreen"); }, follow: async () => { throw new Error("no approval"); } },
     });
     expect(carried.reason).toBe("approval_required");
@@ -274,7 +274,7 @@ describe("account 1 new-follow admission", () => {
     const follows: string[] = [];
     const nextDay = await submitFollowBatch({
       accountId: 1,
-      now: taipei(18, 5, "2026-11-13"),
+      now: taipei(18, 0, "2026-11-13"),
       hooks: { inspect: async () => { throw new Error("rescreen"); }, follow: async (id) => { follows.push(id); } },
     });
     expect(nextDay.followed).toBe(1);
@@ -291,14 +291,14 @@ describe("account 1 new-follow admission", () => {
     approveDay();
     const disabled = await submitFollowBatch({
       accountId: 1,
-      now: taipei(18, 5),
+      now: taipei(18, 0),
       hooks: { inspect: async () => { throw new Error("rescreen"); }, follow: async () => undefined },
     });
     expect(disabled.reason).toBe("disabled");
     process.env.XUTIE_ACCOUNT1_FOLLOW = "on";
     const unnamed = await submitFollowBatch({
       accountId: 1,
-      now: taipei(18, 5),
+      now: taipei(18, 0),
       hooks: { inspect: async () => { throw new Error("rescreen"); }, follow: async () => undefined },
     });
     expect(unnamed.reason).toBe("identity_unconfirmed");

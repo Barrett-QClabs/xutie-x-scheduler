@@ -8,8 +8,8 @@ import { saveCredentials } from "@/lib/service";
 
 const ACCOUNT1 = "1933586991612080128";
 const ACCOUNT2 = "1468479269701820422";
-const EVENING = taipei(18, 5);
-const NEXT_ROUND = taipei(18, 35);
+const EVENING = taipei(18, 0);
+const NEXT_ROUND = taipei(18, 25);
 
 function taipei(hour: number, minute: number): Date {
   const asUtc = Date.parse(`2026-11-12T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00.000Z`);
@@ -126,12 +126,12 @@ describe("account 1 search_users relationship omission", () => {
           follow: async (id) => { calls.push(id); },
         },
       });
-      expect(batch.slot).toBe("taipei-new:2026-11-12T18:00");
+      expect(batch.slot).toBe("taipei:2026-11-12T17:48");
       expect(batch.followed).toBe(1);
       expect(calls).toEqual(["91001"]);
       expect(batch.results.find((item) => item.targetUserId === "91002")).toMatchObject({ result: "skipped", reason: "already_following" });
       expect(batch.results.find((item) => item.targetUserId === "91003")).toMatchObject({ result: "unknown", reason: "following_unconfirmed" });
-      expect(batch.results.map((item) => item.targetUserId)).not.toContain("91004");
+      expect(batch.results.find((item) => item.targetUserId === "91004")).toMatchObject({ result: "skipped", reason: "evidence_pending" });
       expect(calls.some((item) => item.includes("api.x.com"))).toBe(false);
     } finally {
       globalThis.fetch = original;
@@ -197,7 +197,7 @@ describe("account 1 search_users relationship omission", () => {
         follow: async (id) => { calls.push(id); },
       },
     });
-    expect(second.slot).toBe("taipei-new:2026-11-12T18:35");
+    expect(second.slot).toBe("taipei:2026-11-12T18:21");
     expect(second.followed).toBe(1);
     expect(calls).toEqual(["91021"]);
 
@@ -233,8 +233,8 @@ describe("account 2 is unchanged by search_users omission", () => {
   it("still treats a missing connection_status as unknown and keeps the evening cadence", async () => {
     expect(followSlot(2, EVENING)).toBe("taipei:2026-11-12T18:00");
     expect(followBatchLimit(2, EVENING)).toBe(10);
-    expect(followSlot(1, EVENING)).toBe("taipei-new:2026-11-12T18:00");
-    expect(followBatchLimit(1, EVENING)).toBe(9);
+    expect(followSlot(1, EVENING)).toBe("taipei:2026-11-12T17:48");
+    expect(followBatchLimit(1, EVENING)).toBe(13);
     enable(2);
     importEvidence(2, envelope(2, "search_users", [{
       id: "92001",

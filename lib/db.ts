@@ -103,6 +103,8 @@ function migrate(db: DatabaseSync): void {
   db.exec("CREATE INDEX IF NOT EXISTS idx_tweets_account_sched ON tweets(account_id, status, scheduled_at)");
   ensureAutomationTables(db);
   ensurePostDeleteLog(db);
+  ensureFollowBlocklist(db);
+  ensureFollowAllowlist(db);
   const now = new Date().toISOString();
   for (const id of ACCOUNT_IDS) {
     db.prepare(
@@ -360,6 +362,12 @@ function ensureAutomationTables(db: DatabaseSync): void {
   ensureColumn(db, "evidence_pages", "claimed_activity_window_complete", "ALTER TABLE evidence_pages ADD COLUMN claimed_activity_window_complete INTEGER");
   ensureColumn(db, "unfollow_candidates", "following_rank", "ALTER TABLE unfollow_candidates ADD COLUMN following_rank INTEGER");
   ensureColumn(db, "follow_account_config", "ops_json", "ALTER TABLE follow_account_config ADD COLUMN ops_json TEXT");
+  ensureColumn(
+    db,
+    "follow_account_config",
+    "approved_list_follow",
+    "ALTER TABLE follow_account_config ADD COLUMN approved_list_follow INTEGER NOT NULL DEFAULT 0",
+  );
   ensureNewAdmissionTables(db);
   const now = new Date().toISOString();
   for (const id of [1, 2]) {
@@ -461,6 +469,56 @@ function ensureNewAdmissionTables(db: DatabaseSync): void {
       PRIMARY KEY (account_id, pool_day)
     );
   `);
+}
+
+/**
+ * Account 1 only. Copies unfollow rows already stored as success.
+ * Does not scan X, evidence, or anything dated before the baseline that was not confirmed.
+ * Repeat runs insert nothing new for the same person.
+ */
+function ensureFollowBlocklist(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS follow_blocklist (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      target_user_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      blocked_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+    CREATE TABLE IF NOT EXISTS follow_inflight (
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+      target_user_id TEXT NOT NULL,
+      cap_day TEXT NOT NULL,
+      claimed_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+  `);
+  db.prepare(
+    `INSERT OR IGNORE INTO follow_blocklist (account_id, target_user_id, source, blocked_at)
+     SELECT account_id, target_user_id, 'unfollow_confirmed', COALESCE(updated_at, created_at)
+     FROM unfollow_candidates
+     WHERE account_id = 1 AND result = 'success'`,
+  ).run();
+}
+
+/** Account 1 execution allowlist. Empty and enforced means nobody is followed. History tables are not changed. */
+function ensureFollowAllowlist(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS follow_allowlist_control (
+      account_id INTEGER PRIMARY KEY CHECK (account_id = 1),
+      enforced INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS follow_execution_allowlist (
+      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      target_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (account_id, target_user_id)
+    );
+  `);
+  db.prepare(
+    `INSERT OR IGNORE INTO follow_allowlist_control (account_id, enforced, updated_at) VALUES (1, 1, ?)`,
+  ).run(new Date().toISOString());
 }
 
 function ensurePostDeleteLog(db: DatabaseSync): void {
@@ -896,14 +954,18 @@ export function resetAllData(): void {
     DELETE FROM follow_reserve_audit;
     DELETE FROM follow_batches;
     DELETE FROM follow_success;
+    DELETE FROM follow_blocklist;
+    DELETE FROM follow_inflight;
     DELETE FROM follow_account_config;
     DELETE FROM follow_new_admission;
     DELETE FROM follow_new_approval;
+    DELETE FROM follow_execution_allowlist;
     DELETE FROM evidence_subjects;
     DELETE FROM evidence_pages;
   `);
   db.prepare(`UPDATE unfollow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
   db.prepare(`UPDATE follow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
+  db.prepare(`UPDATE follow_allowlist_control SET enforced = 0, updated_at = ? WHERE account_id = 1`).run(now);
   const reset = (accountId: AccountId, paused: number, reason: string | null) => {
     db.prepare(
       `UPDATE queue_settings SET

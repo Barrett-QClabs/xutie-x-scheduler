@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { ApprovedListFollowControl } from "@/components/approved-list-follow-control";
 import { useI18n } from "@/components/i18n-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -67,6 +68,9 @@ export function AutomationScreen() {
   const [newBatch, setNewBatch] = useState("9");
   const [unfollowBatch, setUnfollowBatch] = useState("10");
   const [unfollowCap, setUnfollowCap] = useState("80");
+  const [approvedListFollow, setApprovedListFollow] = useState(false);
+  const [approvedListLocked, setApprovedListLocked] = useState(accountId !== 1);
+  const [approvedListStatus, setApprovedListStatus] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -79,10 +83,13 @@ export function AutomationScreen() {
   useEffect(() => {
     let cancel = false;
     setKw("");
-    void api<{ keywords: string[]; running: boolean; reserve: { gap: number; constraint: string | null }; dailyCap: number; savesDoNotStart: boolean; ops?: { dailyPool?: boolean; locked?: boolean; followback?: { batchSize: number }; newFollow?: { batchSize: number }; unfollow?: { batchSize: number; dailyCap: number } } }>(`/api/follow/config?accountId=${accountId}`)
+    void api<{ keywords: string[]; running: boolean; reserve: { gap: number; constraint: string | null }; dailyCap: number; savesDoNotStart: boolean; approvedListFollow?: boolean; approvedListFollowLocked?: boolean; approvedListStatus?: string; ops?: { dailyPool?: boolean; locked?: boolean; followback?: { batchSize: number }; newFollow?: { batchSize: number }; unfollow?: { batchSize: number; dailyCap: number } } }>(`/api/follow/config?accountId=${accountId}`)
       .then((config) => {
         if (cancel) return;
         setKw(config.keywords.join(", "));
+        setApprovedListFollow(config.approvedListFollow === true);
+        setApprovedListLocked(config.approvedListFollowLocked !== false);
+        setApprovedListStatus(config.approvedListStatus ?? "");
         if (config.ops && !config.ops.locked) {
           setDailyPool(config.ops.dailyPool !== false);
           setFollowBatch(String(config.ops.followback?.batchSize ?? 13));
@@ -221,6 +228,25 @@ export function AutomationScreen() {
               finally { setBusy(false); }
             }}>{t.save}</Button>
           </div>
+          <ApprovedListFollowControl
+            accountId={accountId}
+            checked={approvedListFollow}
+            locked={approvedListLocked}
+            status={approvedListStatus}
+            busy={busy}
+            onChecked={setApprovedListFollow}
+            onSave={async (body) => {
+              setBusy(true);
+              try {
+                const saved = await api<{ approvedListFollow?: boolean; approvedListStatus?: string; approvedListFollowLocked?: boolean }>("/api/follow/config", { method: "PUT", body: JSON.stringify(body) });
+                setApprovedListFollow(saved.approvedListFollow === true);
+                setApprovedListLocked(saved.approvedListFollowLocked !== false);
+                setApprovedListStatus(saved.approvedListStatus ?? "");
+                setAccountNote(saved.approvedListStatus ?? "");
+              } catch (error) { setErr(error instanceof Error ? error.message : String(error)); }
+              finally { setBusy(false); }
+            }}
+          />
           {accountId === 1 && (
             <div className="space-y-2 text-sm">
               <p>账号1可调：日池开关、回关每轮、新关注每轮、取关每批、取关日上限（0–80，关闭日池仍然生效）。时区、窗口和工作/休息间隔只展示，不能改。保存不会开始运行。晚间新关注无论是否在 45 分钟内，都要当天另行授权。</p>

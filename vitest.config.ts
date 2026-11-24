@@ -11,6 +11,9 @@ process.env.CREDENTIALS_ENCRYPTION_KEY ??= "test-encryption-key";
 process.env.X_API_MODE ??= "mock";
 
 export default defineConfig({
+  esbuild: {
+    jsx: "automatic",
+  },
   test: {
     environment: "node",
     fileParallelism: false,
