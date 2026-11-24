@@ -115,3 +115,7 @@ curl -sS -X PUT http://127.0.0.1:3847/api/follow/allowlist \
 3. 不要删除 `follow_success`、`follow_batches` 或取关表。旧程序不读 `follow_blocklist` 和 `follow_inflight`。
 4. 只有确定不再需要黑名单时才 `DROP TABLE follow_blocklist;` 和 `DROP TABLE follow_inflight;`。这不会重跑已完成关注。
 5. 回滚后若外部 05:00 暂停例程还指着账号1，白天仍会被关掉；那是旧例程，不是这次槽钟。
+
+## 已筛名单开关
+
+后续补丁给账号1加了默认关闭的 `approvedListFollow`。升级本文时不要把它打开。打开、核对和关掉的命令在 `docs/account-automation.md` 的「账号1已筛名单开关」。它不改本文的槽钟、350 上限、白名单或授权，也不补写证据。已经在储备里的人不用重新导入。

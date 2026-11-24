@@ -141,10 +141,14 @@ describe.skipIf(!chrome)("settings account switch in the browser", () => {
     await page.goto(`${origin}/automation`, { waitUntil: "networkidle0" });
     await page.click('[data-testid="nav-slot-1"]');
     await page.waitForFunction(() => document.body.innerText.includes("台北日历日关注加回关上限 350"));
+    expect(await page.evaluate(() => document.body.innerText.includes("已筛名单直接关注"))).toBe(true);
+    expect(await page.evaluate(() => document.body.innerText.includes("关闭：账号1仍按原资格筛选"))).toBe(true);
     expect(await page.evaluate(() => document.body.innerText.includes("伦敦每日关注加回关上限"))).toBe(false);
 
     await page.click('[data-testid="nav-slot-2"]');
     await page.waitForFunction(() => document.body.innerText.includes("伦敦每日关注加回关上限 380"));
+    expect(await page.evaluate(() => document.body.innerText.includes("账号2没有已筛名单开关"))).toBe(true);
+    expect(await page.evaluate(() => document.body.innerText.includes("已筛名单直接关注"))).toBe(false);
     expect(await page.evaluate(() => document.body.innerText.includes("台北日历日关注加回关上限"))).toBe(false);
 
     await page.evaluate(() => {

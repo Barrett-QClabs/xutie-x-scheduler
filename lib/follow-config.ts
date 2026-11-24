@@ -1,11 +1,11 @@
 import type { AccountId } from "@/lib/account";
-import { audienceFor } from "@/lib/automation-account";
+import { audienceFor, followEnabled } from "@/lib/automation-account";
 import { readAccountOps, saveAccountOps } from "@/lib/account-ops";
+import { approvedListFollowView, persistApprovedListFollow } from "@/lib/approved-list-follow";
 import { getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { reserveView } from "@/lib/follow-queue";
 import { followDailyCap } from "@/lib/follow-cadence";
-import { followEnabled } from "@/lib/automation-account";
 
 /** Production shared list, kept on account 1 only. */
 export const ACCOUNT1_KEYWORDS = ["AI", "人工智能", "商业", "创业", "crypto", "币圈", "dating", "约会", "两性", "情感"];
@@ -49,7 +49,16 @@ export function getFollowConfig(accountId: AccountId, now = new Date()) {
     dailyCap: followDailyCap(accountId),
     reserve,
     ops: readAccountOps(accountId),
+    ...approvedListFollowView(accountId),
   };
+}
+
+/** Saves only the account 1 approved-list switch. Keywords, ops, reserve, and evidence stay as they are. */
+export function saveApprovedListFollowSetting(accountId: AccountId, value: unknown) {
+  if (accountId !== 1) persistApprovedListFollow(accountId, value);
+  ensureFollowConfig(1);
+  persistApprovedListFollow(1, value);
+  return getFollowConfig(1);
 }
 
 export function saveFollowOps(accountId: AccountId, ops: unknown) {

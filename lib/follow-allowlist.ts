@@ -35,6 +35,14 @@ export function account1AllowlistEnforced(): boolean {
   return row?.enforced === 1;
 }
 
+/** Operator-written execution list. Enforcement being off does not invent membership. */
+export function account1OperatorListed(targetUserId: string): boolean {
+  const row = getDb()
+    .prepare("SELECT 1 AS ok FROM follow_execution_allowlist WHERE account_id = 1 AND target_user_id = ?")
+    .get(targetUserId) as { ok: number } | undefined;
+  return Boolean(row);
+}
+
 export function account1ExecutionAllowed(targetUserId: string): boolean {
   if (!account1AllowlistEnforced()) return true;
   const row = getDb()

@@ -362,6 +362,12 @@ function ensureAutomationTables(db: DatabaseSync): void {
   ensureColumn(db, "evidence_pages", "claimed_activity_window_complete", "ALTER TABLE evidence_pages ADD COLUMN claimed_activity_window_complete INTEGER");
   ensureColumn(db, "unfollow_candidates", "following_rank", "ALTER TABLE unfollow_candidates ADD COLUMN following_rank INTEGER");
   ensureColumn(db, "follow_account_config", "ops_json", "ALTER TABLE follow_account_config ADD COLUMN ops_json TEXT");
+  ensureColumn(
+    db,
+    "follow_account_config",
+    "approved_list_follow",
+    "ALTER TABLE follow_account_config ADD COLUMN approved_list_follow INTEGER NOT NULL DEFAULT 0",
+  );
   ensureNewAdmissionTables(db);
   const now = new Date().toISOString();
   for (const id of [1, 2]) {

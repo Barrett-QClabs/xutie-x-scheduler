@@ -13,6 +13,7 @@ import { getCredentialsRow, getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
 import { followBatchSize } from "@/lib/account-ops";
+import { account1ApprovedListWaivesScreening, approvedListFollowView } from "@/lib/approved-list-follow";
 import { account1ExecutionAllowed } from "@/lib/follow-allowlist";
 import { followBlocked } from "@/lib/follow-blocklist";
 import { account1FollowPhase, account1PoolInUse, followBatchLimit, followCapDay, followDailyCap, followSlot, isFollowAuditCursor } from "@/lib/follow-cadence";
@@ -191,6 +192,7 @@ export function getFollowStatus(accountId: AccountId, now = new Date()) {
     followedToday: followed,
     remainingQuota: Math.max(0, followDailyCap(accountId) - capUsed(accountId, now)),
     newAdmission: newAdmissionView(accountId, now, openForNewAdmission),
+    ...approvedListFollowView(accountId),
     reserve,
     recentSuccess: recent.map((row) => ({
       targetUserId: row.target_user_id,
@@ -477,6 +479,7 @@ export function stockFollowReserve(
      WHERE account_id = ? AND target_user_id = ?`,
   );
   for (const raw of input.candidates) {
+    // Extra fields on a candidate, including any self-applied trust mark, are ignored.
     const id = typeof raw.targetUserId === "string" ? raw.targetUserId.trim() : "";
     if (!/^\d+$/.test(id)) {
       rejected.push({ targetUserId: id || "?", reason: "invalid_id" });
@@ -1013,6 +1016,12 @@ export async function submitFollowBatch(input: {
           continue;
         }
         try {
+          if (account1ApprovedListWaivesScreening(pick.targetUserId)) {
+            await hooks.follow(pick.targetUserId);
+            finishAccount1Success(pick, "approved_list", slot, now);
+            results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "success", reason: "approved_list" });
+            continue;
+          }
           if (pick.fromAdmission && !pick.reserve) {
             await hooks.follow(pick.targetUserId);
             const reason = pick.followReason ?? "new";
