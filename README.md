@@ -2,13 +2,15 @@
 
 [English](./README.md) · [简体中文](./README.zh-CN.md)
 
+**第一次下载？** 看 [使用教程](docs/使用教程.md)（给零基础读者，从下载到打开页面）。
+
 Self-hosted scheduler for X (Twitter). You bring your own developer-app credentials. 序帖 does not ship a shared API key.
 
 Paste or upload a batch of posts, queue them on an interval, and let a local process call `POST /2/tweets` when each one is due. The interface defaults to Simplified Chinese and can be switched to English.
 
 ## Features
 
-- Settings page for the four OAuth 1.0a user-context credentials, with a connection test (`GET /2/users/me`) that shows the connected @handle.
+- Settings page for the four OAuth 1.0a user-context credentials. In mock mode the connection test stays on this machine and shows a simulated handle. In live mode that button does not call `GET /2/users/me`.
 - Credentials stay on the server. They are encrypted at rest with AES-256-GCM using a key from the environment, and API responses never send them back to the browser.
 - Bulk import: one post per line, blank lines between posts, a line that is exactly `---`, or a `.txt` / `.csv` upload. One batch accepts at most 50 valid posts (`MAX_IMPORT_BATCH`). Extra valid posts are reported so you can split them; lines that fail the length check do not use a slot.
 - Length uses X's weighted count: Latin characters count as 1, CJK as 2, and each `http(s)` URL as 23. Posts over 280 are still queued, marked “Long post”, with a warning that they need X Premium. The hard limit is 25,000 (X's Premium long-post limit); anything longer is rejected. Each import takes up to 50 posts and up to 2,000,000 characters of source text.
@@ -97,7 +99,7 @@ Tests use a mocked X client and do not call X. See [CONTRIBUTING.md](./CONTRIBUT
 
 6. Set permissions to Read and Write **before** you generate the access token and access token secret. A token created earlier often stays read-only, and posting then returns 403. After changing permissions, regenerate both and use the new pair.
 7. Do not paste the bearer token into 序帖. A bearer token represents the app, not your account.
-8. On the settings page, save the four values and run the connection test. A success message shows your @handle.
+8. On the settings page, save the four values. In mock mode the test stays local and shows a simulated handle. In live mode that test does not call `GET /2/users/me`.
 
 The secrets pass through the browser only on that save. After that they are stored encrypted. Reloading the page does not show them again.
 
@@ -138,7 +140,7 @@ Without Compose:
 ```bash
 docker build -t xuti .
 docker run -d --name xuti \
-  -p 3847:3847 \
+  -p 127.0.0.1:3847:3847 \
   -e CREDENTIALS_ENCRYPTION_KEY='a-long-random-string' \
   -e X_API_MODE=mock \
   -e XUTIE_AUTOMATION_SUPERVISOR=off \
@@ -168,7 +170,7 @@ The cipher is scrypt plus AES-256-GCM. The salt and IV are stored with the ciphe
 
 - Text only. No images, video, or polls.
 - Long posts (over 280, up to 25,000) need X Premium on the posting account. 序帖 does not check your subscription in advance.
-- One saved credential set, so one X account.
+- Two account slots. Each slot stores its own credentials and queue. There is no login that lets several people share one install.
 - Designed for a single process.
 - No built-in login. Do not expose it on the public internet.
 - OAuth 1.0a user context only. No OAuth 2.0 PKCE.
@@ -182,7 +184,7 @@ The cipher is scrypt plus AES-256-GCM. The salt and IV are stored with the ciphe
 These are not implemented. They are the directions that would make 序帖 usable for more than one person on one machine:
 
 - **Multi-user login.** Accounts on the app itself, so a shared install is not an open queue.
-- **Multiple X accounts.** More than one credential set, with a queue per account.
+- **More than two X accounts, or a login for several people.** Two slots already exist. A shared install still has no accounts of its own.
 - **Images and other media.** Attachments on a post, not only text.
 - **Threads.** A sequence posted as replies to the previous tweet in the thread.
 - **Cloud deploy.** A documented path for a hosted single-tenant install, still without leaving the port open to the world.

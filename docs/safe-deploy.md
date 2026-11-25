@@ -63,7 +63,7 @@ curl -sS 'http://127.0.0.1:3847/api/state?accountId=2'
 1. 确认 `deployment.queuePaused` 仍是 `true`，`sendsWhenDue` 仍是 `false`。
 2. 把 `X_API_MODE` 设为 `live` 并重启这一个进程。
 3. 再读 `/api/state`。`apiMode` 应为 `live`，`sendsWhenDue` 仍应为 `false`。
-4. 设置页「重新测试已保存的凭据」只调用 `GET /2/users/me`。这一步在 `X_API_MODE=live` 时会请求 X。队列保持暂停时，调度不会发帖。
+4. 设置页「重新测试已保存的凭据」在 `X_API_MODE=live` 时不会调用 `GET /2/users/me`。库里已经有身份就原样返回；还没有身份则返回 `identity_reconfirm_blocked`。队列保持暂停时，调度不会发帖。
 5. 只有操作者决定发帖时，才 `POST /api/queue/resume`。
 
 关注自动化页在 supervisor 关闭时不提供启动按钮。`POST /api/automation/start` 返回 403，代码 `automation_disabled`。
