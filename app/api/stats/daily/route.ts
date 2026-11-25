@@ -1,3 +1,4 @@
+import { accountIdFrom } from "@/lib/account";
 import { handle } from "@/lib/http";
 import { getDailyStats } from "@/lib/stats";
 
@@ -7,5 +8,11 @@ export const dynamic = "force-dynamic";
 // GET /api/stats/daily?days=7&refresh=1
 export function GET(request: Request) {
   const url = new URL(request.url);
-  return handle(() => getDailyStats({ days: Number(url.searchParams.get("days") ?? 7), refresh: url.searchParams.get("refresh") === "1" }));
+  return handle(() =>
+    getDailyStats({
+      accountId: accountIdFrom(request),
+      days: Number(url.searchParams.get("days") ?? 7),
+      refresh: url.searchParams.get("refresh") === "1",
+    }),
+  );
 }

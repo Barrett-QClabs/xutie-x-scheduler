@@ -1,3 +1,4 @@
+import { ACCOUNT_IDS, type AccountId } from "@/lib/account";
 import { TIMELINE_CACHE_TTL_MS } from "@/lib/constants";
 import {
   getAnchoredManualId,
@@ -44,78 +45,91 @@ export type TickResult =
   | { action: "retry_later"; id: string }
   | { action: "deferred"; until: string; manual: boolean };
 
-const globalState = globalThis as unknown as { __xutiScheduler?: boolean; __xutiTick?: Promise<unknown> };
+const globalState = globalThis as unknown as { __xutiScheduler?: boolean };
+const chains = { 1: Promise.resolve(), 2: Promise.resolve() } as Record<AccountId, Promise<unknown>>;
 
 export function startScheduler(): void {
   if (process.env.VITEST || process.env.NODE_ENV === "test") return;
   if (globalState.__xutiScheduler) return;
   globalState.__xutiScheduler = true;
-  console.log("[序帖] 调度已启动，每 5 秒检查一次到点的帖子。");
+  console.log("[序帖] 调度已启动，每 5 秒分别检查账号1和账号2。");
   const timer = setInterval(() => {
-    void tick().catch((error) => {
-      console.error("[序帖] 调度失败", error instanceof Error ? error.message : error);
-    });
+    for (const accountId of ACCOUNT_IDS) {
+      void tick({ accountId }).catch((error) => {
+        console.error("[序帖] 调度失败", accountId, error instanceof Error ? error.message : error);
+      });
+    }
   }, 5_000);
   timer.unref?.();
 }
 
-export function tick(options?: { now?: Date; client?: XClient; random?: () => number }): Promise<TickResult> {
-  const previous = globalState.__xutiTick ?? Promise.resolve();
-  const run = previous.then(() => tickOnce(options), () => tickOnce(options));
-  globalState.__xutiTick = run.then(
+export function tick(options?: {
+  now?: Date;
+  client?: XClient;
+  random?: () => number;
+  accountId?: AccountId;
+}): Promise<TickResult> {
+  const accountId = options?.accountId ?? 1;
+  const previous = chains[accountId] ?? Promise.resolve();
+  const run = previous.then(() => tickOnce(accountId, options), () => tickOnce(accountId, options));
+  chains[accountId] = run.then(
     () => undefined,
     () => undefined,
   );
   return run;
 }
 
-async function tickOnce(options?: { now?: Date; client?: XClient; random?: () => number }): Promise<TickResult> {
+async function tickOnce(
+  accountId: AccountId,
+  options?: { now?: Date; client?: XClient; random?: () => number },
+): Promise<TickResult> {
   const now = options?.now ?? new Date();
-  const result = await executeTick(now, options);
-  patchQueueSettings({ lastTickAt: now.toISOString(), lastTickAction: result.action });
+  const result = await executeTick(accountId, now, options);
+  patchQueueSettings(accountId, { lastTickAt: now.toISOString(), lastTickAction: result.action });
   return result;
 }
 
-async function executeTick(now: Date, options?: { now?: Date; client?: XClient; random?: () => number }): Promise<TickResult> {
-  const settings = getQueueSettings();
+async function executeTick(
+  accountId: AccountId,
+  now: Date,
+  options?: { now?: Date; client?: XClient; random?: () => number },
+): Promise<TickResult> {
+  const settings = getQueueSettings(accountId);
   if (settings.rateLimitUntil && new Date(settings.rateLimitUntil).getTime() <= now.getTime()) {
-    patchQueueSettings({
+    patchQueueSettings(accountId, {
       rateLimitUntil: null,
       lastError: isTemporaryBlock(settings.lastError) ? null : settings.lastError,
     });
   }
-  const fresh = getQueueSettings();
+  const fresh = getQueueSettings(accountId);
   if (fresh.paused) return { action: "paused" };
   if (fresh.rateLimitUntil && new Date(fresh.rateLimitUntil).getTime() > now.getTime()) {
     return fresh.lastError === "credits"
       ? { action: "credits_waiting", until: fresh.rateLimitUntil }
       : { action: "rate_limited", until: fresh.rateLimitUntil };
   }
-  if (!tryAcquireLock(now)) return { action: "busy" };
+  if (!tryAcquireLock(accountId, now)) return { action: "busy" };
   try {
-    deferExtraOverdue(now, options?.random);
-    // Read X only when a post is actually due (one fresh timeline read per post),
-    // not while waiting for it: this keeps billable X reads to ~1 per post.
-    if (!nextDueTweet(now)) return { action: "idle" };
+    deferExtraOverdue(accountId, now, options?.random);
+    if (!nextDueTweet(accountId, now)) return { action: "idle" };
 
     let client = options?.client;
     if (!client) {
       let credentials;
       try {
-        credentials = readCredentials();
+        credentials = readCredentials(accountId);
       } catch (error) {
         if (error instanceof AppError && (error.code === "decrypt_failed" || error.code === "encryption_key_missing")) {
-          pauseQueue(error.code);
+          pauseQueue(accountId, error.code);
           return { action: "no_credentials" };
         }
         throw error;
       }
       if (!credentials) {
-        // Offline diagnosis can run the mock client with a placeholder. Live mode still pauses.
         if (isMockMode()) {
           client = createMockXClient(MOCK_DIAGNOSTIC_CREDENTIALS);
         } else {
-          pauseQueue("missing_credentials");
+          pauseQueue(accountId, "missing_credentials");
           return { action: "no_credentials" };
         }
       } else {
@@ -123,26 +137,23 @@ async function executeTick(now: Date, options?: { now?: Date; client?: XClient; 
       }
     }
 
-    // Right before posting, always read X fresh so a manual post from seconds ago is seen.
-    const gap = await recentPostGap(now, client, fresh.intervalMinutes * 60_000, true);
-    // A new manual post on X re-anchors the queue once (random extra rolled once and stored).
-    if (gap?.manual && gap.id && gap.id !== getAnchoredManualId()) {
-      setAnchoredManualId(gap.id);
-      const until = reanchorPendingToManual(gap.at, options?.random);
+    const gap = await recentPostGap(accountId, now, client, fresh.intervalMinutes * 60_000, true);
+    if (gap?.manual && gap.id && gap.id !== getAnchoredManualId(accountId)) {
+      setAnchoredManualId(accountId, gap.id);
+      const until = reanchorPendingToManual(accountId, gap.at, options?.random);
       if (until) return { action: "deferred", until: until.toISOString(), manual: true };
     }
-    const due = nextDueTweet(now);
+    const due = nextDueTweet(accountId, now);
     if (!due) return { action: "idle" };
     if (gap && now.getTime() < gap.at.getTime() + fresh.intervalMinutes * 60_000) {
-      // Hard rule: never closer than one interval. The new slot is interval + random extra.
-      const moved = delayPendingForRecentPost(gap.at, gap.manual, options?.random);
+      const moved = delayPendingForRecentPost(accountId, gap.at, gap.manual, options?.random);
       const until = moved ?? new Date(gap.at.getTime() + fresh.intervalMinutes * 60_000);
       return { action: "deferred", until: until.toISOString(), manual: gap.manual };
     }
 
     try {
-      const posted = await postUnit(client, due);
-      patchTweet(due.id, {
+      const posted = await postUnit(accountId, client, due);
+      patchTweet(due.id, accountId, {
         status: "posted",
         postedAt: now.toISOString(),
         tweetId: posted.id,
@@ -150,8 +161,8 @@ async function executeTick(now: Date, options?: { now?: Date; client?: XClient; 
         errorKind: null,
         delayReason: null,
       });
-      patchQueueSettings({ rateLimitUntil: null, lastError: null });
-      setTimelineCache({
+      patchQueueSettings(accountId, { rateLimitUntil: null, lastError: null });
+      setTimelineCache(accountId, {
         checkedAt: now.toISOString(),
         latestAt: now.toISOString(),
         latestId: posted.id,
@@ -161,40 +172,38 @@ async function executeTick(now: Date, options?: { now?: Date; client?: XClient; 
     } catch (error) {
       if (!(error instanceof XApiError)) {
         const message = error instanceof Error ? error.message : "未知错误";
-        patchTweet(due.id, { status: "failed", errorMessage: message, errorKind: "other", attemptCount: due.attemptCount + 1 });
+        patchTweet(due.id, accountId, { status: "failed", errorMessage: message, errorKind: "other", attemptCount: due.attemptCount + 1 });
         return { action: "failed", id: due.id };
       }
       if (error.kind === "credits" || error.kind === "rate_limit") {
-        // 402 waits about 10 minutes. 429 waits for x-rate-limit-reset, or 15 minutes.
-        // The post stays pending. The two cases are stored under different lastError codes.
         const credits = error.kind === "credits";
         const until = credits
           ? new Date(now.getTime() + 10 * 60_000)
           : (error.resetAt ?? new Date(now.getTime() + 15 * 60_000));
-        patchQueueSettings({
+        patchQueueSettings(accountId, {
           rateLimitUntil: until.toISOString(),
           lastError: credits ? "credits" : "rate_limit",
         });
-        patchTweet(due.id, { errorMessage: error.message, errorKind: error.kind });
-        delayPendingForRateLimit(until, options?.random);
+        patchTweet(due.id, accountId, { errorMessage: error.message, errorKind: error.kind });
+        delayPendingForRateLimit(accountId, until, options?.random);
         return credits
           ? { action: "credits_waiting", until: until.toISOString() }
           : { action: "rate_limited", until: until.toISOString() };
       }
       if (error.kind === "auth") {
-        pauseQueue(error.message);
-        patchQueueSettings({ lastError: "auth" });
-        patchTweet(due.id, { errorMessage: error.message, errorKind: "auth" });
+        pauseQueue(accountId, error.message);
+        patchQueueSettings(accountId, { lastError: "auth" });
+        patchTweet(due.id, accountId, { errorMessage: error.message, errorKind: "auth" });
         return { action: "auth_paused", id: due.id };
       }
       if (error.kind === "transient") {
         const attempts = due.attemptCount + 1;
         if (attempts >= 5) {
-          patchTweet(due.id, { status: "failed", errorMessage: error.message, errorKind: "transient", attemptCount: attempts });
+          patchTweet(due.id, accountId, { status: "failed", errorMessage: error.message, errorKind: "transient", attemptCount: attempts });
           return { action: "failed", id: due.id };
         }
         const backoff = Math.min(15 * 60_000, 30_000 * 2 ** (attempts - 1));
-        patchTweet(due.id, {
+        patchTweet(due.id, accountId, {
           scheduledAt: new Date(now.getTime() + backoff).toISOString(),
           errorMessage: error.message,
           errorKind: "transient",
@@ -203,21 +212,19 @@ async function executeTick(now: Date, options?: { now?: Date; client?: XClient; 
         return { action: "retry_later", id: due.id };
       }
       if (error.kind === "duplicate") {
-        patchTweet(due.id, {
+        patchTweet(due.id, accountId, {
           status: "failed",
           errorMessage: error.message,
           errorKind: "duplicate",
           attemptCount: due.attemptCount + 1,
         });
-        // Pull only the next pending row forward. Cancelled or other statuses stay where they are.
-        const promoted = promoteNextPendingToSlot(now);
+        const promoted = promoteNextPendingToSlot(accountId, now);
         if (promoted) {
-          console.log("[序帖] 内容重复，下一条已补到这个时间点", promoted, now.toISOString());
+          console.log("[序帖] 内容重复，下一条已补到这个时间点", accountId, promoted, now.toISOString());
         }
         return { action: "failed", id: due.id };
       }
-      // Other rejections fail this row only. Later pending posts still go out on their own schedule.
-      patchTweet(due.id, {
+      patchTweet(due.id, accountId, {
         status: "failed",
         errorMessage: error.message,
         errorKind: error.kind,
@@ -226,7 +233,7 @@ async function executeTick(now: Date, options?: { now?: Date; client?: XClient; 
       return { action: "failed", id: due.id };
     }
   } finally {
-    releaseLock();
+    releaseLock(accountId);
   }
 }
 
@@ -243,7 +250,7 @@ async function uploadAll(client: XClient, paths: string[] | undefined): Promise<
  * away, each replying to the previous one. Progress is saved after each post so a
  * retry resumes where it stopped instead of posting duplicates.
  */
-async function postUnit(client: XClient, due: Tweet): Promise<{ id: string }> {
+async function postUnit(accountId: AccountId, client: XClient, due: Tweet): Promise<{ id: string }> {
   const extra: TweetExtra = due.extra ? JSON.parse(JSON.stringify(due.extra)) : {};
   if (!extra.media?.length && !extra.thread?.length) return client.postTweet(due.text);
   let headId = extra.headTweetId ?? null;
@@ -251,7 +258,7 @@ async function postUnit(client: XClient, due: Tweet): Promise<{ id: string }> {
     const mediaIds = await uploadAll(client, extra.media);
     headId = (await client.postTweet(due.text, { mediaIds })).id;
     extra.headTweetId = headId;
-    patchTweet(due.id, { tweetId: headId, extra });
+    patchTweet(due.id, accountId, { tweetId: headId, extra });
   }
   let previous = headId;
   for (const reply of extra.thread ?? []) {
@@ -263,7 +270,7 @@ async function postUnit(client: XClient, due: Tweet): Promise<{ id: string }> {
     const posted = await client.postTweet(reply.text, { mediaIds, replyTo: previous });
     reply.tweetId = posted.id;
     previous = posted.id;
-    patchTweet(due.id, { extra });
+    patchTweet(due.id, accountId, { extra });
   }
   return { id: headId };
 }
@@ -273,17 +280,18 @@ const DUE_CACHE_TTL_MS = 10_000;
 const TIMELINE_LOG = "[序帖] 读取最近帖子失败，改用本工具自己的上次发送时间。";
 
 async function recentPostGap(
+  accountId: AccountId,
   now: Date,
   client: XClient,
   intervalMs: number,
   forceFresh = false,
 ): Promise<{ at: Date; manual: boolean; id: string } | null> {
   if (!client.latestTweet) return null;
-  const remote = await readRemoteLatest(now, client, intervalMs, forceFresh);
-  const local = latestLocalPost();
+  const remote = await readRemoteLatest(accountId, now, client, intervalMs, forceFresh);
+  const local = latestLocalPost(accountId);
   const winner = laterPost(remote, local);
   if (!winner) return null;
-  const ours = new Set(listTweets().map((tweet) => tweet.tweetId).filter((id): id is string => Boolean(id)));
+  const ours = new Set(listTweets(accountId).map((tweet) => tweet.tweetId).filter((id): id is string => Boolean(id)));
   return { at: winner.at, manual: Boolean(winner.id) && !ours.has(winner.id), id: winner.id };
 }
 
@@ -297,20 +305,20 @@ function laterPost(
 }
 
 async function readRemoteLatest(
+  accountId: AccountId,
   now: Date,
   client: XClient,
   intervalMs: number,
   forceFresh: boolean,
 ): Promise<{ id: string; at: Date } | null> {
   if (!client.latestTweet) return null;
-  const cache = getTimelineCache();
+  const cache = getTimelineCache(accountId);
   const reusable = shouldReuseTimelineCache({
     checkedAt: cache.checkedAt,
     latestAt: cache.latestAt,
     ok: cache.ok,
     now,
     intervalMs,
-    // When a post is due, only trust a read from the last few seconds.
     ttlMs: forceFresh ? DUE_CACHE_TTL_MS : TIMELINE_CACHE_TTL_MS,
   });
   if (reusable) {
@@ -318,17 +326,17 @@ async function readRemoteLatest(
     return cacheToPost(cache.latestId, cache.latestAt);
   }
 
-  let userId = getCredentialsRow()?.user_id ?? null;
+  let userId = getCredentialsRow(accountId)?.user_id ?? null;
   if (!userId) {
     try {
       const user = await client.verify();
       userId = user.id;
-      if (getCredentialsRow()) {
-        updateAccount({ username: user.username, displayName: user.name, userId: user.id });
+      if (getCredentialsRow(accountId)) {
+        updateAccount(accountId, { username: user.username, displayName: user.name, userId: user.id });
       }
     } catch (error) {
       console.warn(TIMELINE_LOG, error instanceof Error ? error.message : error);
-      rememberTimelineError(now);
+      rememberTimelineError(accountId, now);
       return null;
     }
   }
@@ -336,7 +344,7 @@ async function readRemoteLatest(
   try {
     const latest = await client.latestTweet(userId);
     const parsed = normalizeTimelineTweet(latest);
-    setTimelineCache({
+    setTimelineCache(accountId, {
       checkedAt: now.toISOString(),
       latestAt: parsed?.at.toISOString() ?? null,
       latestId: parsed?.id ?? null,
@@ -345,14 +353,14 @@ async function readRemoteLatest(
     return parsed;
   } catch (error) {
     console.warn(TIMELINE_LOG, error instanceof Error ? error.message : error);
-    rememberTimelineError(now);
+    rememberTimelineError(accountId, now);
     return null;
   }
 }
 
-function rememberTimelineError(now: Date): void {
-  const previous = getTimelineCache();
-  setTimelineCache({
+function rememberTimelineError(accountId: AccountId, now: Date): void {
+  const previous = getTimelineCache(accountId);
+  setTimelineCache(accountId, {
     checkedAt: now.toISOString(),
     latestAt: previous.latestAt,
     latestId: previous.latestId,

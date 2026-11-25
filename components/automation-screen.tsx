@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { ApprovedListFollowControl } from "@/components/approved-list-follow-control";
 import { useI18n } from "@/components/i18n-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,10 +9,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { StatsPanel } from "@/components/stats-panel";
+import { useAppState } from "@/components/app-state";
 
 type Entry = { time?: string; username?: string; result?: string; pending?: boolean; detail?: string | null; keyword?: string | null; followers?: number | null };
 type DaemonStatus = { state?: string; resumeAt?: string; why?: string; reason?: string; targetsRemaining?: number; updated?: string; error?: string };
 type Status = {
+  supervisor?: "on" | "off";
   day: string;
   config: { unfollow: { enabled: boolean }; followback: { enabled: boolean }; keywordfollow: { enabled: boolean; keywords: string[]; poolSize: number; maxFollowers: number }; combinedFollowDailyCap: number };
   caps: { combinedFollows: number; unfollows: number; unfollowPerRun: number; followWindow15m: number };
@@ -37,6 +40,7 @@ const L = {
     turnOn: "开启", turnOff: "关闭", keywords: "关键词（逗号分隔）", save: "保存关键词", pool: "今日候选池",
     remaining: "剩余", recent: "最近记录", rules: "规则", stopDay: "今日已停止关注", resume: "恢复于", refresh: "刷新",
     hourly: "每小时运行一次", pid: "进程",
+    supervisorOff: "关注自动化默认关闭。启动按钮不可用。只有在进程环境里把 XUTIE_AUTOMATION_SUPERVISOR 设为 on 并重启后，才会启动关注或取关进程。",
   },
   en: {
     title: "Auto follow / unfollow", sub: "Today's status of unfollow, follow-back and keyword follow (Asia/Shanghai day).",
@@ -45,6 +49,7 @@ const L = {
     turnOn: "Turn on", turnOff: "Turn off", keywords: "Keywords (comma separated)", save: "Save keywords", pool: "Today's candidate pool",
     remaining: "remaining", recent: "Recent", rules: "Rules", stopDay: "Follows stopped for today", resume: "resumes", refresh: "Refresh",
     hourly: "runs hourly", pid: "pid",
+    supervisorOff: "Follow automation is off by default, so Start is unavailable. Set XUTIE_AUTOMATION_SUPERVISOR=on and restart before any follow or unfollow process can start.",
   },
 };
 
@@ -52,20 +57,53 @@ const fmt = (iso?: string) => (iso ? new Date(iso).toLocaleTimeString("zh-CN", {
 
 export function AutomationScreen() {
   const { locale } = useI18n();
+  const { accountId } = useAppState();
   const t = L[locale];
   const [s, setS] = useState<Status | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [kw, setKw] = useState("");
+  const [accountNote, setAccountNote] = useState("");
+  const [dailyPool, setDailyPool] = useState(true);
+  const [followBatch, setFollowBatch] = useState("13");
+  const [newBatch, setNewBatch] = useState("9");
+  const [unfollowBatch, setUnfollowBatch] = useState("10");
+  const [unfollowCap, setUnfollowCap] = useState("80");
+  const [approvedListFollow, setApprovedListFollow] = useState(false);
+  const [approvedListLocked, setApprovedListLocked] = useState(accountId !== 1);
+  const [approvedListStatus, setApprovedListStatus] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const data = await api<Status>("/api/automation");
       setS(data); setErr(null);
-      setKw((cur) => (cur ? cur : data.config.keywordfollow.keywords.join(", ")));
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   }, []);
   useEffect(() => { load(); const id = setInterval(load, 20_000); return () => clearInterval(id); }, [load]);
+  useEffect(() => {
+    let cancel = false;
+    setKw("");
+    void api<{ keywords: string[]; running: boolean; reserve: { gap: number; constraint: string | null }; dailyCap: number; savesDoNotStart: boolean; approvedListFollow?: boolean; approvedListFollowLocked?: boolean; approvedListStatus?: string; ops?: { dailyPool?: boolean; locked?: boolean; followback?: { batchSize: number }; newFollow?: { batchSize: number }; unfollow?: { batchSize: number; dailyCap: number } } }>(`/api/follow/config?accountId=${accountId}`)
+      .then((config) => {
+        if (cancel) return;
+        setKw(config.keywords.join(", "));
+        setApprovedListFollow(config.approvedListFollow === true);
+        setApprovedListLocked(config.approvedListFollowLocked !== false);
+        setApprovedListStatus(config.approvedListStatus ?? "");
+        if (config.ops && !config.ops.locked) {
+          setDailyPool(config.ops.dailyPool !== false);
+          setFollowBatch(String(config.ops.followback?.batchSize ?? 13));
+          setNewBatch(String(config.ops.newFollow?.batchSize ?? 9));
+          setUnfollowBatch(String(config.ops.unfollow?.batchSize ?? 10));
+          setUnfollowCap(String(config.ops.unfollow?.dailyCap ?? 80));
+        }
+        setAccountNote(locale === "zh"
+          ? `账号${accountId} 单独配置。保存不会开始运行。运行中：${config.running ? "是" : "否"}。${accountId === 1 ? "台北日历日" : "伦敦每日"}关注加回关上限 ${config.dailyCap}。证据或候选缺口 ${config.reserve.gap}${config.reserve.constraint ? `（${config.reserve.constraint}）` : ""}。`
+          : `Account ${accountId} has its own keywords. Saving does not start a run. Running: ${config.running ? "yes" : "no"}. ${accountId === 1 ? "Taipei-day" : "London daily"} follow cap ${config.dailyCap}. Evidence or candidate gap ${config.reserve.gap}${config.reserve.constraint ? ` (${config.reserve.constraint})` : ""}.`);
+      })
+      .catch((error) => { if (!cancel) setErr(error instanceof Error ? error.message : String(error)); });
+    return () => { cancel = true; };
+  }, [accountId, locale]);
 
   async function patch(body: object) {
     setBusy(true);
@@ -79,6 +117,7 @@ export function AutomationScreen() {
   }
 
   if (!s) return <p className="text-sm text-muted-foreground">{err ?? "…"}</p>;
+  const supervisorOn = s.supervisor === "on";
   const tiles = [
     { label: t.unfollowed, value: `${s.counts.unfollowed} / ${s.caps.unfollows}` },
     { label: t.followedBack, value: String(s.counts.followedBack) },
@@ -113,7 +152,7 @@ export function AutomationScreen() {
           {"lastLines" in d && d.lastLines.length > 0 && <p className="truncate text-xs text-muted-foreground">{d.lastLines[d.lastLines.length - 1]}</p>}
           <div className="flex gap-2 pt-1">
             <Button size="sm" variant="outline" disabled={busy} onClick={() => patch({ [key]: { enabled: !enabled } })}>{enabled ? t.turnOff : t.turnOn}</Button>
-            {key !== "unfollow" && enabled && !d.running && <Button size="sm" disabled={busy} onClick={() => start(key)}>{t.start}</Button>}
+            {supervisorOn && key !== "unfollow" && enabled && !d.running && <Button size="sm" disabled={busy} onClick={() => start(key)}>{t.start}</Button>}
           </div>
         </CardContent>
       </Card>
@@ -147,6 +186,9 @@ export function AutomationScreen() {
         <Button size="sm" variant="outline" onClick={load}>{t.refresh}</Button>
       </div>
       {err && <p className="text-sm text-destructive">{err}</p>}
+      {!supervisorOn && <p className="rounded-lg bg-secondary px-3 py-2 text-sm leading-6">{t.supervisorOff}</p>}
+      <p className="rounded-lg border px-3 py-2 text-sm leading-6">{locale === "zh" ? "下面三张旧卡片和旧关键词是全局共享的，不随账号切换分开。旧 supervisor 保持关闭，这里不能启动固定账号1脚本。" : "The three legacy cards and the old keyword file are one shared config. They do not change with the account switch, and the legacy supervisor stays off."}</p>
+      {accountNote && <p className="rounded-lg bg-secondary px-3 py-2 text-sm leading-6">{accountNote}</p>}
       {s.stopForToday && <p className="rounded-lg border border-destructive p-3 text-sm text-destructive">{t.stopDay}: {s.stopForToday.reason} ({s.stopForToday.by})</p>}
       <StatsPanel zh={locale === "zh"} />
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
@@ -177,8 +219,62 @@ export function AutomationScreen() {
           <label className="text-sm">{t.keywords}</label>
           <div className="flex gap-2">
             <Input value={kw} onChange={(e) => setKw(e.target.value)} />
-            <Button disabled={busy} onClick={() => patch({ keywordfollow: { keywords: kw.split(/[,，]/).map((k) => k.trim()).filter(Boolean) } })}>{t.save}</Button>
+            <Button disabled={busy} onClick={async () => {
+              setBusy(true);
+              try {
+                await api("/api/follow/config", { method: "PUT", body: JSON.stringify({ accountId, keywords: kw.split(/[,，]/).map((item) => item.trim()).filter(Boolean) }) });
+                setAccountNote(locale === "zh" ? `已保存账号${accountId}的关键词。这只是配置，没有开始运行。` : `Saved account ${accountId} keywords. This is configuration only and does not start a run.`);
+              } catch (error) { setErr(error instanceof Error ? error.message : String(error)); }
+              finally { setBusy(false); }
+            }}>{t.save}</Button>
           </div>
+          <ApprovedListFollowControl
+            accountId={accountId}
+            checked={approvedListFollow}
+            locked={approvedListLocked}
+            status={approvedListStatus}
+            busy={busy}
+            onChecked={setApprovedListFollow}
+            onSave={async (body) => {
+              setBusy(true);
+              try {
+                const saved = await api<{ approvedListFollow?: boolean; approvedListStatus?: string; approvedListFollowLocked?: boolean }>("/api/follow/config", { method: "PUT", body: JSON.stringify(body) });
+                setApprovedListFollow(saved.approvedListFollow === true);
+                setApprovedListLocked(saved.approvedListFollowLocked !== false);
+                setApprovedListStatus(saved.approvedListStatus ?? "");
+                setAccountNote(saved.approvedListStatus ?? "");
+              } catch (error) { setErr(error instanceof Error ? error.message : String(error)); }
+              finally { setBusy(false); }
+            }}
+          />
+          {accountId === 1 && (
+            <div className="space-y-2 text-sm">
+              <p>账号1可调：日池开关、回关每轮、新关注每轮、取关每批、取关日上限（0–80，关闭日池仍然生效）。时区、窗口和工作/休息间隔只展示，不能改。保存不会开始运行。晚间新关注无论是否在 45 分钟内，都要当天另行授权。</p>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={dailyPool} onChange={(event) => setDailyPool(event.target.checked)} /> 每天一次候选池</label>
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                <label className="space-y-1">回关每轮<Input value={followBatch} onChange={(event) => setFollowBatch(event.target.value)} aria-label="回关每轮" /></label>
+                <label className="space-y-1">新关注每轮<Input value={newBatch} onChange={(event) => setNewBatch(event.target.value)} aria-label="新关注每轮" /></label>
+                <label className="space-y-1">取关每批<Input value={unfollowBatch} onChange={(event) => setUnfollowBatch(event.target.value)} aria-label="取关每批" /></label>
+                <label className="space-y-1">取关日上限<Input value={unfollowCap} onChange={(event) => setUnfollowCap(event.target.value)} aria-label="取关日上限" /></label>
+              </div>
+              <Button disabled={busy} variant="outline" onClick={async () => {
+                setBusy(true);
+                try {
+                  await api("/api/follow/config", { method: "PUT", body: JSON.stringify({
+                    accountId: 1,
+                    ops: {
+                      dailyPool,
+                      followback: { batchSize: Number(followBatch), workMinutes: 15, restMinutes: 18 },
+                      newFollow: { batchSize: Number(newBatch), workMinutes: 15, restMinutes: 20 },
+                      unfollow: { batchSize: Number(unfollowBatch), dailyCap: Number(unfollowCap) },
+                    },
+                  }) });
+                  setAccountNote("已保存账号1的日池开关和批量。这只是配置，没有开始运行。");
+                } catch (error) { setErr(error instanceof Error ? error.message : String(error)); }
+                finally { setBusy(false); }
+              }}>保存日池</Button>
+            </div>
+          )}
           {s.pool && (
             <div className="text-sm">
               <p>{t.pool} {s.pool.date}: {s.pool.count}/{s.pool.target} · {t.remaining} {s.pool.remaining}</p>

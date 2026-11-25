@@ -9,17 +9,18 @@ const secret = "super-secret-value-xyz";
 const user = { id: "42", username: "demo", name: "Demo" };
 
 function connect() {
-  saveCredentials({
+  saveCredentials(1, {
     apiKey: "abc12345",
     apiSecret: secret,
     accessToken: "token-value",
     accessTokenSecret: "token-secret-value",
   });
-  updateAccount({ username: user.username, displayName: user.name, userId: user.id });
+  updateAccount(1, { username: user.username, displayName: user.name, userId: user.id });
 }
 
 function queue(source: string, startAt: string) {
   return importTweets({
+      accountId: 1,
     source,
     format: "text",
     startAt,
@@ -76,8 +77,8 @@ describe("recent posts on X", () => {
     const now = new Date();
     const latestAt = new Date(now.getTime() - 5 * 60_000);
     const imported = queue("第一条\n第二条", new Date(now.getTime() + 60 * 60_000).toISOString());
-    patchTweet(imported.queued[0].id, { scheduledAt: new Date(now.getTime() - 60_000).toISOString() });
-    patchTweet(imported.queued[1].id, { scheduledAt: new Date(now.getTime() + 15 * 60_000).toISOString() });
+    patchTweet(imported.queued[0].id, 1, { scheduledAt: new Date(now.getTime() - 60_000).toISOString() });
+    patchTweet(imported.queued[1].id, 1, { scheduledAt: new Date(now.getTime() + 15 * 60_000).toISOString() });
     const originalGap = 16 * 60_000;
 
     let reads = 0;
@@ -109,7 +110,7 @@ describe("recent posts on X", () => {
     expect(originalGap).toBeLessThan(15 * 60_000 + 90_000);
     expect(shifted.every((tweet) => tweet.delayReason === "manual")).toBe(true);
 
-    patchTweet(shifted[0].id, { scheduledAt: now.toISOString() });
+    patchTweet(shifted[0].id, 1, { scheduledAt: now.toISOString() });
     const cached = await tick({ now: new Date(now.getTime() + 1000), client, random: half });
     expect(cached).toMatchObject({ action: "deferred", manual: true });
     expect(reads).toBe(1);
@@ -147,7 +148,7 @@ describe("recent posts on X", () => {
       },
     });
     expect(posted).toMatchObject({ action: "posted", tweetId: "ours-1" });
-    setTimelineCache({ checkedAt: null, latestAt: null, latestId: null, ok: false });
+    setTimelineCache(1, { checkedAt: null, latestAt: null, latestId: null, ok: false });
 
     queue("下一条", now.toISOString());
     let reads = 0;
@@ -185,7 +186,7 @@ describe("recent posts on X", () => {
         postTweet: async () => ({ id: "ours-1" }),
       },
     });
-    setTimelineCache({ checkedAt: null, latestAt: null, latestId: null, ok: false });
+    setTimelineCache(1, { checkedAt: null, latestAt: null, latestId: null, ok: false });
     const pending = queue("下一条", now.toISOString()).queued[0];
 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -203,13 +204,13 @@ describe("recent posts on X", () => {
     const deferred = await tick({ now, client, random: half });
     expect(deferred).toMatchObject({ action: "deferred", manual: false });
     expect(reads).toBe(1);
-    expect(getTimelineCache().ok).toBe(false);
+    expect(getTimelineCache(1).ok).toBe(false);
     expect(warn).toHaveBeenCalledWith("[序帖] 读取最近帖子失败，改用本工具自己的上次发送时间。", "timeline down");
     const next = getPublicState().tweets.find((tweet) => tweet.text === "下一条");
     expect(next?.delayReason).toBeNull();
     expect(new Date(next!.scheduledAt).toISOString()).toBe(slot(postedAt, 90).toISOString());
 
-    patchTweet(pending.id, { scheduledAt: new Date(now.getTime() + 5_000).toISOString() });
+    patchTweet(pending.id, 1, { scheduledAt: new Date(now.getTime() + 5_000).toISOString() });
     const again = await tick({ now: new Date(now.getTime() + 5_000), client });
     expect(again.action).toBe("deferred");
     expect(reads).toBe(1);
@@ -232,8 +233,8 @@ describe("recent posts on X", () => {
     });
     expect(result).toMatchObject({ action: "posted", tweetId: "posted-1" });
     expect(warn).toHaveBeenCalledWith("[序帖] 读取最近帖子失败，改用本工具自己的上次发送时间。", "timeline down");
-    expect(getTimelineCache().ok).toBe(true);
-    expect(getTimelineCache().latestId).toBe("posted-1");
+    expect(getTimelineCache(1).ok).toBe(true);
+    expect(getTimelineCache(1).latestId).toBe("posted-1");
   });
 });
 
@@ -253,7 +254,7 @@ describe("random extra delay when the queue shifts", () => {
     const imported = queue("甲\n乙\n丙\n丁", new Date(now.getTime() - 1000).toISOString());
     // Squeeze the batch so every post has to move.
     imported.queued.forEach((tweet, index) => {
-      patchTweet(tweet.id, { scheduledAt: new Date(now.getTime() - 1000 + index * 60_000).toISOString() });
+      patchTweet(tweet.id, 1, { scheduledAt: new Date(now.getTime() - 1000 + index * 60_000).toISOString() });
     });
     const deferred = await tick({
       now,
@@ -309,6 +310,7 @@ describe("random extra delay when the queue shifts", () => {
       new Request("http://localhost/api/queue", {
         method: "PUT",
         body: JSON.stringify({
+          accountId: 1,
           intervalMinutes: 15,
           jitterMinutes: 5,
           randomMinSeconds: 60,
@@ -328,7 +330,7 @@ describe("random extra delay when the queue shifts", () => {
     const bad = await PUT(
       new Request("http://localhost/api/queue", {
         method: "PUT",
-        body: JSON.stringify({ intervalMinutes: 15, randomMinSeconds: 120, randomMaxSeconds: 60 }),
+        body: JSON.stringify({ accountId: 1, intervalMinutes: 15, randomMinSeconds: 120, randomMaxSeconds: 60 }),
       }),
     );
     expect(bad.status).toBe(400);
@@ -376,10 +378,7 @@ describe("live timeline read", () => {
       );
     });
     vi.stubGlobal("fetch", fetchMock);
-    await expect(x.latestTweet!("42")).resolves.toEqual({
-      id: "newer",
-      createdAt: "2026-06-01T11:00:00.000Z",
-    });
-    expect(fetchMock).toHaveBeenCalledOnce();
+    await expect(x.latestTweet!("42")).rejects.toThrow(/读额度已关闭/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

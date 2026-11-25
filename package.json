@@ -9,9 +9,9 @@
     "url": "https://github.com/Barrett-QClabs/xutie-x-scheduler"
   },
   "scripts": {
-    "dev": "next dev --turbopack -H 0.0.0.0 -p 3847",
+    "dev": "node scripts/serve.mjs dev",
     "build": "next build",
-    "start": "next start -H 0.0.0.0 -p 3847",
+    "start": "node scripts/serve.mjs start",
     "lint": "eslint",
     "test": "vitest run"
   },
@@ -34,6 +34,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "15.5.28",
+    "puppeteer-core": "^25.16.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^3.2.7"

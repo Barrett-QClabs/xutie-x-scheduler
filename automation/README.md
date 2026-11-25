@@ -18,6 +18,7 @@ Runtime data (logs, cache, locks, snapshots, candidate pools, `whitelist.txt`, `
 
 Disable flags in the runtime dir: `FOLLOWBACK_DISABLED`, `KEYWORD_DISABLED` (start scripts exit 0 if present).
 
-The 序帖 server (`instrumentation.ts` → `lib/automation.ts`) restarts enabled daemons every 5 min
-(`XUTIE_AUTOMATION_SUPERVISOR=off` disables that) and serves `/automation`, `GET /api/automation`,
-`GET|PATCH /api/automation/config`, `POST /api/automation/start {"daemon":"followback"|"keywordfollow"}`.
+The 序帖 server (`instrumentation.ts` → `lib/automation.ts`) does **not** restart those daemons
+unless `XUTIE_AUTOMATION_SUPERVISOR=on`. The default is off. `POST /api/automation/start` returns
+403 `automation_disabled` in that default. Status remains available at `/automation` and
+`GET /api/automation`.

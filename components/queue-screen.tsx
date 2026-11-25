@@ -31,7 +31,7 @@ import { inspectTweet } from "@/lib/weighted-length";
 
 export function QueueScreen() {
   const { t, locale } = useI18n();
-  const { state, loading, loadError, refresh } = useAppState();
+  const { state, loading, loadError, refresh, accountId } = useAppState();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [intervalMinutes, setIntervalMinutes] = useState("15");
@@ -91,11 +91,12 @@ export function QueueScreen() {
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="font-heading text-3xl tracking-wide">{t("queueTitle")}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{accountId === 1 ? "账号1" : "账号2"}</p>
           <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{t("queueSubtitle")}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {state.queue.paused ? (
-            <Button type="button" disabled={busy} onClick={() => void run(() => api("/api/queue/resume", { method: "POST" }))}>
+            <Button type="button" disabled={busy} onClick={() => void run(() => api("/api/queue/resume", { method: "POST", body: JSON.stringify({ accountId }) }))}>
               {t("resumeAll")}
             </Button>
           ) : (
@@ -103,7 +104,7 @@ export function QueueScreen() {
               type="button"
               variant="outline"
               disabled={busy}
-              onClick={() => void run(() => api("/api/queue/pause", { method: "POST" }))}
+              onClick={() => void run(() => api("/api/queue/pause", { method: "POST", body: JSON.stringify({ accountId }) }))}
             >
               {t("pauseAll")}
             </Button>
@@ -112,7 +113,7 @@ export function QueueScreen() {
             type="button"
             variant="outline"
             disabled={busy || state.counts.failed === 0}
-            onClick={() => void run(() => api("/api/queue/retry-failed", { method: "POST" }))}
+            onClick={() => void run(() => api("/api/queue/retry-failed", { method: "POST", body: JSON.stringify({ accountId }) }))}
           >
             {t("retryFailed")}
           </Button>
@@ -169,6 +170,7 @@ export function QueueScreen() {
                   api("/api/queue", {
                     method: "PUT",
                     body: JSON.stringify({
+                      accountId,
                       intervalMinutes: Number(intervalMinutes),
                       randomMinSeconds: Number(randomMinSeconds),
                       randomMaxSeconds: Number(randomMaxSeconds),
@@ -256,7 +258,7 @@ export function QueueScreen() {
                               void run(() =>
                                 api("/api/tweets/reorder", {
                                   method: "POST",
-                                  body: JSON.stringify({ id: tweet.id, direction: "up" }),
+                                  body: JSON.stringify({ accountId, id: tweet.id, direction: "up" }),
                                 }),
                               )
                             }
@@ -273,7 +275,7 @@ export function QueueScreen() {
                               void run(() =>
                                 api("/api/tweets/reorder", {
                                   method: "POST",
-                                  body: JSON.stringify({ id: tweet.id, direction: "down" }),
+                                  body: JSON.stringify({ accountId, id: tweet.id, direction: "down" }),
                                 }),
                               )
                             }
@@ -303,7 +305,7 @@ export function QueueScreen() {
                           size="sm"
                           variant="outline"
                           disabled={busy}
-                          onClick={() => void run(() => api(`/api/tweets/${tweet.id}/retry`, { method: "POST" }))}
+                          onClick={() => void run(() => api(`/api/tweets/${tweet.id}/retry`, { method: "POST", body: JSON.stringify({ accountId }) }))}
                         >
                           {t("retry")}
                         </Button>
@@ -356,7 +358,7 @@ export function QueueScreen() {
                   if (!editing) return;
                   await api(`/api/tweets/${editing.id}`, {
                     method: "PATCH",
-                    body: JSON.stringify({ text: draft }),
+                    body: JSON.stringify({ accountId, text: draft }),
                   });
                   setEditing(null);
                 })
@@ -385,7 +387,7 @@ export function QueueScreen() {
               onClick={() =>
                 void run(async () => {
                   if (!deleting) return;
-                  await api(`/api/tweets/${deleting.id}`, { method: "DELETE" });
+                  await api(`/api/tweets/${deleting.id}?accountId=${accountId}`, { method: "DELETE" });
                   setDeleting(null);
                 })
               }
@@ -401,11 +403,12 @@ export function QueueScreen() {
 
 function pauseCopy(
   reason: string | null,
-  t: (key: "pauseManual" | "pauseMissing" | "pauseDecrypt" | "pauseKey") => string,
+  t: (key: "pauseManual" | "pauseSafeStart" | "pauseMissing" | "pauseDecrypt" | "pauseKey") => string,
 ) {
   if (reason === "missing_credentials") return t("pauseMissing");
   if (reason === "decrypt_failed") return t("pauseDecrypt");
   if (reason === "encryption_key_missing") return t("pauseKey");
+  if (reason === "safe_start") return t("pauseSafeStart");
   if (!reason || reason === "manual") return t("pauseManual");
   return reason;
 }

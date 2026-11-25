@@ -71,6 +71,7 @@ export type Tweet = {
   attemptCount: number;
   sortOrder: number;
   delayReason: DelayReason;
+  accountId: 1 | 2;
   /** Optional media + thread replies for this queue item (the whole thread counts as one post). */
   extra?: TweetExtra | null;
   createdAt: string;
@@ -110,8 +111,29 @@ export type QueueSettings = {
   lastTickAction: string | null;
 };
 
+export type DeploymentPosture = {
+  apiMode: "mock" | "live";
+  queuePaused: boolean;
+  pauseReason: string | null;
+  credentialsConfigured: boolean;
+  encryptionKeyConfigured: boolean;
+  automationSupervisor: "on" | "off";
+  /** True only when a due post would call X. Mock mode never sets this. */
+  sendsWhenDue: boolean;
+};
+
 export type PublicState = {
   mockMode: boolean;
+  accountId: 1 | 2;
+  accountLabel: "账号1" | "账号2";
+  slots: Array<{
+    id: 1 | 2;
+    label: "账号1" | "账号2";
+    credentialsConfigured: boolean;
+    paused: boolean;
+    username: string | null;
+  }>;
+  deployment: DeploymentPosture;
   credentialsConfigured: boolean;
   account: { username: string; displayName: string; userId: string } | null;
   queue: QueueSettings;

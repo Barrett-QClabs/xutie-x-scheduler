@@ -1,0 +1,1179 @@
+import type { AccountId } from "@/lib/account";
+import { audienceMatch, preferFlb, spamText } from "@/lib/audience";
+import { evidenceFollowProfile } from "@/lib/evidence";
+import { followTarget } from "@/lib/follow-live";
+import {
+  approvalCoversAccount1New,
+  markNewAdmission,
+  newAdmissionView,
+  pendingNewAdmissions,
+} from "@/lib/follow-new-admission";
+import { ACCOUNT_USER_ID, UNFOLLOW_WHITELIST, audienceFor, followEnabled } from "@/lib/automation-account";
+import { getCredentialsRow, getDb } from "@/lib/db";
+import { apiMode } from "@/lib/deployment";
+import { AppError } from "@/lib/errors";
+import { followBatchSize } from "@/lib/account-ops";
+import { account1ApprovedListWaivesScreening, approvedListFollowView } from "@/lib/approved-list-follow";
+import { account1ExecutionAllowed } from "@/lib/follow-allowlist";
+import { followBlocked } from "@/lib/follow-blocklist";
+import { account1FollowPhase, account1PoolInUse, followBatchLimit, followCapDay, followDailyCap, followSlot, isFollowAuditCursor } from "@/lib/follow-cadence";
+import { MAX_FOLLOWERS, RESERVE_FRESH_MS } from "@/lib/unfollow-policy";
+
+export type FollowKind = "followback" | "new";
+export type FollowOutcome = "success" | "failed" | "skipped" | "unknown";
+
+export type FollowProfile = {
+  blue: boolean | null;
+  following: boolean | null;
+  followsBack: boolean | null;
+  followers: number | null;
+  name: string | null;
+  bio: string | null;
+  username: string | null;
+  tweetLang: string | null;
+  tweetText: string | null;
+  lastPostAt: string | null;
+  lastPostKnown: boolean;
+};
+
+export type FollowHooks = {
+  inspect: (targetUserId: string) => Promise<FollowProfile>;
+  follow: (targetUserId: string) => Promise<void>;
+};
+
+type Account1Pick = {
+  targetUserId: string;
+  username: string | null;
+  kind: FollowKind;
+  fromAdmission: boolean;
+  followReason: "new" | "new_flb" | null;
+  reserve: ReserveRow | null;
+};
+
+export type FollowReserveView = {
+  updatedAt: string | null;
+  available: number;
+  followbackAvailable: number;
+  newAvailable: number;
+  stale: number;
+  gap: number;
+  constraint: string | null;
+};
+
+const NO_RETRY = new Set(["unknown", "failed", "followed"]);
+
+function one<T>(sql: string, ...params: unknown[]): T | null {
+  const row = getDb().prepare(sql).get(...params);
+  return (row as T | undefined) ?? null;
+}
+
+function realTime(value: unknown): string | null {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) return null;
+  return new Date(Date.parse(value)).toISOString();
+}
+
+function parseKind(value: unknown): FollowKind {
+  if (value === "followback" || value === "new") return value;
+  throw new AppError("invalid_kind", "储备类型必须是 followback 或 new。");
+}
+
+export function followedToday(accountId: AccountId, now: Date): number {
+  const day = followCapDay(accountId, now);
+  const row = one<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM follow_success WHERE account_id = ? AND london_day = ?",
+    accountId,
+    day,
+  );
+  return row?.n ?? 0;
+}
+
+export function reserveView(accountId: AccountId, now: Date): FollowReserveView {
+  const rows = getDb()
+    .prepare(`SELECT kind, status, checked_at, updated_at FROM follow_reserve WHERE account_id = ?`)
+    .all(accountId) as Array<{ kind: string; status: string; checked_at: string; updated_at: string }>;
+  const freshAfter = now.getTime() - RESERVE_FRESH_MS;
+  let updatedAt: string | null = null;
+  let available = 0;
+  let followbackAvailable = 0;
+  let newAvailable = 0;
+  let stale = 0;
+  for (const row of rows) {
+    if (!updatedAt || row.updated_at > updatedAt) updatedAt = row.updated_at;
+    if (row.status !== "reserved") continue;
+    const checked = Date.parse(row.checked_at);
+    const held = reserveHeld(accountId, row.kind, row.checked_at, now);
+    if (!held && (Number.isNaN(checked) || checked < freshAfter)) {
+      stale += 1;
+      continue;
+    }
+    available += 1;
+    if (row.kind === "followback") followbackAvailable += 1;
+    else newAvailable += 1;
+  }
+  const actionable = available;
+  const blockingStale = stale;
+  const remaining = Math.max(0, followDailyCap(accountId) - capUsed(accountId, now));
+  const room = Math.min(batchLimit(accountId, now), remaining);
+  const gap = Math.max(0, room - actionable);
+  return {
+    updatedAt,
+    available,
+    followbackAvailable,
+    newAvailable,
+    stale,
+    gap,
+    constraint: reserveConstraint({
+      accountId,
+      now,
+      available: actionable,
+      stale: blockingStale,
+      remaining,
+      gap,
+    }),
+  };
+}
+
+function reserveConstraint(input: {
+  accountId: AccountId;
+  now: Date;
+  available: number;
+  stale: number;
+  remaining: number;
+  gap: number;
+}): string | null {
+  if (!followEnabled(input.accountId)) return "disabled";
+  if (getCredentialsRow(input.accountId)?.user_id !== ACCOUNT_USER_ID[input.accountId]) return "identity_unconfirmed";
+  const paused = one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", input.accountId);
+  if (paused?.paused !== 0) return "paused";
+  if (!followSlot(input.accountId, input.now)) return "rest";
+  if (input.remaining <= 0) return "daily_cap";
+  if (input.available === 0 && input.stale > 0) return "stale_reserve";
+  if (input.gap > 0) return "insufficient_candidates";
+  return null;
+}
+
+export function getFollowStatus(accountId: AccountId, now = new Date()) {
+  const control = one<{ paused: number; pause_reason: string | null }>(
+    "SELECT paused, pause_reason FROM follow_control WHERE account_id = ?",
+    accountId,
+  );
+  const reserve = reserveView(accountId, now);
+  const recent = getDb()
+    .prepare(
+      `SELECT target_user_id, username, kind, succeeded_at, slot, london_day
+       FROM follow_success WHERE account_id = ? ORDER BY succeeded_at DESC LIMIT 20`,
+    )
+    .all(accountId) as Array<{
+    target_user_id: string;
+    username: string | null;
+    kind: string;
+    succeeded_at: string;
+    slot: string;
+    london_day: string;
+  }>;
+  const followed = followedToday(accountId, now);
+  const openForNewAdmission = accountId === 1
+    && followEnabled(1)
+    && control?.paused === 0
+    && getCredentialsRow(1)?.user_id === ACCOUNT_USER_ID[1]
+    && account1FollowPhase(now) === "unified";
+  return {
+    accountId,
+    audience: audienceFor(accountId),
+    enabled: followEnabled(accountId),
+    paused: control?.paused !== 0,
+    pauseReason: control?.pause_reason ?? null,
+    apiMode: apiMode(),
+    identityConfirmed: getCredentialsRow(accountId)?.user_id === ACCOUNT_USER_ID[accountId],
+    londonDay: followCapDay(accountId, now),
+    schedule: followSlot(accountId, now) ? "work" : "rest",
+    batchSize: batchLimit(accountId, now),
+    dailyCap: followDailyCap(accountId),
+    followedToday: followed,
+    remainingQuota: Math.max(0, followDailyCap(accountId) - capUsed(accountId, now)),
+    newAdmission: newAdmissionView(accountId, now, openForNewAdmission),
+    ...approvedListFollowView(accountId),
+    reserve,
+    recentSuccess: recent.map((row) => ({
+      targetUserId: row.target_user_id,
+      username: row.username,
+      kind: row.kind,
+      succeededAt: row.succeeded_at,
+      slot: row.slot,
+      londonDay: row.london_day,
+    })),
+  };
+}
+
+export function setFollowPaused(accountId: AccountId, paused: boolean, reason: string) {
+  getDb()
+    .prepare(`UPDATE follow_control SET paused = ?, pause_reason = ?, updated_at = ? WHERE account_id = ?`)
+    .run(paused ? 1 : 0, reason, new Date().toISOString(), accountId);
+  return { ok: true as const, accountId, paused };
+}
+
+type ReserveStored = {
+  target_user_id: string;
+  username: string | null;
+  kind: string;
+  status: string;
+  checked_at: string;
+  followers_count: number | null;
+  last_post_at: string | null;
+  prefer_flb: number | null;
+  result: string | null;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ParkedReserve = {
+  targetUserId: string;
+  kind: FollowKind;
+  checkedAt: string;
+  priorStatus: string | null;
+  priorReason: string | null;
+  parkedReason: string;
+  evidenceReason: string;
+  terminal: boolean;
+};
+
+const FORGED_REASONS = new Set(["spam", "not_blue", "nonblue", "non_blue", "not_english", "not_chinese", "not_follower", "already_following"]);
+
+function reserveKind(value: string): FollowKind {
+  return value === "followback" ? "followback" : "new";
+}
+
+function evidenceGate(accountId: AccountId, row: { target_user_id: string; kind: string; checked_at: string }, now: Date): { executable: boolean; evidenceReason: string } {
+  const kind = reserveKind(row.kind);
+  const decision = classifyFollow({
+    accountId,
+    kind,
+    profile: evidenceFollowProfile(accountId, row.target_user_id, now),
+    now,
+  });
+  const evidenceReason = decision.proceed ? "qualified" : decision.reason;
+  const checked = Date.parse(row.checked_at);
+  const fresh = !Number.isNaN(checked) && checked >= now.getTime() - RESERVE_FRESH_MS && checked <= now.getTime() + 5 * 60 * 1000;
+  if (!fresh || !decision.proceed) return { executable: false, evidenceReason };
+  return { executable: true, evidenceReason };
+}
+
+function terminalAudit(accountId: AccountId, targetUserId: string): boolean {
+  return Boolean(one(
+    "SELECT 1 AS ok FROM follow_reserve_audit WHERE account_id = ? AND target_user_id = ? AND terminal = 1",
+    accountId,
+    targetUserId,
+  ));
+}
+
+function parkedBefore(accountId: AccountId, targetUserId: string): boolean {
+  return Boolean(one(
+    "SELECT 1 AS ok FROM follow_reserve_audit WHERE account_id = ? AND target_user_id = ?",
+    accountId,
+    targetUserId,
+  ));
+}
+
+function parkReserve(accountId: AccountId, row: ReserveStored, parkedReason: string, evidenceReason: string, now: Date): ParkedReserve {
+  const parkedAt = now.toISOString();
+  const kind = reserveKind(row.kind);
+  getDb().prepare(
+    `INSERT OR IGNORE INTO follow_reserve_audit
+      (account_id, target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb, prior_status, prior_result, prior_reason, parked_reason, evidence_reason, terminal, parked_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+  ).run(
+    accountId,
+    row.target_user_id,
+    row.username,
+    kind,
+    row.checked_at,
+    row.followers_count,
+    row.last_post_at,
+    row.prefer_flb,
+    row.status,
+    row.result,
+    row.reason,
+    parkedReason,
+    evidenceReason,
+    parkedAt,
+    row.created_at,
+    row.updated_at,
+  );
+  getDb().prepare("DELETE FROM follow_reserve WHERE account_id = ? AND target_user_id = ?").run(accountId, row.target_user_id);
+  return {
+    targetUserId: row.target_user_id,
+    kind,
+    checkedAt: row.checked_at,
+    priorStatus: row.status,
+    priorReason: row.reason,
+    parkedReason,
+    evidenceReason,
+    terminal: false,
+  };
+}
+
+function parsePruneFilter(input: { kinds?: unknown; statuses?: unknown; reason?: unknown }): { kinds: FollowKind[] | null; statuses: string[]; reason: string } {
+  const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+  if (!reason || reason.length > 80) throw new AppError("invalid_reason", "清理原因必须是 1 到 80 个字符。");
+  if (FORGED_REASONS.has(reason.toLowerCase())) {
+    throw new AppError("forged_reason", "清理原因不能写成 spam 或非蓝 V 这类未核验结论。");
+  }
+  let kinds: FollowKind[] | null = null;
+  if (input.kinds !== undefined) {
+    if (!Array.isArray(input.kinds) || input.kinds.length < 1 || input.kinds.length > 2) {
+      throw new AppError("invalid_kind", "kinds 只能是 followback、new，或两者。");
+    }
+    kinds = [];
+    for (const item of input.kinds) {
+      if (item !== "followback" && item !== "new") throw new AppError("invalid_kind", "kinds 只能是 followback 或 new。");
+      if (!kinds.includes(item)) kinds.push(item);
+    }
+  }
+  const rawStatuses = input.statuses === undefined ? ["reserved"] : input.statuses;
+  if (!Array.isArray(rawStatuses) || rawStatuses.length !== 1 || rawStatuses[0] !== "reserved") {
+    throw new AppError("invalid_status", "statuses 只能是 reserved。成功、失败和 unknown 不从审计里移走。");
+  }
+  return { kinds, statuses: ["reserved"], reason };
+}
+
+/** Move matching reserved rows out of the active pool. Does not touch follow_success or terminal results. */
+export function pruneActiveReserve(
+  accountId: AccountId,
+  input: { kinds?: unknown; statuses?: unknown; reason?: unknown } = {},
+  now = new Date(),
+) {
+  const filter = parsePruneFilter(input);
+  const rows = getDb().prepare(
+    `SELECT target_user_id, username, kind, status, checked_at, followers_count, last_post_at, prefer_flb, result, reason, created_at, updated_at
+     FROM follow_reserve WHERE account_id = ? AND status = 'reserved'`,
+  ).all(accountId) as ReserveStored[];
+  const parked: ParkedReserve[] = [];
+  for (const row of rows) {
+    if (filter.kinds && !filter.kinds.includes(reserveKind(row.kind))) continue;
+    const gate = evidenceGate(accountId, row, now);
+    const selected = filter.kinds !== null || !gate.executable;
+    if (!selected) continue;
+    parked.push(parkReserve(accountId, row, filter.reason, gate.evidenceReason, now));
+  }
+  const view = reserveView(accountId, now);
+  return {
+    ok: true as const,
+    accountId,
+    applied: true as const,
+    kinds: filter.kinds,
+    statuses: filter.statuses,
+    reason: filter.reason,
+    parked,
+    active: view.available,
+    followbackAvailable: view.followbackAvailable,
+    newAvailable: view.newAvailable,
+  };
+}
+
+export function listReserveAudit(accountId: AccountId, input?: { limit?: number; before?: string | null }) {
+  const limit = input?.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new AppError("invalid_limit", "审计分页 limit 必须是 1 到 50 的整数。");
+  }
+  const before = input?.before ?? null;
+  const rows = getDb().prepare(
+    `SELECT target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb, prior_status, prior_result, prior_reason, parked_reason, evidence_reason, terminal, parked_at, created_at, updated_at
+     FROM follow_reserve_audit
+     WHERE account_id = ? AND (? IS NULL OR parked_at < ?)
+     ORDER BY parked_at DESC, target_user_id DESC
+     LIMIT ?`,
+  ).all(accountId, before, before, limit + 1) as Array<{
+    target_user_id: string;
+    username: string | null;
+    kind: string;
+    checked_at: string;
+    followers_count: number | null;
+    last_post_at: string | null;
+    prefer_flb: number | null;
+    prior_status: string | null;
+    prior_result: string | null;
+    prior_reason: string | null;
+    parked_reason: string;
+    evidence_reason: string | null;
+    terminal: number;
+    parked_at: string;
+    created_at: string;
+    updated_at: string | null;
+  }>;
+  const page = rows.slice(0, limit);
+  return {
+    accountId,
+    entries: page.map((row) => ({
+      targetUserId: row.target_user_id,
+      username: row.username,
+      kind: row.kind,
+      checkedAt: row.checked_at,
+      followersCount: row.followers_count,
+      lastPostAt: row.last_post_at,
+      preferFlb: row.prefer_flb === 1,
+      priorStatus: row.prior_status,
+      priorResult: row.prior_result,
+      priorReason: row.prior_reason,
+      parkedReason: row.parked_reason,
+      evidenceReason: row.evidence_reason,
+      terminal: row.terminal === 1,
+      parkedAt: row.parked_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })),
+    nextBefore: rows.length > limit ? (page[page.length - 1]?.parked_at ?? null) : null,
+  };
+}
+
+/** Account 1 only. A following_unconfirmed row can return to reserved when newer evidence now qualifies. */
+function reopenUnconfirmedFollow(
+  accountId: AccountId,
+  found: { status: string; reason: string | null },
+  targetUserId: string,
+  kind: FollowKind,
+  checkedAt: string,
+  now: Date,
+): boolean {
+  if (accountId !== 1 || found.status !== "unknown" || found.reason !== "following_unconfirmed") return false;
+  const checked = Date.parse(checkedAt);
+  const fresh = !Number.isNaN(checked) && checked >= now.getTime() - RESERVE_FRESH_MS && checked <= now.getTime() + 5 * 60 * 1000;
+  if (!fresh) return false;
+  return evidenceGate(accountId, { target_user_id: targetUserId, kind, checked_at: checkedAt }, now).executable;
+}
+
+export function stockFollowReserve(
+  accountId: AccountId,
+  input: {
+    checkedAt?: unknown;
+    candidates: Array<{
+      targetUserId?: unknown;
+      username?: unknown;
+      kind?: unknown;
+      checkedAt?: unknown;
+      followersCount?: unknown;
+      lastPostAt?: unknown;
+      flb?: unknown;
+    }>;
+  },
+  now = new Date(),
+): { accepted: string[]; refreshed: string[]; existing: string[]; rejected: Array<{ targetUserId: string; reason: string }> } {
+  const fallback = realTime(input.checkedAt);
+  if (input.checkedAt !== undefined && !fallback) {
+    throw new AppError("invalid_checked_at", "名单核验时间无法解析。");
+  }
+  const accepted: string[] = [];
+  const refreshed: string[] = [];
+  const existing: string[] = [];
+  const rejected: Array<{ targetUserId: string; reason: string }> = [];
+  const stamp = now.toISOString();
+  const insert = getDb().prepare(
+    `INSERT INTO follow_reserve
+      (account_id, target_user_id, username, kind, status, checked_at, followers_count, last_post_at, prefer_flb, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?)`,
+  );
+  const refresh = getDb().prepare(
+    `UPDATE follow_reserve
+     SET username = ?, kind = ?, status = 'reserved', checked_at = ?, followers_count = ?, last_post_at = ?, prefer_flb = ?,
+         result = NULL, reason = NULL, updated_at = ?
+     WHERE account_id = ? AND target_user_id = ?`,
+  );
+  for (const raw of input.candidates) {
+    // Extra fields on a candidate, including any self-applied trust mark, are ignored.
+    const id = typeof raw.targetUserId === "string" ? raw.targetUserId.trim() : "";
+    if (!/^\d+$/.test(id)) {
+      rejected.push({ targetUserId: id || "?", reason: "invalid_id" });
+      continue;
+    }
+    let kind: FollowKind;
+    try {
+      kind = parseKind(raw.kind);
+    } catch {
+      rejected.push({ targetUserId: id, reason: "invalid_kind" });
+      continue;
+    }
+    const checked = realTime(raw.checkedAt) ?? fallback;
+    if (!checked) {
+      rejected.push({ targetUserId: id, reason: "checked_at_required" });
+      continue;
+    }
+    if (Date.parse(checked) > now.getTime() + 5 * 60 * 1000) {
+      rejected.push({ targetUserId: id, reason: "checked_at_in_future" });
+      continue;
+    }
+    const username = typeof raw.username === "string" ? raw.username.slice(0, 64) : null;
+    const followers = typeof raw.followersCount === "number" && Number.isFinite(raw.followersCount) ? Math.trunc(raw.followersCount) : null;
+    const lastPostAt = realTime(raw.lastPostAt);
+    const flb = raw.flb === true ? 1 : 0;
+    if (followBlocked(accountId, id)) {
+      rejected.push({ targetUserId: id, reason: "unfollowed" });
+      continue;
+    }
+    if (one("SELECT 1 AS ok FROM follow_success WHERE account_id = ? AND target_user_id = ?", accountId, id)) {
+      rejected.push({ targetUserId: id, reason: "already_followed" });
+      continue;
+    }
+    if (terminalAudit(accountId, id)) {
+      existing.push(id);
+      continue;
+    }
+    const found = one<{ status: string; reason: string | null; kind: string; checked_at: string }>(
+      "SELECT status, reason, kind, checked_at FROM follow_reserve WHERE account_id = ? AND target_user_id = ?",
+      accountId,
+      id,
+    );
+    if (
+      found
+      && accountId === 1
+      && found.status === "reserved"
+      && (found.kind === "followback" || found.kind === "new")
+      && account1PoolInUse(found.kind, found.checked_at, now)
+    ) {
+      existing.push(id);
+      continue;
+    }
+    if (found && NO_RETRY.has(found.status)) {
+      if (reopenUnconfirmedFollow(accountId, found, id, kind, checked, now)) {
+        refresh.run(username, kind, checked, followers, lastPostAt, flb, stamp, accountId, id);
+        refreshed.push(id);
+        continue;
+      }
+      existing.push(id);
+      continue;
+    }
+    if (!found && parkedBefore(accountId, id)) {
+      const gate = evidenceGate(accountId, { target_user_id: id, kind, checked_at: checked }, now);
+      const fresh = Date.parse(checked) >= now.getTime() - RESERVE_FRESH_MS;
+      if (!gate.executable) {
+        rejected.push({ targetUserId: id, reason: fresh ? gate.evidenceReason : "stale" });
+        continue;
+      }
+    }
+    if (found) {
+      refresh.run(username, kind, checked, followers, lastPostAt, flb, stamp, accountId, id);
+      refreshed.push(id);
+      continue;
+    }
+    insert.run(accountId, id, username, kind, checked, followers, lastPostAt, flb, stamp, stamp);
+    accepted.push(id);
+  }
+  return { accepted, refreshed, existing, rejected };
+}
+
+export function listFollowReserve(accountId: AccountId, input?: { limit?: number; before?: string | null }, now = new Date()) {
+  const limit = input?.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new AppError("invalid_limit", "名单分页 limit 必须是 1 到 50 的整数。");
+  }
+  const before = input?.before ?? null;
+  const reserve = reserveView(accountId, now);
+  const rows = getDb()
+    .prepare(
+      `SELECT target_user_id, username, kind, status, checked_at, updated_at, result, reason
+       FROM follow_reserve
+       WHERE account_id = ? AND (? IS NULL OR target_user_id < ?)
+       ORDER BY target_user_id DESC
+       LIMIT ?`,
+    )
+    .all(accountId, before, before, limit + 1) as Array<{
+    target_user_id: string;
+    username: string | null;
+    kind: string;
+    status: string;
+    checked_at: string;
+    updated_at: string;
+    result: string | null;
+    reason: string | null;
+  }>;
+  const page = rows.slice(0, limit);
+  const freshAfter = now.getTime() - RESERVE_FRESH_MS;
+  return {
+    accountId,
+    audience: audienceFor(accountId),
+    reserve,
+    candidates: page.map((row) => ({
+      targetUserId: row.target_user_id,
+      username: row.username,
+      kind: row.kind,
+      status: row.status,
+      checkedAt: row.checked_at,
+      updatedAt: row.updated_at,
+      fresh: row.status === "reserved" && (Date.parse(row.checked_at) >= freshAfter || reserveHeld(accountId, row.kind, row.checked_at, now)),
+      result: row.result,
+      reason: row.reason,
+    })),
+    nextBefore: rows.length > limit ? (page[page.length - 1]?.target_user_id ?? null) : null,
+  };
+}
+
+type ReserveRow = {
+  target_user_id: string;
+  username: string | null;
+  kind: string;
+  checked_at: string;
+  followers_count: number | null;
+  last_post_at: string | null;
+  prefer_flb: number | null;
+};
+
+function reserveHeld(accountId: AccountId, kind: string, checkedAt: string, now: Date): boolean {
+  if (accountId !== 1) return false;
+  if (kind !== "followback" && kind !== "new") return false;
+  return account1PoolInUse(kind, checkedAt, now);
+}
+
+function capUsed(accountId: AccountId, now: Date): number {
+  const done = followedToday(accountId, now);
+  if (accountId !== 1) return done;
+  const day = followCapDay(accountId, now);
+  const inflight = one<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM follow_inflight WHERE account_id = 1 AND cap_day = ?",
+    day,
+  );
+  return done + (inflight?.n ?? 0);
+}
+
+function batchLimit(accountId: AccountId, now: Date): number {
+  const phase = accountId === 1 ? account1FollowPhase(now) : null;
+  return followBatchSize(accountId, phase) ?? followBatchLimit(accountId, now);
+}
+
+function selectReserve(accountId: AccountId, now: Date, limit: number): ReserveRow[] {
+  const freshAfterMs = now.getTime() - RESERVE_FRESH_MS;
+  const freshAfter = new Date(freshAfterMs).toISOString();
+  const rows = getDb()
+    .prepare(
+      `SELECT target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb
+       FROM follow_reserve
+       WHERE account_id = ? AND status = 'reserved' AND checked_at >= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM follow_success s
+           WHERE s.account_id = follow_reserve.account_id AND s.target_user_id = follow_reserve.target_user_id
+         )`,
+    )
+    .all(accountId, freshAfter) as ReserveRow[];
+  return rows
+    .sort((left, right) => reserveRank(left) - reserveRank(right) || left.target_user_id.localeCompare(right.target_user_id))
+    .slice(0, limit);
+}
+
+function shuffleRows<T>(rows: T[], random: () => number): T[] {
+  const copy = rows.slice();
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    const current = copy[index];
+    copy[index] = copy[swap] as T;
+    copy[swap] = current as T;
+  }
+  return copy;
+}
+
+const ACCOUNT1_ALLOWLIST_SQL = `
+  AND (
+    COALESCE((SELECT enforced FROM follow_allowlist_control WHERE account_id = 1), 0) = 0
+    OR EXISTS (
+      SELECT 1 FROM follow_execution_allowlist a
+      WHERE a.account_id = 1 AND a.target_user_id = __TARGET__
+    )
+  )
+`;
+
+function account1NewWaiting(): boolean {
+  const reserved = one(
+    `SELECT 1 AS ok FROM follow_reserve
+     WHERE account_id = 1 AND status = 'reserved' AND kind = 'new'
+       AND NOT EXISTS (
+         SELECT 1 FROM follow_blocklist b
+         WHERE b.account_id = 1 AND b.target_user_id = follow_reserve.target_user_id
+       )
+       ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_reserve.target_user_id")}`,
+  );
+  if (reserved) return true;
+  return Boolean(one(
+    `SELECT 1 AS ok FROM follow_new_admission
+     WHERE account_id = 1 AND status = 'admitted'
+       AND NOT EXISTS (
+         SELECT 1 FROM follow_blocklist b
+         WHERE b.account_id = 1 AND b.target_user_id = follow_new_admission.target_user_id
+       )
+       ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_new_admission.target_user_id")}`,
+  ));
+}
+
+function selectAccount1Picks(now: Date, limit: number, random: () => number, approved: boolean): Account1Pick[] {
+  if (limit <= 0) return [];
+  const rows = getDb()
+    .prepare(
+      `SELECT target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb
+       FROM follow_reserve
+       WHERE account_id = 1 AND status = 'reserved'
+         AND NOT EXISTS (
+           SELECT 1 FROM follow_success s
+           WHERE s.account_id = 1 AND s.target_user_id = follow_reserve.target_user_id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM follow_blocklist b
+           WHERE b.account_id = 1 AND b.target_user_id = follow_reserve.target_user_id
+         )
+         ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_reserve.target_user_id")}
+       ORDER BY target_user_id ASC`,
+    )
+    .all() as ReserveRow[];
+  const picks: Account1Pick[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.target_user_id)) continue;
+    if (row.kind !== "followback" && row.kind !== "new") continue;
+    if (!approved && row.kind !== "followback") continue;
+    if (!account1PoolInUse(row.kind, row.checked_at, now)) continue;
+    seen.add(row.target_user_id);
+    picks.push({
+      targetUserId: row.target_user_id,
+      username: row.username,
+      kind: row.kind,
+      fromAdmission: false,
+      followReason: null,
+      reserve: row,
+    });
+  }
+  if (approved) {
+    for (const row of pendingNewAdmissions(100_000)) {
+      if (seen.has(row.targetUserId) || followBlocked(1, row.targetUserId)) continue;
+      if (!account1ExecutionAllowed(row.targetUserId)) continue;
+      if (!account1PoolInUse("new", row.qualificationCheckedAt, now)) continue;
+      seen.add(row.targetUserId);
+      picks.push({
+        targetUserId: row.targetUserId,
+        username: row.username,
+        kind: "new",
+        fromAdmission: true,
+        followReason: row.followReason,
+        reserve: null,
+      });
+    }
+  }
+  return shuffleRows(picks, random).slice(0, limit);
+}
+
+function releaseInflight(accountId: AccountId, targetUserId: string): void {
+  getDb().prepare("DELETE FROM follow_inflight WHERE account_id = ? AND target_user_id = ?").run(accountId, targetUserId);
+}
+
+/** Claims one combined cap slot before the network call. Same-connection writers cannot pass 350. */
+function claimAccount1Cap(targetUserId: string, now: Date): "ok" | "cap" | "skip" {
+  const db = getDb();
+  const day = followCapDay(1, now);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("DELETE FROM follow_inflight WHERE account_id = 1 AND cap_day != ?").run(day);
+    const held = db.prepare(
+      "SELECT 1 AS ok FROM follow_inflight WHERE account_id = 1 AND target_user_id = ?",
+    ).get(targetUserId);
+    const existing = db.prepare(
+      "SELECT 1 AS ok FROM follow_success WHERE account_id = 1 AND target_user_id = ?",
+    ).get(targetUserId);
+    if (held || existing) {
+      db.exec("ROLLBACK");
+      return "skip";
+    }
+    if (capUsed(1, now) >= followDailyCap(1)) {
+      db.exec("ROLLBACK");
+      return "cap";
+    }
+    db.prepare(
+      `INSERT INTO follow_inflight (account_id, target_user_id, cap_day, claimed_at)
+       VALUES (1, ?, ?, ?)`,
+    ).run(targetUserId, day, now.toISOString());
+    db.exec("COMMIT");
+    return "ok";
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* The claim transaction is already closed. */
+    }
+    throw error;
+  }
+}
+
+/** Lower sorts first. Follow-back stays ahead of new follows. Follower count, flb, and recency only order new follows. */
+function reserveRank(row: ReserveRow): number {
+  if (row.kind === "followback") return 0;
+  let rank = 300;
+  if (row.prefer_flb) rank -= 100;
+  if (typeof row.followers_count === "number" && row.followers_count <= MAX_FOLLOWERS) rank -= 50;
+  if (row.last_post_at && !Number.isNaN(Date.parse(row.last_post_at))) rank -= 10;
+  return rank;
+}
+
+export function classifyFollow(input: {
+  accountId: AccountId;
+  kind: FollowKind;
+  profile: FollowProfile;
+  now: Date;
+}): { proceed: boolean; result: FollowOutcome; reason: string } {
+  if (input.profile.blue == null) return { proceed: false, result: "unknown", reason: "blue_unconfirmed" };
+  if (!input.profile.blue) return { proceed: false, result: "skipped", reason: "not_blue" };
+  if (spamText([input.profile.name, input.profile.bio, input.profile.tweetText, input.profile.username])) {
+    return { proceed: false, result: "skipped", reason: "spam" };
+  }
+  if (input.profile.following == null) return { proceed: false, result: "unknown", reason: "following_unconfirmed" };
+  if (input.profile.following) return { proceed: false, result: "skipped", reason: "already_following" };
+  if (input.kind === "followback") {
+    if (input.profile.followsBack == null) return { proceed: false, result: "unknown", reason: "followback_unconfirmed" };
+    if (!input.profile.followsBack) return { proceed: false, result: "skipped", reason: "not_follower" };
+    return { proceed: true, result: "success", reason: "followback" };
+  }
+  const audience = audienceMatch(audienceFor(input.accountId), input.profile);
+  if (audience === "unknown") return { proceed: false, result: "unknown", reason: "audience_unconfirmed" };
+  if (audience === "miss") return { proceed: false, result: "skipped", reason: input.accountId === 1 ? "not_chinese" : "not_english" };
+  const hint = preferFlb([input.profile.name, input.profile.bio, input.profile.tweetText]);
+  return { proceed: true, result: "success", reason: hint ? "new_flb" : "new" };
+}
+
+export type FollowBatchResult = {
+  executed: boolean;
+  replay: boolean;
+  reason: string | null;
+  slot: string | null;
+  accountId: AccountId;
+  submitted: number;
+  followed: number;
+  remainingQuota: number;
+  gap: number;
+  constraint: string | null;
+  results: Array<{ targetUserId: string; kind: FollowKind; result: FollowOutcome; reason: string }>;
+};
+
+function emptyFollow(accountId: AccountId, now: Date, slot: string | null, reason: string): FollowBatchResult {
+  const view = reserveView(accountId, now);
+  return {
+    executed: false,
+    replay: false,
+    reason,
+    slot,
+    accountId,
+    submitted: 0,
+    followed: 0,
+    remainingQuota: Math.max(0, followDailyCap(accountId) - capUsed(accountId, now)),
+    gap: view.gap,
+    constraint: reason,
+    results: [],
+  };
+}
+
+function evidenceMissing(profile: FollowProfile): boolean {
+  return profile.blue == null
+    && profile.following == null
+    && profile.followsBack == null
+    && profile.followers == null
+    && profile.name == null
+    && profile.bio == null
+    && profile.username == null
+    && profile.tweetLang == null
+    && profile.tweetText == null;
+}
+
+function finishAccount1Success(
+  pick: Account1Pick,
+  reason: string,
+  slot: string,
+  now: Date,
+): void {
+  const db = getDb();
+  const succeeded = new Date().toISOString();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(
+      `INSERT INTO follow_success (account_id, target_user_id, username, kind, succeeded_at, slot, london_day)
+       VALUES (1, ?, ?, ?, ?, ?, ?)`,
+    ).run(pick.targetUserId, pick.username, pick.kind, succeeded, slot, followCapDay(1, now));
+    db.prepare("DELETE FROM follow_inflight WHERE account_id = 1 AND target_user_id = ?").run(pick.targetUserId);
+    db.prepare(
+      `UPDATE follow_reserve SET status = 'followed', result = 'success', reason = ?, updated_at = ?
+       WHERE account_id = 1 AND target_user_id = ?`,
+    ).run(reason, succeeded, pick.targetUserId);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* The success transaction is already closed. */
+    }
+    throw error;
+  }
+  markNewAdmission(pick.targetUserId, "followed", reason, slot, now);
+}
+
+export async function submitFollowBatch(input: {
+  accountId: AccountId;
+  now?: Date;
+  hooks?: FollowHooks;
+  random?: () => number;
+}): Promise<FollowBatchResult> {
+  const now = input.now ?? new Date();
+  const accountId = input.accountId;
+  const slot = followSlot(accountId, now);
+  if (!followEnabled(accountId)) return emptyFollow(accountId, now, slot, "disabled");
+  if (apiMode() !== "live" && !input.hooks) return emptyFollow(accountId, now, slot, "mock_mode");
+  if (!slot) return emptyFollow(accountId, now, null, "rest");
+  if (getCredentialsRow(accountId)?.user_id !== ACCOUNT_USER_ID[accountId]) {
+    return emptyFollow(accountId, now, slot, "identity_unconfirmed");
+  }
+  const paused = one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", accountId);
+  if (paused?.paused !== 0) return emptyFollow(accountId, now, slot, "paused");
+  const remaining = Math.max(0, followDailyCap(accountId) - capUsed(accountId, now));
+  if (remaining <= 0) return emptyFollow(accountId, now, slot, "daily_cap");
+  const sourceUserId = getCredentialsRow(accountId)?.user_id ?? "";
+  const hooks = input.hooks ?? {
+    inspect: async (targetUserId: string) => evidenceFollowProfile(accountId, targetUserId, now),
+    follow: (targetUserId: string) => followTarget(accountId, sourceUserId, targetUserId),
+  };
+
+  const view = reserveView(accountId, now);
+  const db = getDb();
+  const existing = one<{ status: string; submitted: number; followed: number; results_json: string | null }>(
+    "SELECT status, submitted, followed, results_json FROM follow_batches WHERE account_id = ? AND slot = ?",
+    accountId,
+    slot,
+  );
+  if (existing && existing.status !== "running") {
+    const results = parseFollowResults(existing.results_json);
+    return {
+      executed: true,
+      replay: true,
+      reason: null,
+      slot,
+      accountId,
+      submitted: existing.submitted,
+      followed: existing.followed,
+      remainingQuota: remaining,
+      gap: view.gap,
+      constraint: null,
+      results,
+    };
+  }
+  if (one("SELECT slot FROM follow_batches WHERE account_id = ? AND status = 'running'", accountId)) {
+    return emptyFollow(accountId, now, slot, "overlap");
+  }
+
+  const random = input.random ?? Math.random;
+  const approvedNew = accountId === 1 && Boolean(approvalCoversAccount1New(now));
+  const account1Picks = accountId === 1
+    ? selectAccount1Picks(now, Math.min(batchLimit(accountId, now), remaining), random, approvedNew)
+    : [];
+  const picked = accountId === 1 ? [] : selectReserve(accountId, now, Math.min(batchLimit(accountId, now), remaining));
+  if (accountId === 1 && account1Picks.length === 0) {
+    const reason = !approvedNew && account1NewWaiting()
+      ? "approval_required"
+      : view.constraint === "stale_reserve" ? "stale_reserve" : "insufficient_candidates";
+    return emptyFollow(accountId, now, slot, reason);
+  }
+  if (accountId !== 1 && view.available === 0) {
+    return emptyFollow(accountId, now, slot, view.constraint === "stale_reserve" ? "stale_reserve" : "insufficient_candidates");
+  }
+
+  try {
+    db.prepare(
+      `INSERT INTO follow_batches (account_id, slot, status, submitted, followed, results_json, started_at)
+       VALUES (?, ?, 'running', 0, 0, '[]', ?)`,
+    ).run(accountId, slot, now.toISOString());
+  } catch {
+    return emptyFollow(accountId, now, slot, "overlap");
+  }
+
+  const results: FollowBatchResult["results"] = [];
+  const reserveStatus = (targetUserId: string, status: string, result: string, reason: string) => {
+    db.prepare(
+      `UPDATE follow_reserve SET status = ?, result = ?, reason = ?, updated_at = ? WHERE account_id = ? AND target_user_id = ?`,
+    ).run(status, result, reason, new Date().toISOString(), accountId, targetUserId);
+  };
+  try {
+    if (accountId === 1) {
+      for (const pick of account1Picks) {
+        if (one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", accountId)?.paused !== 0) break;
+        if (!account1ExecutionAllowed(pick.targetUserId)) continue;
+        if (followBlocked(1, pick.targetUserId)) {
+          if (pick.reserve) reserveStatus(pick.targetUserId, "skipped", "skipped", "unfollowed");
+          markNewAdmission(pick.targetUserId, "failed", "unfollowed", slot, now);
+          results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "skipped", reason: "unfollowed" });
+          continue;
+        }
+        if (UNFOLLOW_WHITELIST.has(pick.targetUserId)) {
+          markNewAdmission(pick.targetUserId, "failed", "whitelist", slot, now);
+          if (pick.reserve) {
+            reserveStatus(pick.targetUserId, "skipped", "skipped", "whitelist");
+            results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "skipped", reason: "whitelist" });
+          } else {
+            results.push({ targetUserId: pick.targetUserId, kind: "new", result: "failed", reason: "whitelist" });
+          }
+          continue;
+        }
+        const claim = claimAccount1Cap(pick.targetUserId, now);
+        if (claim === "cap") break;
+        if (claim === "skip") {
+          results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "skipped", reason: "already_followed" });
+          continue;
+        }
+        try {
+          if (account1ApprovedListWaivesScreening(pick.targetUserId)) {
+            await hooks.follow(pick.targetUserId);
+            finishAccount1Success(pick, "approved_list", slot, now);
+            results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "success", reason: "approved_list" });
+            continue;
+          }
+          if (pick.fromAdmission && !pick.reserve) {
+            await hooks.follow(pick.targetUserId);
+            const reason = pick.followReason ?? "new";
+            finishAccount1Success(pick, reason, slot, now);
+            results.push({ targetUserId: pick.targetUserId, kind: "new", result: "success", reason });
+            continue;
+          }
+          const profile = await hooks.inspect(pick.targetUserId);
+          if (evidenceMissing(profile)) {
+            releaseInflight(1, pick.targetUserId);
+            results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "skipped", reason: "evidence_pending" });
+            continue;
+          }
+          const decision = classifyFollow({ accountId, kind: pick.kind, profile, now });
+          if (!decision.proceed) {
+            releaseInflight(1, pick.targetUserId);
+            reserveStatus(pick.targetUserId, decision.result, decision.result, decision.reason);
+            results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: decision.result, reason: decision.reason });
+            continue;
+          }
+          await hooks.follow(pick.targetUserId);
+          finishAccount1Success(
+            { ...pick, username: profile.username ?? pick.username },
+            decision.reason,
+            slot,
+            now,
+          );
+          results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "success", reason: decision.reason });
+        } catch (error) {
+          releaseInflight(1, pick.targetUserId);
+          const risk = riskStop(error);
+          const reason = risk ?? "action_failed";
+          if (pick.reserve) reserveStatus(pick.targetUserId, "failed", "failed", reason);
+          markNewAdmission(pick.targetUserId, "failed", reason, slot, now);
+          results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "failed", reason });
+          if (risk) {
+            setFollowPaused(1, true, risk);
+            break;
+          }
+        }
+      }
+    }
+    for (const row of picked) {
+      if (one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", accountId)?.paused !== 0) break;
+      if (capUsed(accountId, now) >= followDailyCap(accountId)) break;
+      const kind: FollowKind = row.kind === "followback" ? "followback" : "new";
+      let outcome: { result: FollowOutcome; reason: string };
+      try {
+        const profile = await hooks.inspect(row.target_user_id);
+        const decision = classifyFollow({ accountId, kind, profile, now });
+        if (!decision.proceed) outcome = { result: decision.result, reason: decision.reason };
+        else {
+          await hooks.follow(row.target_user_id);
+          const succeeded = new Date().toISOString();
+          db.prepare(
+            `INSERT INTO follow_success (account_id, target_user_id, username, kind, succeeded_at, slot, london_day)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          ).run(accountId, row.target_user_id, profile.username ?? row.username, kind, succeeded, slot, followCapDay(accountId, now));
+          outcome = { result: "success", reason: decision.reason };
+        }
+      } catch {
+        outcome = { result: "failed", reason: "action_failed" };
+      }
+      const status = outcome.result === "success" ? "followed" : outcome.result;
+      reserveStatus(row.target_user_id, status, outcome.result, outcome.reason);
+      results.push({ targetUserId: row.target_user_id, kind, result: outcome.result, reason: outcome.reason });
+    }
+  } finally {
+    const followed = results.filter((item) => item.result === "success").length;
+    db.prepare(
+      `UPDATE follow_batches SET status = 'completed', submitted = ?, followed = ?, results_json = ?, finished_at = ? WHERE account_id = ? AND slot = ?`,
+    ).run(results.length, followed, JSON.stringify(results), new Date().toISOString(), accountId, slot);
+  }
+  const followed = results.filter((item) => item.result === "success").length;
+  const after = reserveView(accountId, now);
+  return {
+    executed: true,
+    replay: false,
+    reason: null,
+    slot,
+    accountId,
+    submitted: results.length,
+    followed,
+    remainingQuota: Math.max(0, followDailyCap(accountId) - capUsed(accountId, now)),
+    gap: after.gap,
+    constraint: after.constraint,
+    results,
+  };
+}
+
+function riskStop(error: unknown): "rate_limit" | "auth" | null {
+  if (!error || typeof error !== "object") return null;
+  const status = (error as { status?: unknown }).status;
+  const kind = (error as { kind?: unknown }).kind;
+  if (status === 429 || kind === "rate_limit") return "rate_limit";
+  if (status === 403 || kind === "auth") return "auth";
+  return null;
+}
+
+function parseFollowResults(raw: string | null): FollowBatchResult["results"] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as FollowBatchResult["results"]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function listFollowAudit(accountId: AccountId, input?: { limit?: number; before?: string | null }) {
+  const limit = input?.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new AppError("invalid_limit", "审计分页 limit 必须是 1 到 50 的整数。");
+  }
+  const before = input?.before ?? null;
+  if (before !== null && !isFollowAuditCursor(accountId, before)) {
+    throw new AppError(
+      "invalid_cursor",
+      accountId === 1
+        ? "关注审计 before 必须是台北关注工作窗起点，例如 taipei:2026-11-11T00:00 或 taipei-new:2026-11-11T18:00。"
+        : "关注审计 before 必须是台北 :00 或 :30 的回关工作窗起点，例如 taipei:2026-11-11T00:30。",
+    );
+  }
+  const rows = getDb()
+    .prepare(
+      `SELECT slot, status, submitted, followed, results_json, started_at, finished_at
+       FROM follow_batches
+       WHERE account_id = ? AND (? IS NULL OR slot < ?)
+       ORDER BY slot DESC LIMIT ?`,
+    )
+    .all(accountId, before, before, limit + 1) as Array<{
+    slot: string;
+    status: string;
+    submitted: number;
+    followed: number;
+    results_json: string | null;
+    started_at: string;
+    finished_at: string | null;
+  }>;
+  const page = rows.slice(0, limit);
+  return {
+    accountId,
+    limit,
+    batches: page.map((row) => ({
+      slot: row.slot,
+      status: row.status,
+      submitted: row.submitted,
+      followed: row.followed,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+      results: parseFollowResults(row.results_json),
+    })),
+    nextBefore: rows.length > limit ? (page[page.length - 1]?.slot ?? null) : null,
+  };
+}

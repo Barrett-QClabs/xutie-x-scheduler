@@ -6,4 +6,6 @@ export async function register() {
   startScheduler();
   const { startAutomationSupervisor } = await import("./lib/automation");
   startAutomationSupervisor();
+  const { startAutomationRunner } = await import("./lib/automation-run");
+  startAutomationRunner();
 }

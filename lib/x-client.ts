@@ -1,3 +1,4 @@
+import { apiMode } from "@/lib/deployment";
 import { buildAuthorizationHeader, percentEncode } from "@/lib/oauth";
 import type { Credentials, XUser } from "@/lib/types";
 
@@ -32,7 +33,7 @@ export interface XClient {
 const API_BASE = "https://api.x.com";
 
 export function isMockMode(): boolean {
-  return process.env.X_API_MODE === "mock";
+  return apiMode() === "mock";
 }
 
 /**
@@ -489,19 +490,43 @@ async function xUploadV1GetStatus(credentials: Credentials, mediaId: string): Pr
   return (await response.json()) as Record<string, unknown>;
 }
 
+export async function xDelete(credentials: Credentials, path: string): Promise<Record<string, unknown>> {
+  assertLiveNetwork();
+  return (await xRequest(credentials, "DELETE", path)) as Record<string, unknown>;
+}
+
 /** Read-only GET with the user's OAuth 1.0a keys (used by daily stats). */
 export async function xGet(credentials: Credentials, path: string, query?: Record<string, string>): Promise<Record<string, unknown>> {
+  assertLiveNetwork();
   return (await xRequest(credentials, "GET", path, query)) as Record<string, unknown>;
+}
+
+function assertLiveNetwork(): void {
+  if (apiMode() !== "live") {
+    throw new XApiError("模拟模式不会请求 X。", "rejected", 0);
+  }
+}
+
+export async function xPost(
+  credentials: Credentials,
+  path: string,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  assertLiveNetwork();
+  return (await xRequest(credentials, "POST", path, undefined, body)) as Record<string, unknown>;
 }
 
 async function xRequest(
   credentials: Credentials,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   query?: Record<string, string>,
   body?: unknown,
   timeoutMs: number = X_REQUEST_TIMEOUT_MS,
 ): Promise<{ data?: unknown }> {
+  if (method === "GET") {
+    throw new XApiError("用户 X 的读额度已关闭。关注、取关和发帖只允许写入。", "rejected", 0);
+  }
   const url = `${API_BASE}${path}`;
   const { header } = buildAuthorizationHeader({
     method,

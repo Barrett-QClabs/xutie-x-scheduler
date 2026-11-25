@@ -30,10 +30,12 @@ import {
 } from "@/lib/schedule";
 import type { Credentials, ImportMode, InvalidTweet, PublicState, PublicTweet, Tweet } from "@/lib/types";
 import { inspectTweet, MAX_LONG_POST_LENGTH, MAX_WEIGHTED_LENGTH } from "@/lib/weighted-length";
+import { ACCOUNT_IDS, ACCOUNT_LABEL, parseAccountId, type AccountId } from "@/lib/account";
+import { deploymentPosture } from "@/lib/deployment";
 import { createXClient, isMockMode, XApiError } from "@/lib/x-client";
 
-export function readCredentials(): Credentials | null {
-  const row = getCredentialsRow();
+export function readCredentials(accountId: AccountId): Credentials | null {
+  const row = getCredentialsRow(accountId);
   if (!row) return null;
   const plain = decryptString(row.ciphertext);
   let parsed: Partial<Credentials>;
@@ -73,18 +75,18 @@ export function credentialsFromInput(input: Partial<Credentials> | null | undefi
   return credentials;
 }
 
-export function saveCredentials(input: Partial<Credentials>): { ok: true } {
+export function saveCredentials(accountId: AccountId, input: Partial<Credentials>): { ok: true } {
   const credentials = credentialsFromInput(input);
-  upsertCredentials(encryptString(JSON.stringify(credentials)));
+  upsertCredentials(accountId, encryptString(JSON.stringify(credentials)));
   return { ok: true };
 }
 
-export function clearCredentials(): { ok: true } {
-  deleteCredentials();
+export function clearCredentials(accountId: AccountId): { ok: true } {
+  deleteCredentials(accountId);
   return { ok: true };
 }
 
-export async function testCredentials(input?: Partial<Credentials>): Promise<{
+export async function testCredentials(accountId: AccountId, input?: Partial<Credentials>): Promise<{
   ok: true;
   username: string;
   displayName: string;
@@ -93,14 +95,31 @@ export async function testCredentials(input?: Partial<Credentials>): Promise<{
 }> {
   const provided = [input?.apiKey, input?.apiSecret, input?.accessToken, input?.accessTokenSecret].map(cleanCredential);
   const usingStored = provided.every((value) => value.length === 0);
-  const credentials = usingStored ? readCredentials() : credentialsFromInput(input);
+  const credentials = usingStored ? readCredentials(accountId) : credentialsFromInput(input);
   if (!credentials) {
     throw new AppError("credentials_missing", "还没有保存凭据。");
+  }
+  if (!isMockMode()) {
+    const stored = getCredentialsRow(accountId);
+    if (usingStored && stored?.user_id && stored.username) {
+      return {
+        ok: true,
+        username: stored.username,
+        displayName: stored.display_name || stored.username,
+        userId: stored.user_id,
+        saved: false,
+      };
+    }
+    throw new AppError(
+      "identity_reconfirm_blocked",
+      "不能用用户自己的 X 读额度重新确认身份。请由免费供给写入身份证据；本次不会改已保存的身份。",
+      409,
+    );
   }
   try {
     const user = await createXClient(credentials).verify();
     if (usingStored) {
-      updateAccount({ username: user.username, displayName: user.name, userId: user.id });
+      updateAccount(accountId, { username: user.username, displayName: user.name, userId: user.id });
     }
     return {
       ok: true,
@@ -133,13 +152,32 @@ function toPublicTweet(tweet: Tweet, username: string | null): PublicTweet {
   };
 }
 
-export function getPublicState(now = new Date()): PublicState {
-  const row = getCredentialsRow();
-  const tweets = listTweets();
-  const queue = getQueueSettings();
+export function getPublicState(now = new Date(), accountId: AccountId = 1): PublicState {
+  const row = getCredentialsRow(accountId);
+  const tweets = listTweets(accountId);
+  const queue = getQueueSettings(accountId);
   const activity = buildActivity({ now, queue, tweets });
+  const slots = ACCOUNT_IDS.map((id) => {
+    const cred = getCredentialsRow(id);
+    const settings = getQueueSettings(id);
+    return {
+      id,
+      label: ACCOUNT_LABEL[id],
+      credentialsConfigured: Boolean(cred),
+      paused: settings.paused,
+      username: cred?.username ?? null,
+    };
+  });
   return {
     mockMode: isMockMode(),
+    accountId,
+    accountLabel: ACCOUNT_LABEL[accountId],
+    slots,
+    deployment: deploymentPosture({
+      paused: queue.paused,
+      pauseReason: queue.pauseReason,
+      credentialsConfigured: Boolean(row),
+    }),
     credentialsConfigured: Boolean(row),
     account:
       row?.username && row.user_id
@@ -157,6 +195,7 @@ export function getPublicState(now = new Date()): PublicState {
 }
 
 export function importTweets(input: {
+  accountId: unknown;
   source: string;
   format: "text" | "csv";
   startAt: string;
@@ -177,11 +216,12 @@ export function importTweets(input: {
   if (typeof input.source !== "string") {
     throw new AppError("invalid_text", "没有收到要导入的文本。");
   }
+  const accountId = parseAccountId(input.accountId);
   if (input.source.length > MAX_IMPORT_SOURCE_CHARS) {
     throw new AppError("too_many", "文本太长，请分成几批导入。");
   }
   const format = input.format === "csv" ? "csv" : "text";
-  const saved = getQueueSettings();
+  const saved = getQueueSettings(accountId);
   const randomMinSeconds = input.randomMinSeconds ?? saved.randomMinSeconds;
   const randomMaxSeconds = input.randomMaxSeconds ?? saved.randomMaxSeconds;
   assertSchedule(input.intervalMinutes, randomMinSeconds, randomMaxSeconds);
@@ -213,9 +253,10 @@ export function importTweets(input: {
     random: input.random,
   });
   const now = new Date().toISOString();
-  let order = nextSortOrder();
+  let order = nextSortOrder(accountId);
   const rows: Tweet[] = accepted.map((item, index) => ({
     id: crypto.randomUUID(),
+    accountId,
     text: item.text,
     weightedLength: item.weightedLength,
     status: "pending",
@@ -231,12 +272,12 @@ export function importTweets(input: {
     updatedAt: now,
   }));
   insertTweets(rows);
-  patchQueueSettings({
+  patchQueueSettings(accountId, {
     intervalMinutes: input.intervalMinutes,
     randomMinSeconds,
     randomMaxSeconds,
   });
-  const username = getCredentialsRow()?.username ?? null;
+  const username = getCredentialsRow(accountId)?.username ?? null;
   return {
     ok: true,
     mode: parsed.mode,
@@ -249,10 +290,10 @@ export function importTweets(input: {
   };
 }
 
-export function updateTweetText(id: string, text: unknown): PublicTweet {
+export function updateTweetText(accountId: AccountId, id: string, text: unknown): PublicTweet {
   if (typeof text !== "string") throw new AppError("invalid_text", "帖子内容不能为空。");
-  const existing = getTweet(id);
-  if (!existing) throw new AppError("not_found", "这条帖子不在队列里。", 404);
+  const existing = getTweet(id, accountId);
+  if (!existing) throw new AppError("not_found", "这条帖子不在这个账号的队列里。", 404);
   if (existing.status === "posted") {
     throw new AppError("invalid_status", "已经发出的帖子不能再改。");
   }
@@ -263,39 +304,39 @@ export function updateTweetText(id: string, text: unknown): PublicTweet {
       inspected.reason === "too_long" ? `超过 ${MAX_LONG_POST_LENGTH} 字上限（现为 ${inspected.weightedLength}）。` : "帖子内容不能为空。",
     );
   }
-  patchTweet(id, { text: inspected.text, weightedLength: inspected.weightedLength, errorMessage: null });
-  const updated = getTweet(id);
-  if (!updated) throw new AppError("not_found", "这条帖子不在队列里。", 404);
-  return toPublicTweet(updated, getCredentialsRow()?.username ?? null);
+  patchTweet(id, accountId, { text: inspected.text, weightedLength: inspected.weightedLength, errorMessage: null });
+  const updated = getTweet(id, accountId);
+  if (!updated) throw new AppError("not_found", "这条帖子不在这个账号的队列里。", 404);
+  return toPublicTweet(updated, getCredentialsRow(accountId)?.username ?? null);
 }
 
-export function removeTweet(id: string): { ok: true } {
-  if (!deleteTweetRow(id)) throw new AppError("not_found", "这条帖子不在队列里。", 404);
+export function removeTweet(accountId: AccountId, id: string): { ok: true } {
+  if (!deleteTweetRow(id, accountId)) throw new AppError("not_found", "这条帖子不在这个账号的队列里。", 404);
   return { ok: true };
 }
 
-export function retryTweet(id: string, now = new Date()): PublicTweet {
-  const existing = getTweet(id);
-  if (!existing) throw new AppError("not_found", "这条帖子不在队列里。", 404);
+export function retryTweet(accountId: AccountId, id: string, now = new Date()): PublicTweet {
+  const existing = getTweet(id, accountId);
+  if (!existing) throw new AppError("not_found", "这条帖子不在这个账号的队列里。", 404);
   if (existing.status !== "failed") {
     throw new AppError("invalid_status", "只有失败的帖子需要重试。");
   }
-  patchTweet(id, {
+  patchTweet(id, accountId, {
     status: "pending",
     scheduledAt: now.toISOString(),
     errorMessage: null,
     errorKind: null,
     attemptCount: 0,
   });
-  const updated = getTweet(id);
-  if (!updated) throw new AppError("not_found", "这条帖子不在队列里。", 404);
-  return toPublicTweet(updated, getCredentialsRow()?.username ?? null);
+  const updated = getTweet(id, accountId);
+  if (!updated) throw new AppError("not_found", "这条帖子不在这个账号的队列里。", 404);
+  return toPublicTweet(updated, getCredentialsRow(accountId)?.username ?? null);
 }
 
-export function retryAllFailed(now = new Date(), random = Math.random): { ok: true; count: number } {
-  const failed = listTweets().filter((tweet) => tweet.status === "failed");
+export function retryAllFailed(accountId: AccountId, now = new Date(), random = Math.random): { ok: true; count: number } {
+  const failed = listTweets(accountId).filter((tweet) => tweet.status === "failed");
   if (failed.length === 0) return { ok: true, count: 0 };
-  const settings = getQueueSettings();
+  const settings = getQueueSettings(accountId);
   const times = computeSchedule({
     count: failed.length,
     startAt: now,
@@ -305,7 +346,7 @@ export function retryAllFailed(now = new Date(), random = Math.random): { ok: tr
     random,
   });
   failed.forEach((tweet, index) => {
-    patchTweet(tweet.id, {
+    patchTweet(tweet.id, accountId, {
       status: "pending",
       scheduledAt: times[index].toISOString(),
       errorMessage: null,
@@ -316,58 +357,57 @@ export function retryAllFailed(now = new Date(), random = Math.random): { ok: tr
   return { ok: true, count: failed.length };
 }
 
-export function pendingInOrder(): Tweet[] {
-  return listTweets()
+export function pendingInOrder(accountId: AccountId): Tweet[] {
+  return listTweets(accountId)
     .filter((tweet) => tweet.status === "pending")
     .sort(compareTweets);
 }
 
-/** After a duplicate-content failure, fill that slot with the next pending tweet. */
-export function promoteNextPendingToSlot(slot: Date): string | null {
-  const next = pendingInOrder()[0];
+/** After a duplicate-content failure, fill that slot with the next pending tweet of the same account. */
+export function promoteNextPendingToSlot(accountId: AccountId, slot: Date): string | null {
+  const next = pendingInOrder(accountId)[0];
   if (!next) return null;
   const current = new Date(next.scheduledAt).getTime();
   const target = slot.getTime();
   if (Number.isNaN(current) || Number.isNaN(target)) return null;
   if (current <= target) return next.id;
-  patchTweet(next.id, { scheduledAt: slot.toISOString(), delayReason: null });
+  patchTweet(next.id, accountId, { scheduledAt: slot.toISOString(), delayReason: null });
   return next.id;
 }
 
-export function reorderTweet(id: string, direction: "up" | "down"): { ok: true; moved: boolean } {
+export function reorderTweet(accountId: AccountId, id: string, direction: "up" | "down"): { ok: true; moved: boolean } {
   if (direction !== "up" && direction !== "down") {
     throw new AppError("invalid_status", "只能上移或下移。");
   }
-  const pending = pendingInOrder();
+  const pending = pendingInOrder(accountId);
   const index = pending.findIndex((tweet) => tweet.id === id);
   if (index < 0) throw new AppError("invalid_status", "只能调整还没发出的帖子。");
   const neighbor = direction === "up" ? index - 1 : index + 1;
   if (neighbor < 0 || neighbor >= pending.length) return { ok: true, moved: false };
   const current = pending[index];
   const other = pending[neighbor];
-  patchTweet(current.id, { scheduledAt: other.scheduledAt, sortOrder: other.sortOrder });
-  patchTweet(other.id, { scheduledAt: current.scheduledAt, sortOrder: current.sortOrder });
+  patchTweet(current.id, accountId, { scheduledAt: other.scheduledAt, sortOrder: other.sortOrder });
+  patchTweet(other.id, accountId, { scheduledAt: current.scheduledAt, sortOrder: current.sortOrder });
   return { ok: true, moved: true };
 }
 
-export function pauseQueue(reason = "manual"): { ok: true } {
-  patchQueueSettings({ paused: true, pauseReason: reason });
+export function pauseQueue(accountId: AccountId, reason = "manual"): { ok: true } {
+  patchQueueSettings(accountId, { paused: true, pauseReason: reason });
   return { ok: true };
 }
 
-export function resumeQueue(): { ok: true } {
-  const current = getQueueSettings();
-  patchQueueSettings({
+export function resumeQueue(accountId: AccountId): { ok: true } {
+  const current = getQueueSettings(accountId);
+  patchQueueSettings(accountId, {
     paused: false,
     pauseReason: null,
-    // A manual resume clears an auth stop. It does not clear a credits or rate-limit wait,
-    // and it does not change failed or cancelled rows.
     ...(current.lastError === "auth" ? { lastError: null } : {}),
   });
   return { ok: true };
 }
 
 export function updateScheduleSettings(input: {
+  accountId: unknown;
   intervalMinutes: number;
   randomMinSeconds?: number;
   randomMaxSeconds?: number;
@@ -375,17 +415,18 @@ export function updateScheduleSettings(input: {
   startAt?: string;
   random?: () => number;
 }): { ok: true } {
-  const current = getQueueSettings();
+  const accountId = parseAccountId(input.accountId);
+  const current = getQueueSettings(accountId);
   const randomMinSeconds = input.randomMinSeconds ?? current.randomMinSeconds;
   const randomMaxSeconds = input.randomMaxSeconds ?? current.randomMaxSeconds;
   assertSchedule(input.intervalMinutes, randomMinSeconds, randomMaxSeconds);
-  patchQueueSettings({
+  patchQueueSettings(accountId, {
     intervalMinutes: input.intervalMinutes,
     randomMinSeconds,
     randomMaxSeconds,
   });
   if (input.reschedule) {
-    const pending = pendingInOrder();
+    const pending = pendingInOrder(accountId);
     const start = input.startAt ? assertStartAt(input.startAt) : new Date();
     const times = computeSchedule({
       count: pending.length,
@@ -396,14 +437,14 @@ export function updateScheduleSettings(input: {
       random: input.random,
     });
     pending.forEach((tweet, index) => {
-      patchTweet(tweet.id, { scheduledAt: times[index].toISOString(), delayReason: null });
+      patchTweet(tweet.id, accountId, { scheduledAt: times[index].toISOString(), delayReason: null });
     });
   }
   return { ok: true };
 }
 
-function currentPace(): SchedulePace {
-  const settings = getQueueSettings();
+function currentPace(accountId: AccountId): SchedulePace {
+  const settings = getQueueSettings(accountId);
   return {
     intervalMinutes: settings.intervalMinutes,
     randomMinSeconds: settings.randomMinSeconds,
@@ -413,6 +454,7 @@ function currentPace(): SchedulePace {
 
 /** Move a chain of pending posts later (never earlier); returns true when anything moved. */
 function applyChain(
+  accountId: AccountId,
   tweets: Tweet[],
   firstMinAt: Date,
   random: () => number,
@@ -420,42 +462,40 @@ function applyChain(
 ): boolean {
   if (tweets.length === 0) return false;
   const originals = tweets.map((tweet) => new Date(tweet.scheduledAt));
-  const times = pushChain({ originals, firstMinAt, pace: currentPace(), random });
+  const times = pushChain({ originals, firstMinAt, pace: currentPace(accountId), random });
   let moved = false;
   tweets.forEach((tweet, index) => {
     if (times[index].getTime() === originals[index].getTime()) return;
     moved = true;
-    patchTweet(tweet.id, { scheduledAt: times[index].toISOString(), ...(extra ?? {}) });
+    patchTweet(tweet.id, accountId, { scheduledAt: times[index].toISOString(), ...(extra ?? {}) });
   });
   return moved;
 }
 
-/**
- * A post exists at `lastPostAt` (on X or sent by us). If the next pending post
- * would land within one interval of it, move it to lastPostAt + interval +
- * random extra, and push the rest so each gap stays interval + random extra.
- * Returns the new time of the first pending post, or null when nothing moved.
- */
-export function delayPendingForRecentPost(lastPostAt: Date, manual: boolean, random: () => number = Math.random): Date | null {
-  const pending = pendingInOrder();
+export function delayPendingForRecentPost(
+  accountId: AccountId,
+  lastPostAt: Date,
+  manual: boolean,
+  random: () => number = Math.random,
+): Date | null {
+  const pending = pendingInOrder(accountId);
   if (pending.length === 0) return null;
-  const pace = currentPace();
+  const pace = currentPace(accountId);
   const firstAt = new Date(pending[0].scheduledAt).getTime();
   if (Number.isNaN(firstAt) || firstAt >= lastPostAt.getTime() + pace.intervalMinutes * 60_000) return null;
   const target = new Date(lastPostAt.getTime() + nextGapMs(pace, random));
-  applyChain(pending, target, random, manual ? { delayReason: "manual" } : undefined);
-  return new Date(pendingInOrder()[0].scheduledAt);
+  applyChain(accountId, pending, target, random, manual ? { delayReason: "manual" } : undefined);
+  return new Date(pendingInOrder(accountId)[0].scheduledAt);
 }
 
-/**
- * A new manual post appeared at `manualAt`: re-anchor the whole pending queue so the
- * next post is manualAt + interval + one random extra (rolled once, stored as the
- * scheduledAt), and every later post follows with interval + random extra gaps.
- */
-export function reanchorPendingToManual(manualAt: Date, random: () => number = Math.random): Date | null {
-  const pending = pendingInOrder();
+export function reanchorPendingToManual(
+  accountId: AccountId,
+  manualAt: Date,
+  random: () => number = Math.random,
+): Date | null {
+  const pending = pendingInOrder(accountId);
   if (pending.length === 0) return null;
-  const pace = currentPace();
+  const pace = currentPace(accountId);
   const times = computeSchedule({
     count: pending.length,
     startAt: new Date(Math.ceil((manualAt.getTime() + nextGapMs(pace, random)) / 1000) * 1000),
@@ -463,19 +503,18 @@ export function reanchorPendingToManual(manualAt: Date, random: () => number = M
     random,
   });
   pending.forEach((tweet, index) => {
-    patchTweet(tweet.id, { scheduledAt: times[index].toISOString(), delayReason: "manual" });
+    patchTweet(tweet.id, accountId, { scheduledAt: times[index].toISOString(), delayReason: "manual" });
   });
   return times[0];
 }
 
-/** After an X rate limit, resume at `until` plus a random extra delay, keeping randomized gaps. */
-export function delayPendingForRateLimit(until: Date, random: () => number = Math.random): void {
-  const pending = pendingInOrder();
-  applyChain(pending, new Date(until.getTime() + randomExtraMs(currentPace(), random)), random);
+export function delayPendingForRateLimit(accountId: AccountId, until: Date, random: () => number = Math.random): void {
+  const pending = pendingInOrder(accountId);
+  applyChain(accountId, pending, new Date(until.getTime() + randomExtraMs(currentPace(accountId), random)), random);
 }
 
-export function latestLocalPost(): { id: string; at: Date } | null {
-  const posted = listTweets().filter((tweet) => tweet.status === "posted" && tweet.postedAt);
+export function latestLocalPost(accountId: AccountId): { id: string; at: Date } | null {
+  const posted = listTweets(accountId).filter((tweet) => tweet.status === "posted" && tweet.postedAt);
   if (posted.length === 0) return null;
   posted.sort((left, right) => right.postedAt!.localeCompare(left.postedAt!));
   const newest = posted[0];
@@ -484,17 +523,16 @@ export function latestLocalPost(): { id: string; at: Date } | null {
   return { id: newest.tweetId ?? "", at };
 }
 
-export function deferExtraOverdue(now: Date, random = Math.random): void {
-  const pending = pendingInOrder();
+export function deferExtraOverdue(accountId: AccountId, now: Date, random = Math.random): void {
+  const pending = pendingInOrder(accountId);
   const overdue = pending.filter((tweet) => new Date(tweet.scheduledAt).getTime() <= now.getTime());
   if (overdue.length <= 1) return;
-  // The first overdue post goes out now; the rest follow at interval + random extra each.
-  applyChain(pending.slice(1), new Date(now.getTime() + nextGapMs(currentPace(), random)), random);
+  applyChain(accountId, pending.slice(1), new Date(now.getTime() + nextGapMs(currentPace(accountId), random)), random);
 }
 
-export function nextDueTweet(now: Date): Tweet | null {
+export function nextDueTweet(accountId: AccountId, now: Date): Tweet | null {
   return (
-    listTweets()
+    listTweets(accountId)
       .filter((tweet) => tweet.status === "pending" && new Date(tweet.scheduledAt).getTime() <= now.getTime())
       .sort(compareTweets)[0] ?? null
   );
@@ -507,7 +545,8 @@ function compareTweets(a: Tweet, b: Tweet): number {
 }
 
 /** Queue a thread (head + replies, optional images per post) as ONE queue item at `startAt`. */
-export function queueThread(input: { posts: unknown; startAt: string }): { ok: true; queued: PublicTweet } {
+export function queueThread(input: { accountId: unknown; posts: unknown; startAt: string }): { ok: true; queued: PublicTweet } {
+  const accountId = parseAccountId(input.accountId);
   if (!Array.isArray(input.posts) || input.posts.length === 0 || input.posts.length > 25) {
     throw new AppError("invalid_text", "线程需要 1 到 25 条帖子。");
   }
@@ -532,6 +571,7 @@ export function queueThread(input: { posts: unknown; startAt: string }): { ok: t
   const now = new Date().toISOString();
   const row: Tweet = {
     id: crypto.randomUUID(),
+    accountId,
     text: head.text,
     weightedLength: head.weightedLength,
     status: "pending",
@@ -541,7 +581,7 @@ export function queueThread(input: { posts: unknown; startAt: string }): { ok: t
     errorMessage: null,
     errorKind: null,
     attemptCount: 0,
-    sortOrder: nextSortOrder(),
+    sortOrder: nextSortOrder(accountId),
     delayReason: null,
     extra: {
       media: head.media,
@@ -552,5 +592,5 @@ export function queueThread(input: { posts: unknown; startAt: string }): { ok: t
     updatedAt: now,
   };
   insertTweets([row]);
-  return { ok: true, queued: toPublicTweet(row, getCredentialsRow()?.username ?? null) };
+  return { ok: true, queued: toPublicTweet(row, getCredentialsRow(accountId)?.username ?? null) };
 }

@@ -8,6 +8,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { type AccountId } from "@/lib/account";
 import { AUTOMATION_DIR } from "@/lib/automation";
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { readCredentials } from "@/lib/service";
@@ -16,7 +17,7 @@ import { isMockMode, xGet } from "@/lib/x-client";
 const TODAY_TTL_MS = 60 * 60_000;
 /** Manual refresh ("刷新") re-reads today at most this often. */
 const FORCE_MIN_AGE_MS = 10 * 60_000;
-const CACHE_FILE = path.join(process.cwd(), "data", "stats-cache.json");
+const cacheFile = (accountId: AccountId) => path.join(process.cwd(), "data", `stats-cache-${accountId}.json`);
 
 type TimelineDay = { fetchedAt: string; complete: boolean; posts: number; replies: number; impressions: number; withMetrics: number; error?: string };
 type Cache = { userId?: string; days: Record<string, TimelineDay>; lastError?: { at: string; message: string } };
@@ -31,15 +32,16 @@ function readJsonl(file: string): Record<string, unknown>[] {
       .filter((e): e is Record<string, unknown> => !!e);
   } catch { return []; }
 }
-function loadCache(): Cache {
-  try { return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")) as Cache; } catch { return { days: {} }; }
+function loadCache(accountId: AccountId): Cache {
+  try { return JSON.parse(fs.readFileSync(cacheFile(accountId), "utf8")) as Cache; } catch { return { days: {} }; }
 }
-function saveCache(c: Cache) {
-  try { fs.writeFileSync(`${CACHE_FILE}.tmp`, JSON.stringify(c, null, 2)); fs.renameSync(`${CACHE_FILE}.tmp`, CACHE_FILE); } catch {}
+function saveCache(accountId: AccountId, c: Cache) {
+  const file = cacheFile(accountId);
+  try { fs.writeFileSync(`${file}.tmp`, JSON.stringify(c, null, 2)); fs.renameSync(`${file}.tmp`, file); } catch {}
 }
 
-async function fetchTimelineDay(userId: string, day: string): Promise<TimelineDay> {
-  const credentials = readCredentials();
+async function fetchTimelineDay(accountId: AccountId, userId: string, day: string): Promise<TimelineDay> {
+  const credentials = readCredentials(accountId);
   if (!credentials) throw new Error("no credentials");
   const start = `${day}T00:00:00Z`;
   const endMs = Math.min(Date.parse(`${shift(day, 1)}T00:00:00Z`), Date.now() - 15_000);
@@ -62,10 +64,10 @@ async function fetchTimelineDay(userId: string, day: string): Promise<TimelineDa
   return out;
 }
 
-let inflight: Promise<void> | null = null;
-async function refreshTimeline(days: string[], force: boolean): Promise<Cache> {
-  const cache = loadCache();
-  const userId = getCredentialsRow()?.user_id ?? undefined;
+const inflight = new Map<AccountId, Promise<void>>();
+async function refreshTimeline(accountId: AccountId, days: string[], force: boolean): Promise<Cache> {
+  const cache = loadCache(accountId);
+  const userId = getCredentialsRow(accountId)?.user_id ?? undefined;
   if (!userId || isMockMode()) return cache;
   if (cache.userId && cache.userId !== userId) cache.days = {};
   cache.userId = userId;
@@ -81,23 +83,24 @@ async function refreshTimeline(days: string[], force: boolean): Promise<Cache> {
     return fetchedBeforeEnd || !c.complete;
   });
   if (!stale.length) return cache;
-  if (!inflight) {
-    inflight = (async () => {
+  if (!inflight.get(accountId)) {
+    const job = (async () => {
       for (const d of stale) {
-        try { cache.days[d] = await fetchTimelineDay(userId, d); }
+        try { cache.days[d] = await fetchTimelineDay(accountId, userId, d); }
         catch (error) {
           cache.lastError = { at: new Date().toISOString(), message: error instanceof Error ? error.message : String(error) };
           break; // stop on first error (likely rate limit); keep earlier values
         }
       }
-      saveCache(cache);
-    })().finally(() => { inflight = null; });
+      saveCache(accountId, cache);
+    })().finally(() => { inflight.delete(accountId); });
+    inflight.set(accountId, job);
   }
-  await inflight;
-  return loadCache();
+  await inflight.get(accountId);
+  return loadCache(accountId);
 }
 
-export async function getDailyStats(opts: { days?: number; refresh?: boolean } = {}) {
+export async function getDailyStats(opts: { accountId: AccountId; days?: number; refresh?: boolean }) {
   const n = Math.min(Math.max(Math.floor(opts.days ?? 7), 1), 14);
   const today = utcDay(new Date());
   const days = Array.from({ length: n }, (_, i) => shift(today, -i));
@@ -114,14 +117,14 @@ export async function getDailyStats(opts: { days?: number; refresh?: boolean } =
 
   let postedByDay: Record<string, number> | null = null;
   try {
-    const rows = getDb().prepare("SELECT posted_at FROM tweets WHERE status = 'posted' AND posted_at >= ?").all(`${days[days.length - 1]}T00:00:00`) as { posted_at: string }[];
+    const rows = getDb().prepare("SELECT posted_at FROM tweets WHERE account_id = ? AND status = 'posted' AND posted_at >= ?").all(opts.accountId, `${days[days.length - 1]}T00:00:00`) as { posted_at: string }[];
     postedByDay = {};
     for (const r of rows) { const d = utcDay(new Date(r.posted_at)); postedByDay[d] = (postedByDay[d] ?? 0) + 1; }
   } catch {}
 
-  let cache: Cache = loadCache();
+  let cache: Cache = loadCache(opts.accountId);
   let timelineError: string | null = null;
-  try { cache = await refreshTimeline(days, !!opts.refresh); } catch (error) { timelineError = error instanceof Error ? error.message : String(error); }
+  try { cache = await refreshTimeline(opts.accountId, days, !!opts.refresh); } catch (error) { timelineError = error instanceof Error ? error.message : String(error); }
   if (cache.lastError && Date.now() - Date.parse(cache.lastError.at) < 30 * 60_000) timelineError = cache.lastError.message;
 
   const rows = days.map((d) => {

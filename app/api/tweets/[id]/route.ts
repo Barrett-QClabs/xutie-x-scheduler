@@ -1,3 +1,4 @@
+import { accountIdFrom } from "@/lib/account";
 import { handle, readJson } from "@/lib/http";
 import { removeTweet, updateTweetText } from "@/lib/service";
 
@@ -10,11 +11,11 @@ export async function PATCH(request: Request, context: Context) {
   const { id } = await context.params;
   return handle(async () => {
     const body = await readJson(request);
-    return updateTweetText(id, body.text);
+    return updateTweetText(accountIdFrom(request, body), id, body.text);
   });
 }
 
-export async function DELETE(_request: Request, context: Context) {
+export async function DELETE(request: Request, context: Context) {
   const { id } = await context.params;
-  return handle(() => removeTweet(id));
+  return handle(() => removeTweet(accountIdFrom(request), id));
 }

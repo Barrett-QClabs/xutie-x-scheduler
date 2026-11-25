@@ -1,3 +1,4 @@
+import { accountIdFrom } from "@/lib/account";
 import { handle, readJson } from "@/lib/http";
 import { clearCredentials, saveCredentials } from "@/lib/service";
 
@@ -11,7 +12,7 @@ function text(value: unknown): string {
 export async function PUT(request: Request) {
   return handle(async () => {
     const body = await readJson(request);
-    return saveCredentials({
+    return saveCredentials(accountIdFrom(request, body), {
       apiKey: text(body.apiKey),
       apiSecret: text(body.apiSecret),
       accessToken: text(body.accessToken),
@@ -20,6 +21,6 @@ export async function PUT(request: Request) {
   });
 }
 
-export function DELETE() {
-  return handle(() => clearCredentials());
+export function DELETE(request: Request) {
+  return handle(() => clearCredentials(accountIdFrom(request)));
 }

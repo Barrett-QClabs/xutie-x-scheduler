@@ -76,7 +76,7 @@ npm run build
 npm start
 ```
 
-同样监听 `3847`。数据库默认在 `./data/xqueue.sqlite`，第一次启动会自己创建。
+同样监听 `127.0.0.1:3847`，除非设置了 `HOST` 或 `PORT`。新建的数据库一开始是暂停的。数据库默认在 `./data/xqueue.sqlite`，第一次启动会自己创建。
 
 ### 模拟模式
 
@@ -86,7 +86,7 @@ npm start
 X_API_MODE=mock
 ```
 
-测试连接和发帖都在本地完成，不会请求 X。帖子正文里如果包含 `[[duplicate]]`、`[[rate-limit]]`、`[[credits]]`、`[[auth]]`、`[[forbidden]]` 或 `[[fail]]`，模拟客户端会分别返回重复内容、429 限频、402 额度不足、401 认证失败、403 权限不足和临时错误。模拟模式下即使没有保存凭据，也可以用这些标记做离线诊断。正式发帖前改回 `X_API_MODE=live`。
+测试连接和发帖都在本地完成，不会请求 X，除非 `X_API_MODE` 精确等于 `live`。未设置或其他取值都保持模拟。帖子正文里如果包含 `[[duplicate]]`、`[[rate-limit]]`、`[[credits]]`、`[[auth]]`、`[[forbidden]]` 或 `[[fail]]`，模拟客户端会分别返回重复内容、429 限频、402 额度不足、401 认证失败、403 权限不足和临时错误。模拟模式下即使没有保存凭据，也可以用这些标记做离线诊断。只有这个进程确实要请求 X 时才设置 `X_API_MODE=live`，并且在你打算发帖之前保持队列暂停。说明见 [docs/safe-deploy.md](docs/safe-deploy.md)。
 
 `GET /api/diagnostics` 只读本地队列。它给出服务阶段：队列为空、没有待发、已暂停、额度等待、限频等待、认证暂停、待发未到点、到点待发。`?scenario=credits`（也可以是 `rate_limit`、`auth`、`forbidden`、`duplicate`、`rejected`、`transient`）只说明这个内置场景，不会把它套到队列上，也不会返回已保存的凭据。待发为 0、但已经有很多成功记录时，阶段是「没有待发」。还没有调度心跳时显示「未知」，表示这一版还没有记下检查，不能单独当成服务已停。
 
@@ -132,7 +132,8 @@ npm test
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入 CREDENTIALS_ENCRYPTION_KEY，并确认 X_API_MODE=live
+# 填入 CREDENTIALS_ENCRYPTION_KEY。镜像默认 X_API_MODE=mock。
+# 只有这个进程要请求 X 时才设置 X_API_MODE=live。
 docker compose up -d --build
 ```
 
@@ -145,7 +146,9 @@ docker build -t xuti .
 docker run -d --name xuti \
   -p 3847:3847 \
   -e CREDENTIALS_ENCRYPTION_KEY='你的长随机字符串' \
-  -e X_API_MODE=live \
+  -e X_API_MODE=mock \
+  -e XUTIE_AUTOMATION_SUPERVISOR=off \
+  -e HOST=0.0.0.0 \
   -e DATABASE_PATH=/data/xqueue.sqlite \
   -v xuti-data:/data \
   xuti

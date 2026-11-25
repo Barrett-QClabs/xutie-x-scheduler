@@ -201,6 +201,7 @@ describe("scheduler stores 402 and 429 separately and keeps later posts moving",
     throwingFetch(calls);
     const now = new Date();
     importTweets({
+      accountId: 1,
       source: "甲\n乙",
       format: "text",
       startAt: new Date(now.getTime() - 1000).toISOString(),
@@ -249,6 +250,7 @@ describe("scheduler stores 402 and 429 separately and keeps later posts moving",
     const now = new Date();
     const reset = new Date(now.getTime() + 60_000);
     importTweets({
+      accountId: 1,
       source: "限频",
       format: "text",
       startAt: new Date(now.getTime() - 1000).toISOString(),
@@ -282,6 +284,7 @@ describe("scheduler stores 402 and 429 separately and keeps later posts moving",
     throwingFetch(calls);
     const now = new Date();
     importTweets({
+      accountId: 1,
       source: "[[duplicate]]\n补位这一条",
       format: "text",
       startAt: new Date(now.getTime() - 1000).toISOString(),
@@ -312,13 +315,14 @@ describe("scheduler stores 402 and 429 separately and keeps later posts moving",
     expect(done.activity.fault).toBeNull();
     expect(calls).toEqual([]);
 
-    resumeQueue();
+    resumeQueue(1);
     expect(getPublicState().tweets.find((tweet) => tweet.id === duplicate?.id)?.status).toBe("failed");
   });
 
   it("pauses on 401 and on a 403 permission error, and keeps the post pending", async () => {
     const now = new Date();
     importTweets({
+      accountId: 1,
       source: "[[forbidden]]",
       format: "text",
       startAt: new Date(now.getTime() - 1000).toISOString(),
@@ -341,6 +345,7 @@ describe("scheduler stores 402 and 429 separately and keeps later posts moving",
     throwingFetch(calls);
     const now = new Date();
     importTweets({
+      accountId: 1,
       source: "[[credits]]",
       format: "text",
       startAt: new Date(now.getTime() - 1000).toISOString(),
@@ -368,7 +373,7 @@ describe("scheduler stores 402 and 429 separately and keeps later posts moving",
 
   it("clears an expired credits wait and leaves an unrelated lastError in place", async () => {
     const now = new Date();
-    patchQueueSettings({ rateLimitUntil: new Date(now.getTime() - 1000).toISOString(), lastError: "credits" });
+    patchQueueSettings(1, { rateLimitUntil: new Date(now.getTime() - 1000).toISOString(), lastError: "credits" });
     const cleared = await tick({
       now,
       client: {
@@ -382,7 +387,7 @@ describe("scheduler stores 402 and 429 separately and keeps later posts moving",
     expect(getQueueSettings().lastError).toBeNull();
     expect(getQueueSettings().rateLimitUntil).toBeNull();
 
-    patchQueueSettings({ rateLimitUntil: new Date(now.getTime() - 1000).toISOString(), lastError: "kept-note" });
+    patchQueueSettings(1, { rateLimitUntil: new Date(now.getTime() - 1000).toISOString(), lastError: "kept-note" });
     await tick({
       now: new Date(now.getTime() + 1000),
       client: {
@@ -400,14 +405,14 @@ describe("offline diagnostics endpoint", () => {
   it("describes a mock scenario without posting or returning secrets", async () => {
     const calls: string[] = [];
     throwingFetch(calls);
-    saveCredentials({
+    saveCredentials(1, {
       apiKey: "abc12345",
       apiSecret: "diag-secret-value",
       accessToken: "token-value",
       accessTokenSecret: "token-secret-value",
     });
     const before = getPublicState().counts;
-    const response = await getDiagnostics(new Request("http://local/api/diagnostics?scenario=credits"));
+    const response = await getDiagnostics(new Request("http://local/api/diagnostics?accountId=1&scenario=credits"));
     const body = await response.json();
     expect(response.status).toBe(200);
     expect(body.callsX).toBe(false);
@@ -420,7 +425,7 @@ describe("offline diagnostics endpoint", () => {
     expect(getPublicState().counts).toEqual(before);
     expect(calls).toEqual([]);
 
-    const missing = await getDiagnostics(new Request("http://local/api/diagnostics?scenario=nope"));
+    const missing = await getDiagnostics(new Request("http://local/api/diagnostics?accountId=1&scenario=nope"));
     expect(missing.status).toBe(404);
   });
 
