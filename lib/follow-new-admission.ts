@@ -2,11 +2,13 @@ import type { AccountId } from "@/lib/account";
 import { audienceMatch, preferFlb, spamText } from "@/lib/audience";
 import { UNFOLLOW_WHITELIST } from "@/lib/automation-account";
 import { dailyPoolOn } from "@/lib/account-ops";
+import { followFilters, quotaDay } from "@/lib/automation-settings";
 import { followBlocked } from "@/lib/follow-blocklist";
 import { ACCOUNT1_FOLLOW_ZONE, account1PoolInUse } from "@/lib/follow-cadence";
 import { getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { zonedClock } from "@/lib/london";
+import { RECENT_ACTIVITY_MS } from "@/lib/unfollow-policy";
 
 const SKEW_MS = 5 * 60 * 1000;
 const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -15,10 +17,11 @@ export type NewAdmissionSnapshot = {
   verified: boolean;
   verifiedType: string;
   following: false;
-  lang: "zh";
+  lang: string | null;
   name: string | null;
   description: string | null;
   relationshipSemantics: string | null;
+  lastPostAt: string | null;
 };
 
 export type NewAdmissionRow = {
@@ -35,8 +38,31 @@ export type NewAdmissionView = {
   admitted: number;
   executable: number;
   succeeded: number;
+  /** Legacy same-day approval row for the current Taipei day, if any. */
   approval: { poolDay: string; approvedStart: string; approvedEnd: string; active: boolean } | null;
+  /** What currently authorizes kind=new for account 1, or null when nothing does. */
+  approvalSource: "persistent" | "daily" | null;
+  /** Persistent run authorization (account 1 only). */
+  authorization: RunAuthorizationView | null;
 };
+
+export type RunAuthorizationStatus = "active" | "paused" | "revoked";
+
+export type RunAuthorizationView = {
+  accountId: 1;
+  persistent: true;
+  status: RunAuthorizationStatus | "none";
+  authorizedAt: string | null;
+  expiresAt: string | null;
+  note: string | null;
+  updatedAt: string | null;
+  /** True when this record authorizes kind=new at the time it was read. */
+  active: boolean;
+};
+
+export type Account1NewApproval =
+  | { source: "persistent"; poolDay: string; approvedStart: string; approvedEnd: string | null }
+  | { source: "daily"; poolDay: string; approvedStart: string; approvedEnd: string };
 
 type StoredAdmission = {
   target_user_id: string;
@@ -70,22 +96,29 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
-function qualify(snapshot: Record<string, unknown>): { ok: true; stored: NewAdmissionSnapshot; followReason: "new" | "new_flb" } | { ok: false; reason: string } {
+/** Screens one snapshot with account 1's saved filter toggles (defaults: Blue Verified and Chinese on, activity off). */
+function qualify(snapshot: Record<string, unknown>, checkedAt: string): { ok: true; stored: NewAdmissionSnapshot; followReason: "new" | "new_flb" } | { ok: false; reason: string } {
+  const filters = followFilters(1);
   const verifiedType = typeof snapshot.verifiedType === "string"
     ? snapshot.verifiedType
     : typeof snapshot.verified_type === "string"
       ? snapshot.verified_type
       : "";
   const blue = snapshot.verified === true && verifiedType.toLowerCase() === "blue";
-  if (!blue) return { ok: false, reason: "not_blue" };
+  if (filters.blueVerified && !blue) return { ok: false, reason: "not_blue" };
   if (snapshot.protected === true) return { ok: false, reason: "protected" };
   if (snapshot.following !== false) return { ok: false, reason: "not_unfollowed" };
   const name = typeof snapshot.name === "string" ? snapshot.name : null;
   const description = typeof snapshot.description === "string" ? snapshot.description : null;
   if (spamText([name, description])) return { ok: false, reason: "spam" };
   const lang = snapshot.lang === "zh" ? "zh" : null;
-  if (audienceMatch("zh", { tweetLang: lang, name, bio: description, tweetText: null }) !== "match") {
+  if (filters.language && audienceMatch("zh", { tweetLang: lang, name, bio: description, tweetText: null }) !== "match") {
     return { ok: false, reason: "not_chinese" };
+  }
+  const lastPostAt = parsedInstant(snapshot.lastPostAt ?? snapshot.last_post_at)?.toISOString() ?? null;
+  if (filters.activity) {
+    if (!lastPostAt) return { ok: false, reason: "activity_unconfirmed" };
+    if (Date.parse(checkedAt) - Date.parse(lastPostAt) > RECENT_ACTIVITY_MS) return { ok: false, reason: "inactive" };
   }
   const relationship = typeof snapshot.relationshipSemantics === "string"
     ? snapshot.relationshipSemantics
@@ -96,7 +129,16 @@ function qualify(snapshot: Record<string, unknown>): { ok: true; stored: NewAdmi
   return {
     ok: true,
     followReason,
-    stored: { verified: true, verifiedType, following: false, lang: "zh", name, description, relationshipSemantics: relationship },
+    stored: {
+      verified: blue,
+      verifiedType,
+      following: false,
+      lang: typeof snapshot.lang === "string" ? snapshot.lang : null,
+      name,
+      description,
+      relationshipSemantics: relationship,
+      lastPostAt,
+    },
   };
 }
 
@@ -130,20 +172,190 @@ export function approveAccount1NewFollow(input: { approvedStart: unknown; approv
   return { ok: true as const, accountId: 1 as const, poolDay: startDay, approvedStart: start, approvedEnd: end };
 }
 
-export function approvalCoversAccount1New(now: Date): { poolDay: string; approvedStart: string; approvedEnd: string } | null {
+type StoredAuthorization = {
+  status: string;
+  authorized_at: string | null;
+  expires_at: string | null;
+  note: string | null;
+  updated_at: string;
+};
+
+function storedAuthorization(): StoredAuthorization | null {
+  const row = getDb().prepare(
+    "SELECT status, authorized_at, expires_at, note, updated_at FROM follow_run_authorization WHERE account_id = 1",
+  ).get() as StoredAuthorization | undefined;
+  return row ?? null;
+}
+
+/** Active, and before its expiry when one was set. The calendar date alone never ends it. */
+function authorizationCovers(record: StoredAuthorization | null, now: Date): boolean {
+  if (!record || record.status !== "active") return false;
+  if (record.expires_at === null) return true;
+  const end = Date.parse(record.expires_at);
+  return !Number.isNaN(end) && now.getTime() < end;
+}
+
+function authorizationView(record: StoredAuthorization | null, now: Date): RunAuthorizationView {
+  const raw = record?.status;
+  const status: RunAuthorizationView["status"] = raw === "active" || raw === "paused" || raw === "revoked" ? raw : "none";
+  return {
+    accountId: 1,
+    persistent: true,
+    status,
+    authorizedAt: record?.authorized_at ?? null,
+    expiresAt: record?.expires_at ?? null,
+    note: record?.note ?? null,
+    updatedAt: record?.updated_at ?? null,
+    active: authorizationCovers(record, now),
+  };
+}
+
+export function account1RunAuthorization(now = new Date()): RunAuthorizationView {
+  return authorizationView(storedAuthorization(), now);
+}
+
+function writeAuthorization(fields: {
+  status: RunAuthorizationStatus;
+  authorizedAt: string | null;
+  expiresAt: string | null;
+  note: string | null;
+  updatedAt: string;
+}): void {
+  getDb().prepare(
+    `INSERT INTO follow_run_authorization (account_id, status, authorized_at, expires_at, note, updated_at)
+     VALUES (1, ?, ?, ?, ?, ?)
+     ON CONFLICT(account_id) DO UPDATE SET
+       status = excluded.status,
+       authorized_at = excluded.authorized_at,
+       expires_at = excluded.expires_at,
+       note = excluded.note,
+       updated_at = excluded.updated_at`,
+  ).run(fields.status, fields.authorizedAt, fields.expiresAt, fields.note, fields.updatedAt);
+}
+
+function authorizationNote(value: unknown, fallback: string | null): string | null {
+  if (value === undefined) return fallback;
+  if (value === null) return null;
+  if (typeof value !== "string" || value.trim().length > 200) {
+    throw new AppError("invalid_authorization", "note 必须是不超过 200 个字符的字符串。");
+  }
+  return value.trim() || null;
+}
+
+/**
+ * Persistent account 1 run authorization for kind=new. It keeps covering across Taipei midnights
+ * until it is paused, revoked, or reaches the optional `expiresAt`. Daily caps still reset at the
+ * saved quota-zone midnight. Legacy one-day approvals keep working as before.
+ */
+export function authorizeAccount1Run(input: { expiresAt?: unknown; note?: unknown } = {}, now = new Date()): RunAuthorizationView {
+  let expiresAt: string | null = null;
+  if (input.expiresAt !== undefined && input.expiresAt !== null) {
+    const end = parsedInstant(input.expiresAt);
+    if (!end) throw new AppError("invalid_authorization", "expiresAt 必须是可解析的时间，或省略表示不设到期。");
+    if (end.getTime() <= now.getTime()) throw new AppError("invalid_authorization", "expiresAt 必须晚于现在。");
+    expiresAt = end.toISOString();
+  }
+  const prior = storedAuthorization();
+  const stamp = now.toISOString();
+  writeAuthorization({
+    status: "active",
+    authorizedAt: stamp,
+    expiresAt,
+    note: authorizationNote(input.note, prior?.note ?? null),
+    updatedAt: stamp,
+  });
+  return account1RunAuthorization(now);
+}
+
+/** Stops the persistent authorization without forgetting its grant or expiry. */
+export function pauseAccount1Run(now = new Date()): RunAuthorizationView {
+  const prior = storedAuthorization();
+  if (!prior || prior.status === "revoked") {
+    throw new AppError("authorization_missing", "账号1没有可暂停的持续授权。", 409);
+  }
+  writeAuthorization({
+    status: "paused",
+    authorizedAt: prior.authorized_at,
+    expiresAt: prior.expires_at,
+    note: prior.note,
+    updatedAt: now.toISOString(),
+  });
+  return account1RunAuthorization(now);
+}
+
+/** Resumes a paused authorization with its original expiry. A revoked one must be authorized again. */
+export function resumeAccount1Run(now = new Date()): RunAuthorizationView {
+  const prior = storedAuthorization();
+  if (!prior || prior.status !== "paused") {
+    throw new AppError("authorization_missing", "账号1没有已暂停的持续授权。被撤销的授权需要重新授权。", 409);
+  }
+  writeAuthorization({
+    status: "active",
+    authorizedAt: prior.authorized_at,
+    expiresAt: prior.expires_at,
+    note: prior.note,
+    updatedAt: now.toISOString(),
+  });
+  return account1RunAuthorization(now);
+}
+
+/**
+ * Revokes persistent authorization. The record stays as an audit of the decision, and a same-day
+ * legacy approval written before it no longer authorizes kind=new.
+ */
+export function revokeAccount1Run(now = new Date()): RunAuthorizationView {
+  const prior = storedAuthorization();
+  writeAuthorization({
+    status: "revoked",
+    authorizedAt: prior?.authorized_at ?? null,
+    expiresAt: prior?.expires_at ?? null,
+    note: prior?.note ?? null,
+    updatedAt: now.toISOString(),
+  });
+  return account1RunAuthorization(now);
+}
+
+type DailyApproval = { pool_day: string; approved_start: string; approved_end: string; created_at: string };
+
+function dailyApprovalRow(now: Date): DailyApproval | null {
   const day = zonedClock(now, ACCOUNT1_FOLLOW_ZONE).day;
   const row = getDb().prepare(
-    "SELECT pool_day, approved_start, approved_end FROM follow_new_approval WHERE account_id = 1 AND pool_day = ?",
-  ).get(day) as { pool_day: string; approved_start: string; approved_end: string } | undefined;
-  if (!row) return null;
+    "SELECT pool_day, approved_start, approved_end, created_at FROM follow_new_approval WHERE account_id = 1 AND pool_day = ?",
+  ).get(day) as DailyApproval | undefined;
+  return row ?? null;
+}
+
+function dailyApprovalCovers(row: DailyApproval | null, now: Date): boolean {
+  if (!row) return false;
   const start = Date.parse(row.approved_start);
   const end = Date.parse(row.approved_end);
-  if (Number.isNaN(start) || Number.isNaN(end) || now.getTime() < start || now.getTime() >= end) return null;
-  return { poolDay: row.pool_day, approvedStart: row.approved_start, approvedEnd: row.approved_end };
+  return !Number.isNaN(start) && !Number.isNaN(end) && now.getTime() >= start && now.getTime() < end;
+}
+
+/**
+ * Persistent authorization first. Otherwise a legacy same-day approval still counts, unless the
+ * operator paused or revoked persistent authorization after that approval was written.
+ */
+export function approvalCoversAccount1New(now: Date): Account1NewApproval | null {
+  const record = storedAuthorization();
+  if (authorizationCovers(record, now) && record) {
+    return {
+      source: "persistent",
+      poolDay: quotaDay(1, now),
+      approvedStart: record.authorized_at ?? record.updated_at,
+      approvedEnd: record.expires_at,
+    };
+  }
+  const row = dailyApprovalRow(now);
+  if (!row || !dailyApprovalCovers(row, now)) return null;
+  if (record && record.status !== "active" && record.updated_at >= row.created_at) return null;
+  return { source: "daily", poolDay: row.pool_day, approvedStart: row.approved_start, approvedEnd: row.approved_end };
 }
 
 export function newAdmissionView(accountId: AccountId, now: Date, executableGate: boolean): NewAdmissionView {
-  if (accountId !== 1) return { admitted: 0, executable: 0, succeeded: 0, approval: null };
+  if (accountId !== 1) {
+    return { admitted: 0, executable: 0, succeeded: 0, approval: null, approvalSource: null, authorization: null };
+  }
   const admittedRows = getDb().prepare(
     "SELECT qualification_checked_at FROM follow_new_admission WHERE account_id = 1 AND status = 'admitted'",
   ).all() as Array<{ qualification_checked_at: string }>;
@@ -152,10 +364,7 @@ export function newAdmissionView(accountId: AccountId, now: Date, executableGate
   const succeeded = (getDb().prepare(
     "SELECT COUNT(*) AS n FROM follow_new_admission WHERE account_id = 1 AND status = 'followed'",
   ).get() as { n: number }).n;
-  const day = zonedClock(now, ACCOUNT1_FOLLOW_ZONE).day;
-  const row = getDb().prepare(
-    "SELECT pool_day, approved_start, approved_end FROM follow_new_approval WHERE account_id = 1 AND pool_day = ?",
-  ).get(day) as { pool_day: string; approved_start: string; approved_end: string } | undefined;
+  const row = dailyApprovalRow(now);
   const active = approvalCoversAccount1New(now);
   return {
     admitted,
@@ -164,6 +373,8 @@ export function newAdmissionView(accountId: AccountId, now: Date, executableGate
     approval: row
       ? { poolDay: row.pool_day, approvedStart: row.approved_start, approvedEnd: row.approved_end, active: Boolean(active) }
       : null,
+    approvalSource: active?.source ?? null,
+    authorization: account1RunAuthorization(now),
   };
 }
 
@@ -257,7 +468,7 @@ export function admitAccount1NewFollows(
       rejected.push({ targetUserId: id, reason: "snapshot_required" });
       continue;
     }
-    const decision = qualify(snapshot);
+    const decision = qualify(snapshot, checked);
     if (!decision.ok) {
       rejected.push({ targetUserId: id, reason: decision.reason });
       continue;

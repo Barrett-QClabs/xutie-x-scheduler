@@ -28,7 +28,7 @@ export function ApprovedListFollowControl(props: {
       </label>
       <p data-approved-list-status="">{props.status}</p>
       <p className="text-xs leading-5 text-muted-foreground">
-        只作用于账号1执行白名单里、已经在关注储备中的人。永久取关黑名单、已经关注过的人，以及固定永不取关名单仍然跳过。不在白名单上的人和账号2仍按原筛选。保存不会开始运行，也不改 15 分钟工作、18 分钟休息、05:00–09:00 停工、每日 350 或每轮 13 人。
+        只作用于账号1执行白名单里、已经在关注储备中的人。永久取关黑名单、已经关注过的人，以及固定永不取关名单仍然跳过。不在白名单上的人和账号2仍按原筛选。保存不会开始运行，也不改「自动化设置」里保存的时区、时间窗、工作/休息分钟、日上限或每轮人数。
       </p>
       <Button
         type="button"

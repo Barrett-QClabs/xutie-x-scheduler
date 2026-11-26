@@ -1,8 +1,15 @@
 import type { AccountId } from "@/lib/account";
-import { londonClock, zonedClock } from "@/lib/london";
-import { FOLLOW_BATCH_LIMIT, FOLLOW_DAILY_CAP } from "@/lib/unfollow-policy";
+import { currentSettings, isLaneSlotKey, laneOpen, laneSlotFor, quotaDay } from "@/lib/automation-settings";
+import { getDb } from "@/lib/db";
+import { zonedClock } from "@/lib/london";
 
-/** Account 1 follow clock. No daylight-saving shift; the zone is still read from Intl. */
+/**
+ * The ACCOUNT1_* / ACCOUNT2_* numbers below are the compiled defaults that `lib/automation-settings`
+ * starts from, and the grids that historical slot keys were written on. Execution reads the saved
+ * settings through `followSlot`, `followDailyCap`, `followBatchLimit`, and `followCapDay`.
+ */
+
+/** Account 1 default follow clock. No daylight-saving shift; the zone is still read from Intl. */
 export const ACCOUNT1_FOLLOW_ZONE = "Asia/Taipei";
 
 /** First work window of each Taipei day starts at 00:00. The window closes at 05:00. */
@@ -110,42 +117,46 @@ export function account1QuietHours(minutes: number): boolean {
   return minutes >= ACCOUNT1_FOLLOW_WINDOW_END_MINUTES && minutes < ACCOUNT1_OPEN_START_MINUTES;
 }
 
-/** Open during the 20 hours outside 05:00–09:00. Kind no longer selects a separate window. */
+/** "unified" while this account's saved follow window is open (account 1 default: outside 05:00–09:00). */
+export function followPhase(accountId: AccountId, now: Date): "unified" | null {
+  return laneOpen(accountId, "follow", now) ? "unified" : null;
+}
+
+/** Account 1 phase on the saved settings. Kind no longer selects a separate window. */
 export function account1FollowPhase(now: Date): "unified" | null {
-  const minutes = zonedClock(now, ACCOUNT1_FOLLOW_ZONE).minutes;
-  if (account1QuietHours(minutes)) return null;
-  return "unified";
+  return followPhase(1, now);
 }
 
+/** Saved combined follow + follow-back cap for one quota day (defaults: 账号1 350, 账号2 380). */
 export function followDailyCap(accountId: AccountId): number {
-  return accountId === 1 ? ACCOUNT1_FOLLOW_DAILY_CAP : FOLLOW_DAILY_CAP;
+  return currentSettings(accountId).follow.dailyCap;
 }
 
+/** Saved follow batch size per work window (defaults: 账号1 13, 账号2 10). */
 export function followBatchLimit(accountId: AccountId, now?: Date): number {
   void now;
-  return accountId === 1 ? ACCOUNT1_FOLLOW_BATCH_LIMIT : FOLLOW_BATCH_LIMIT;
+  return currentSettings(accountId).follow.batchSize;
 }
 
-/** Day key stored in `follow_success.london_day` and used for the daily cap. */
+/** Day key stored in `follow_success.london_day` and used for the daily cap, in the saved quota zone. */
 export function followCapDay(accountId: AccountId, now: Date): string {
-  if (accountId === 1) return zonedClock(now, ACCOUNT1_FOLLOW_ZONE).day;
-  return londonClock(now).day;
+  return quotaDay(accountId, now);
 }
 
-/** Account 2 keeps 15 minutes of work and 15 of rest, 10 per round, anchored at 00:00 Taipei. */
+/** Account 2 default: 15 minutes of work and 15 of rest, 10 per round, anchored at 00:00 Taipei. */
 export const ACCOUNT2_FOLLOW_CYCLE_MINUTES = 30;
 export const ACCOUNT2_FOLLOW_WORK_MINUTES = 15;
 
 /**
- * Work-window start for this account, or null during rest.
- * Account 1 works 15 minutes and rests 18, anchored at 09:00, and is closed 05:00–09:00.
- * The cycle continues from 09:00 through midnight until 05:00. Account 2 is unchanged.
+ * Work-window start for this account on its saved grid, or null during rest or outside the window.
+ * Defaults: account 1 works 15 and rests 18 from 09:00 through midnight until 05:00 Taipei;
+ * account 2 works 15 and rests 15 all day from 00:00 Taipei.
  */
 export function followSlot(accountId: AccountId, now: Date): string | null {
-  if (accountId === 2) return account2FollowSlot(now);
-  return account1UnifiedSlot(now);
+  return laneSlotFor(accountId, "follow", now);
 }
 
+/** Compiled account 1 grid. Kept to validate historical cursors; execution uses `followSlot`. */
 export function account1UnifiedSlot(now: Date): string | null {
   const clock = zonedClock(now, ACCOUNT1_FOLLOW_ZONE);
   if (account1QuietHours(clock.minutes)) return null;
@@ -199,10 +210,16 @@ export function taipeiFollowSlot(now: Date): string | null {
   return `${ACCOUNT1_SLOT_PREFIX}${day}T${hhmm(start)}`;
 }
 
-/** Audit cursor: account 1 still accepts completed historical keys plus the unified grid. */
+/**
+ * Audit cursor: a work-window start on this account's saved grid, a key on its compiled historical
+ * grids, or any slot this account has already written. Another account's keys are not accepted.
+ */
 export function isFollowAuditCursor(accountId: AccountId, slot: string): boolean {
-  if (accountId === 1) return isAccount1FollowSlot(slot) || isAccount1NewFollowSlot(slot);
-  return isAccount2FollowSlot(slot);
+  if (isLaneSlotKey(accountId, "follow", slot)) return true;
+  if (accountId === 1 ? isAccount1FollowSlot(slot) || isAccount1NewFollowSlot(slot) : isAccount2FollowSlot(slot)) return true;
+  return Boolean(
+    getDb().prepare("SELECT 1 AS ok FROM follow_batches WHERE account_id = ? AND slot = ?").get(accountId, slot),
+  );
 }
 
 export function isAccount1NewFollowSlot(slot: string): boolean {

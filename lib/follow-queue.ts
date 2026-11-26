@@ -1,4 +1,5 @@
 import type { AccountId } from "@/lib/account";
+import { accountIdentity, executionUserId } from "@/lib/account-identity";
 import { audienceMatch, preferFlb, spamText } from "@/lib/audience";
 import { evidenceFollowProfile } from "@/lib/evidence";
 import { followTarget } from "@/lib/follow-live";
@@ -8,16 +9,16 @@ import {
   newAdmissionView,
   pendingNewAdmissions,
 } from "@/lib/follow-new-admission";
-import { ACCOUNT_USER_ID, UNFOLLOW_WHITELIST, audienceFor, followEnabled } from "@/lib/automation-account";
-import { getCredentialsRow, getDb } from "@/lib/db";
+import { UNFOLLOW_WHITELIST, audienceFor, followEnabled } from "@/lib/automation-account";
+import { currentSettings, followFilters, laneIsDefault, quotaDayRange, type FollowFilters } from "@/lib/automation-settings";
+import { getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
-import { followBatchSize } from "@/lib/account-ops";
 import { account1ApprovedListWaivesScreening, approvedListFollowView } from "@/lib/approved-list-follow";
 import { account1ExecutionAllowed } from "@/lib/follow-allowlist";
 import { followBlocked } from "@/lib/follow-blocklist";
-import { account1FollowPhase, account1PoolInUse, followBatchLimit, followCapDay, followDailyCap, followSlot, isFollowAuditCursor } from "@/lib/follow-cadence";
-import { MAX_FOLLOWERS, RESERVE_FRESH_MS } from "@/lib/unfollow-policy";
+import { account1PoolInUse, followBatchLimit, followCapDay, followDailyCap, followPhase, followSlot, isFollowAuditCursor } from "@/lib/follow-cadence";
+import { MAX_FOLLOWERS, RECENT_ACTIVITY_MS, RESERVE_FRESH_MS } from "@/lib/unfollow-policy";
 
 export type FollowKind = "followback" | "new";
 export type FollowOutcome = "success" | "failed" | "skipped" | "unknown";
@@ -77,12 +78,20 @@ function parseKind(value: unknown): FollowKind {
   throw new AppError("invalid_kind", "储备类型必须是 followback 或 new。");
 }
 
+/**
+ * Successes on the current quota day. Rows are matched by their stored day key, and also by the
+ * instant they succeeded, so switching the quota zone mid-day cannot hand out a fresh cap early.
+ */
 export function followedToday(accountId: AccountId, now: Date): number {
   const day = followCapDay(accountId, now);
+  const range = quotaDayRange(accountId, now);
   const row = one<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM follow_success WHERE account_id = ? AND london_day = ?",
+    `SELECT COUNT(*) AS n FROM follow_success
+     WHERE account_id = ? AND (london_day = ? OR (succeeded_at >= ? AND succeeded_at < ?))`,
     accountId,
     day,
+    range.start.toISOString(),
+    range.end.toISOString(),
   );
   return row?.n ?? 0;
 }
@@ -142,7 +151,7 @@ function reserveConstraint(input: {
   gap: number;
 }): string | null {
   if (!followEnabled(input.accountId)) return "disabled";
-  if (getCredentialsRow(input.accountId)?.user_id !== ACCOUNT_USER_ID[input.accountId]) return "identity_unconfirmed";
+  if (!executionUserId(input.accountId)) return "identity_unconfirmed";
   const paused = one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", input.accountId);
   if (paused?.paused !== 0) return "paused";
   if (!followSlot(input.accountId, input.now)) return "rest";
@@ -172,11 +181,13 @@ export function getFollowStatus(accountId: AccountId, now = new Date()) {
     london_day: string;
   }>;
   const followed = followedToday(accountId, now);
+  const identity = accountIdentity(accountId);
+  const settings = currentSettings(accountId);
   const openForNewAdmission = accountId === 1
     && followEnabled(1)
     && control?.paused === 0
-    && getCredentialsRow(1)?.user_id === ACCOUNT_USER_ID[1]
-    && account1FollowPhase(now) === "unified";
+    && identity.state === "confirmed"
+    && followPhase(1, now) === "unified";
   return {
     accountId,
     audience: audienceFor(accountId),
@@ -184,8 +195,13 @@ export function getFollowStatus(accountId: AccountId, now = new Date()) {
     paused: control?.paused !== 0,
     pauseReason: control?.pause_reason ?? null,
     apiMode: apiMode(),
-    identityConfirmed: getCredentialsRow(accountId)?.user_id === ACCOUNT_USER_ID[accountId],
+    identityConfirmed: identity.state === "confirmed",
+    identityState: identity.state,
     londonDay: followCapDay(accountId, now),
+    quotaDay: followCapDay(accountId, now),
+    quotaTimezone: settings.quotaTimezone,
+    scheduleTimezone: settings.scheduleTimezone,
+    filters: { ...settings.filters },
     schedule: followSlot(accountId, now) ? "work" : "rest",
     batchSize: batchLimit(accountId, now),
     dailyCap: followDailyCap(accountId),
@@ -634,8 +650,7 @@ function capUsed(accountId: AccountId, now: Date): number {
 }
 
 function batchLimit(accountId: AccountId, now: Date): number {
-  const phase = accountId === 1 ? account1FollowPhase(now) : null;
-  return followBatchSize(accountId, phase) ?? followBatchLimit(accountId, now);
+  return followBatchLimit(accountId, now);
 }
 
 function selectReserve(accountId: AccountId, now: Date, limit: number): ReserveRow[] {
@@ -806,14 +821,23 @@ function reserveRank(row: ReserveRow): number {
   return rank;
 }
 
+/**
+ * Screens one candidate with this account's saved filter toggles. Defaults keep today's screen:
+ * Blue Verified required, audience language required for kind=new, no recent-activity requirement.
+ * Spam, relationship, and follow-back checks always apply.
+ */
 export function classifyFollow(input: {
   accountId: AccountId;
   kind: FollowKind;
   profile: FollowProfile;
   now: Date;
+  filters?: FollowFilters;
 }): { proceed: boolean; result: FollowOutcome; reason: string } {
-  if (input.profile.blue == null) return { proceed: false, result: "unknown", reason: "blue_unconfirmed" };
-  if (!input.profile.blue) return { proceed: false, result: "skipped", reason: "not_blue" };
+  const filters = input.filters ?? followFilters(input.accountId);
+  if (filters.blueVerified) {
+    if (input.profile.blue == null) return { proceed: false, result: "unknown", reason: "blue_unconfirmed" };
+    if (!input.profile.blue) return { proceed: false, result: "skipped", reason: "not_blue" };
+  }
   if (spamText([input.profile.name, input.profile.bio, input.profile.tweetText, input.profile.username])) {
     return { proceed: false, result: "skipped", reason: "spam" };
   }
@@ -824,9 +848,20 @@ export function classifyFollow(input: {
     if (!input.profile.followsBack) return { proceed: false, result: "skipped", reason: "not_follower" };
     return { proceed: true, result: "success", reason: "followback" };
   }
-  const audience = audienceMatch(audienceFor(input.accountId), input.profile);
-  if (audience === "unknown") return { proceed: false, result: "unknown", reason: "audience_unconfirmed" };
-  if (audience === "miss") return { proceed: false, result: "skipped", reason: input.accountId === 1 ? "not_chinese" : "not_english" };
+  if (filters.language) {
+    const audience = audienceMatch(audienceFor(input.accountId), input.profile);
+    if (audience === "unknown") return { proceed: false, result: "unknown", reason: "audience_unconfirmed" };
+    if (audience === "miss") return { proceed: false, result: "skipped", reason: input.accountId === 1 ? "not_chinese" : "not_english" };
+  }
+  if (filters.activity) {
+    const posted = Date.parse(input.profile.lastPostAt ?? "");
+    const recent = !Number.isNaN(posted) && input.now.getTime() - posted <= RECENT_ACTIVITY_MS;
+    if (!recent) {
+      return input.profile.lastPostKnown
+        ? { proceed: false, result: "skipped", reason: "inactive" }
+        : { proceed: false, result: "unknown", reason: "activity_unconfirmed" };
+    }
+  }
   const hint = preferFlb([input.profile.name, input.profile.bio, input.profile.tweetText]);
   return { proceed: true, result: "success", reason: hint ? "new_flb" : "new" };
 }
@@ -917,14 +952,13 @@ export async function submitFollowBatch(input: {
   if (!followEnabled(accountId)) return emptyFollow(accountId, now, slot, "disabled");
   if (apiMode() !== "live" && !input.hooks) return emptyFollow(accountId, now, slot, "mock_mode");
   if (!slot) return emptyFollow(accountId, now, null, "rest");
-  if (getCredentialsRow(accountId)?.user_id !== ACCOUNT_USER_ID[accountId]) {
-    return emptyFollow(accountId, now, slot, "identity_unconfirmed");
-  }
+  // Runs as this slot's own stored identity. A missing, shared, or other-slot identity stops here.
+  const sourceUserId = executionUserId(accountId);
+  if (!sourceUserId) return emptyFollow(accountId, now, slot, "identity_unconfirmed");
   const paused = one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", accountId);
   if (paused?.paused !== 0) return emptyFollow(accountId, now, slot, "paused");
   const remaining = Math.max(0, followDailyCap(accountId) - capUsed(accountId, now));
   if (remaining <= 0) return emptyFollow(accountId, now, slot, "daily_cap");
-  const sourceUserId = getCredentialsRow(accountId)?.user_id ?? "";
   const hooks = input.hooks ?? {
     inspect: async (targetUserId: string) => evidenceFollowProfile(accountId, targetUserId, now),
     follow: (targetUserId: string) => followTarget(accountId, sourceUserId, targetUserId),
@@ -1138,12 +1172,13 @@ export function listFollowAudit(accountId: AccountId, input?: { limit?: number; 
   }
   const before = input?.before ?? null;
   if (before !== null && !isFollowAuditCursor(accountId, before)) {
-    throw new AppError(
-      "invalid_cursor",
-      accountId === 1
+    let message = "关注审计 before 必须是这个账号已保存关注节奏里的工作窗起点，或这个账号已经写过的批次槽。";
+    if (laneIsDefault(accountId, "follow")) {
+      message = accountId === 1
         ? "关注审计 before 必须是台北关注工作窗起点，例如 taipei:2026-11-11T00:00 或 taipei-new:2026-11-11T18:00。"
-        : "关注审计 before 必须是台北 :00 或 :30 的回关工作窗起点，例如 taipei:2026-11-11T00:30。",
-    );
+        : "关注审计 before 必须是台北 :00 或 :30 的回关工作窗起点，例如 taipei:2026-11-11T00:30。";
+    }
+    throw new AppError("invalid_cursor", message);
   }
   const rows = getDb()
     .prepare(

@@ -67,7 +67,9 @@ describe.skipIf(!chrome)("settings account switch in the browser", () => {
     page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     page.on("request", (request) => {
-      if (!request.url().includes("/api/credentials")) return;
+      // Writes only. The settings page also reads the visible slot's identity with
+      // GET /api/credentials/identity, which writes nothing and is not part of these assertions.
+      if (!request.url().includes("/api/credentials") || request.method() === "GET") return;
       const raw = request.postData() ?? "";
       let accountId: unknown;
       try {

@@ -11,6 +11,8 @@ import { xPost } from "@/lib/x-client";
 
 const SECRET = "slot-two-secret-value";
 const WORK = new Date("2026-11-08T00:00:00.000Z");
+/** Relative to the real clock: `assertStartAt` refuses a start more than 7 days before now. */
+const START_AT = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
 function enable(accountId: 1 | 2) {
   process.env[accountId === 1 ? "XUTIE_ACCOUNT1_FOLLOW" : "XUTIE_ACCOUNT2_FOLLOW"] = "on";
@@ -52,7 +54,7 @@ describe("account 2 follow reserve", () => {
       accountId: 2,
       source: "approved english post",
       format: "text",
-      startAt: "2026-11-18T12:00:00.000Z",
+      startAt: START_AT,
       intervalMinutes: 15,
       randomMinSeconds: 0,
       randomMaxSeconds: 0,

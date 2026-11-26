@@ -1,6 +1,5 @@
 import type { AccountId } from "@/lib/account";
-import { ACCOUNT_USER_ID } from "@/lib/automation-account";
-import { getCredentialsRow } from "@/lib/db";
+import { executionUserId } from "@/lib/account-identity";
 import { apiMode } from "@/lib/deployment";
 import { readCredentials } from "@/lib/service";
 import { evidenceFollowProfile } from "@/lib/evidence";
@@ -67,10 +66,11 @@ export function profileFromFollowLookup(user: Record<string, unknown> | null, tw
   };
 }
 
+/** Live hooks act as this slot's own confirmed identity only. */
 export function liveFollowHooks(accountId: AccountId): FollowHooks | undefined {
   if (apiMode() !== "live") return undefined;
-  const sourceUserId = getCredentialsRow(accountId)?.user_id;
-  if (sourceUserId !== ACCOUNT_USER_ID[accountId]) return undefined;
+  const sourceUserId = executionUserId(accountId);
+  if (!sourceUserId) return undefined;
   return {
     inspect: async (targetUserId) => evidenceFollowProfile(accountId, targetUserId),
     follow: (targetUserId) => followTarget(accountId, sourceUserId, targetUserId),

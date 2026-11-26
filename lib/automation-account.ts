@@ -1,7 +1,12 @@
 import type { AccountId } from "@/lib/account";
 
-/** Stored user id that must already be verified before that account may follow or unfollow. */
-export const ACCOUNT_USER_ID: Record<AccountId, string> = {
+/**
+ * X identities the two production slots were first deployed with. No slot is required to hold one:
+ * follows and unfollows run as whatever identity that slot itself has stored and confirmed.
+ * These ids only (1) stay reserved to their own slot, so 账号1 can never act as 账号2's X user or the
+ * reverse, and (2) attribute evidence on a slot that has not stored any identity yet.
+ */
+export const LEGACY_ACCOUNT_USER_ID: Readonly<Record<AccountId, string>> = {
   1: "1933586991612080128",
   2: "1468479269701820422",
 };

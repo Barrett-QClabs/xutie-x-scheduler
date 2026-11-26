@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { POST as testCredentialsRoute } from "@/app/api/credentials/test/route";
 import { POST as submitFollow } from "@/app/api/follow/batches/route";
 import { POST as resumeFollow } from "@/app/api/follow/resume/route";
 import { GET as readEvidence, POST as postEvidence } from "@/app/api/evidence/route";
-import { POST as submitUnfollow } from "@/app/api/unfollow/batches/route";
 import { POST as resumeUnfollow } from "@/app/api/unfollow/resume/route";
 import { getCredentialsRow, getQueueSettings, updateAccount } from "@/lib/db";
 import { importEvidence } from "@/lib/evidence";
@@ -15,6 +15,8 @@ import { createLiveXClient, xGet } from "@/lib/x-client";
 const WORK = new Date("2026-11-08T08:00:00.000Z");
 const OBSERVED = "2026-11-08T07:50:00.000Z";
 const EXPIRES = "2026-11-08T08:30:00.000Z";
+/** Relative to the real clock: `assertStartAt` refuses a start more than 7 days before now. */
+const START_AT = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
 function envelope(over: Record<string, unknown> = {}) {
   return {
@@ -111,7 +113,7 @@ describe("free evidence contract", () => {
         accountId: 1,
         source: "把我取关的人，不要和我说话",
         format: "text",
-        startAt: "2026-11-18T12:00:00.000Z",
+        startAt: START_AT,
         intervalMinutes: 15,
         randomMinSeconds: 0,
         randomMaxSeconds: 0,
@@ -170,12 +172,12 @@ describe("free evidence contract", () => {
       expect(followBody.followed ?? followBody.reason).toBeDefined();
       expect(calls.filter((item) => item.startsWith("GET"))).toEqual([]);
       expect(getQueueSettings(1).paused).toBe(false);
-      expect(posted.queued[0].scheduledAt).toBe("2026-11-18T12:00:00.000Z");
+      expect(posted.queued[0].scheduledAt).toBe(START_AT);
     });
     process.env.X_API_MODE = previous;
   });
 
-  it("blocks live identity reread and live user GETs before any socket", async () => {
+  it("returns a stored identity without a read and refuses every general live GET before any socket", async () => {
     const previous = process.env.X_API_MODE;
     process.env.X_API_MODE = "live";
     await withFetch(async (calls) => {
@@ -189,6 +191,7 @@ describe("free evidence contract", () => {
       const { testCredentials } = await import("@/lib/service");
       const kept = await testCredentials(1);
       expect(kept.userId).toBe("1933586991612080128");
+      expect(kept.liveRead).toBe(false);
       expect(getCredentialsRow(1)?.username).toBe("barrett_tt");
       const client = createLiveXClient({
         apiKey: "acctoneA",
@@ -197,6 +200,7 @@ describe("free evidence contract", () => {
         accessTokenSecret: "token-secret",
       });
       await expect(client.verify()).rejects.toThrow(/读额度已关闭/);
+      await expect(client.latestTweet!("1933586991612080128")).rejects.toThrow(/读额度已关闭/);
       await expect(xGet({
         apiKey: "acctoneA",
         apiSecret: "slot-one-secret-value",
@@ -206,5 +210,60 @@ describe("free evidence contract", () => {
       expect(calls).toEqual([]);
     });
     process.env.X_API_MODE = previous;
+  });
+
+  it("spends exactly one GET /2/users/me only when the operator explicitly verifies", async () => {
+    const previous = process.env.X_API_MODE;
+    process.env.X_API_MODE = "live";
+    const calls: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+      return new Response(JSON.stringify({ data: { id: "1933586991612080128", username: "barrett_tt", name: "Barrett" } }), { status: 200 });
+    };
+    const keys = {
+      apiKey: "acctoneA",
+      apiSecret: "slot-one-secret-value",
+      accessToken: "token",
+      accessTokenSecret: "token-secret",
+    };
+    const verify = (body: Record<string, unknown>) => testCredentialsRoute(new Request("http://local/api/credentials/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }));
+    try {
+      saveCredentials(1, keys);
+      expect(getCredentialsRow(1)?.user_id ?? null).toBeNull();
+      const first = await verify({ accountId: 1 });
+      expect(first.status).toBe(200);
+      expect(await first.json()).toMatchObject({
+        ok: true,
+        userId: "1933586991612080128",
+        username: "barrett_tt",
+        saved: true,
+        liveRead: true,
+      });
+      expect(calls).toEqual(["GET https://api.x.com/2/users/me?user.fields=id%2Cname%2Cusername"]);
+      expect(getCredentialsRow(1)).toMatchObject({ user_id: "1933586991612080128", identity_source: "verify" });
+      expect(getCredentialsRow(2)).toBeNull();
+
+      const stored = await verify({ accountId: 1 });
+      expect((await stored.json()).liveRead).toBe(false);
+      expect(calls).toHaveLength(1);
+      const reread = await verify({ accountId: 1, reverify: true });
+      expect((await reread.json()).liveRead).toBe(true);
+      expect(calls).toHaveLength(2);
+      const badFlag = await verify({ accountId: 1, reverify: "yes" });
+      expect(badFlag.status).toBe(400);
+      expect(calls).toHaveLength(2);
+
+      await expect(xGet(keys, "/2/users/me")).rejects.toThrow(/读额度已关闭/);
+      await expect(createLiveXClient(keys).verify()).rejects.toThrow(/读额度已关闭/);
+      expect(await tick({ accountId: 1, now: WORK })).toMatchObject({ action: "idle" });
+      expect(calls).toHaveLength(2);
+    } finally {
+      globalThis.fetch = original;
+      process.env.X_API_MODE = previous;
+    }
   });
 });

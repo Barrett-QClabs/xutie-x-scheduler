@@ -99,12 +99,14 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, "queue_settings", "last_tick_at", "ALTER TABLE queue_settings ADD COLUMN last_tick_at TEXT");
   ensureColumn(db, "queue_settings", "last_tick_action", "ALTER TABLE queue_settings ADD COLUMN last_tick_action TEXT");
   widenAccountTables(db);
+  ensureIdentityColumns(db);
   ensureColumn(db, "tweets", "account_id", "ALTER TABLE tweets ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1");
   db.exec("CREATE INDEX IF NOT EXISTS idx_tweets_account_sched ON tweets(account_id, status, scheduled_at)");
   ensureAutomationTables(db);
   ensurePostDeleteLog(db);
   ensureFollowBlocklist(db);
   ensureFollowAllowlist(db);
+  ensureSettingsTables(db);
   const now = new Date().toISOString();
   for (const id of ACCOUNT_IDS) {
     db.prepare(
@@ -120,7 +122,12 @@ type CredentialRow = {
   username: string | null;
   display_name: string | null;
   user_id: string | null;
+  identity_source: string | null;
+  identity_verified_at: string | null;
 };
+
+/** How a slot's stored X identity was established. Rows saved before this column read as `legacy`. */
+export type IdentitySource = "verify" | "manual" | "evidence" | "legacy";
 
 type TweetRow = {
   id: string;
@@ -501,6 +508,35 @@ function ensureFollowBlocklist(db: DatabaseSync): void {
   ).run();
 }
 
+/** Identity provenance on each slot's own credentials row. Existing verified rows are marked `legacy`. */
+function ensureIdentityColumns(db: DatabaseSync): void {
+  ensureColumn(db, "credentials", "identity_source", "ALTER TABLE credentials ADD COLUMN identity_source TEXT");
+  ensureColumn(db, "credentials", "identity_verified_at", "ALTER TABLE credentials ADD COLUMN identity_verified_at TEXT");
+  db.exec("UPDATE credentials SET identity_source = 'legacy' WHERE user_id IS NOT NULL AND identity_source IS NULL");
+}
+
+/**
+ * Per-account automation settings (absent row = compiled defaults) and the account 1 persistent
+ * new-follow run authorization. Legacy one-day `follow_new_approval` rows are left untouched.
+ */
+function ensureSettingsTables(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_settings (
+      account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
+      settings_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS follow_run_authorization (
+      account_id INTEGER PRIMARY KEY CHECK (account_id = 1),
+      status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'revoked')),
+      authorized_at TEXT,
+      expires_at TEXT,
+      note TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
 /** Account 1 execution allowlist. Empty and enforced means nobody is followed. History tables are not changed. */
 function ensureFollowAllowlist(db: DatabaseSync): void {
   db.exec(`
@@ -546,22 +582,26 @@ function one<T>(sql: string, ...params: unknown[]): T | null {
 
 export function getCredentialsRow(accountId: AccountId = 1): CredentialRow | null {
   return one<CredentialRow>(
-    "SELECT ciphertext, username, display_name, user_id FROM credentials WHERE id = ?",
+    `SELECT ciphertext, username, display_name, user_id, identity_source, identity_verified_at
+     FROM credentials WHERE id = ?`,
     accountId,
   );
 }
 
+/** New keys always drop the old identity. It must be verified (or entered) again for this slot. */
 export function upsertCredentials(accountId: AccountId, ciphertext: string): void {
   const updatedAt = new Date().toISOString();
   getDb()
     .prepare(
-      `INSERT INTO credentials (id, ciphertext, username, display_name, user_id, updated_at)
-       VALUES (?, ?, NULL, NULL, NULL, ?)
+      `INSERT INTO credentials (id, ciphertext, username, display_name, user_id, identity_source, identity_verified_at, updated_at)
+       VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, ?)
        ON CONFLICT(id) DO UPDATE SET
          ciphertext = excluded.ciphertext,
          username = NULL,
          display_name = NULL,
          user_id = NULL,
+         identity_source = NULL,
+         identity_verified_at = NULL,
          updated_at = excluded.updated_at`,
     )
     .run(accountId, ciphertext, updatedAt);
@@ -570,14 +610,16 @@ export function upsertCredentials(accountId: AccountId, ciphertext: string): voi
 export function updateAccount(
   accountId: AccountId,
   account: { username: string; displayName: string; userId: string },
+  source: IdentitySource = "verify",
+  at: Date = new Date(),
 ): void {
   getDb()
     .prepare(
       `UPDATE credentials
-       SET username = ?, display_name = ?, user_id = ?, updated_at = ?
+       SET username = ?, display_name = ?, user_id = ?, identity_source = ?, identity_verified_at = ?, updated_at = ?
        WHERE id = ?`,
     )
-    .run(account.username, account.displayName, account.userId, new Date().toISOString(), accountId);
+    .run(account.username, account.displayName, account.userId, source, at.toISOString(), new Date().toISOString(), accountId);
 }
 
 export function deleteCredentials(accountId: AccountId): void {
@@ -960,6 +1002,8 @@ export function resetAllData(): void {
     DELETE FROM follow_new_admission;
     DELETE FROM follow_new_approval;
     DELETE FROM follow_execution_allowlist;
+    DELETE FROM follow_run_authorization;
+    DELETE FROM automation_settings;
     DELETE FROM evidence_subjects;
     DELETE FROM evidence_pages;
   `);

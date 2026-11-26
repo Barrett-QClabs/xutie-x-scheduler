@@ -23,13 +23,31 @@ X_API_MODE=live
 
 然后只对账号1调用 `POST /api/follow/resume` 和 `POST /api/unfollow/resume`，正文 `{"accountId":1}`。这不恢复发帖。
 
-进程每 20 秒调用一次内部调度。关注节奏按号分开，取关不改。账号2回关也改到 `Asia/Taipei` 00:00 锚定，仍是 15 分钟工作、15 分钟休息、每轮最多 10 人。工作槽是台北的 `HH:00` 和 `HH:30`。账号2若仍由外部例程在 00:00 打开、05:00 暂停，那个例程不要再作用于账号1的关注。账号1用 `Asia/Taipei`。关注和回关共用一个永久候选池，除台北 05:00–09:00 外都可开工：09:00 锚定，工作 15 分钟，休息 18 分钟，33 分钟一轮，每轮最多 13 人。14:35 落在 14:30–14:45。05:00 起绝对不关注，09:00 恢复。00:00–00:06 仍属于前一天 23:51 那一轮。`kind=followback` 和 `kind=new` 随机抽用，不再按 `followed_by` 分池；`kind=new` 仍要当天授权。未关注的人跨日保留，不按日期过期。已成功关注或已确认取关的人不再执行。账号1的幂等槽仍是 `taipei:YYYY-MM-DDTHH:MM`，历史 `taipei-new:` 槽只供审计。每日合计上限 350，按台北日历日计，关注和回关加在一起；账号2仍是 380，按伦敦日。取关两号都只在台北 05:00–09:00，槽是 :15 和 :45，一共 8 个：05:15、05:45、06:15、06:45、07:15、07:45、08:15、08:45，每槽最多 10 人。08:45 这一槽在 09:00 结束。05:00–05:14 没有取关槽。名次大于 1000 且最新帖严格早于 48 小时时，两号都不需要关注时间。同一槽已完成就回放，不重复写。进程整段窗口不在线时不补跑。`GET /api/follow/config` 没有周期字段。`PUT` 可以只保存 `keywords`，或只保存账号1的 `approvedListFollow`，或保存 `ops`。已筛名单开关默认关闭，说明见文末。换容器时沿用原数据卷和 `credentials.key`，不要运行 `install.sh`，不要改待发帖。换完后，账号2在伦敦每小时的 15–29 分和 45–59 分 `schedule` 为 `rest`，00–14 分和 30–44 分为 `work`。账号1在台北 09:00–09:14 为 `work`，09:15–09:32 为 `rest`，05:00–08:59 为 `rest`。
+## 页面配置与运行时设置
+
+进程每 20 秒调用一次内部调度；工作节奏读每个账号已保存的 `automation_settings`。在「自动关注 / 取关」（`/automation`）选择账号后，可修改排程时区 `scheduleTimezone`、日上限时区 `quotaTimezone`、关注/取关的每轮人数、日上限（取关可选不设上限）、工作/休息分钟、锚点、时间窗、互斥，以及蓝 V、受众语言、近期活跃过滤。
+
+`GET/PUT/DELETE /api/automation/settings?accountId=1|2` 分别读取、部分更新、恢复该号默认设置。页面用 `PUT /api/automation/settings`，正文为 `{ accountId, settings: { ...改动字段 } }`；未改字段不发送，所以只改批量不会重写同一通道已有的自定义工作/休息分钟。保存配置不会开始运行。`GET /api/follow/config` 继续提供关键词和账号1的 `ops` 兼容视图；旧晚间 `newFollow` 数字只为兼容保留，不驱动统一池节奏。已筛名单开关见文末。
+
+时区可从列表选择，也可输入有效 IANA 名称，如 `Asia/Taipei`、`Europe/London`、`America/New_York`；不接受 `+08:00` 这样的偏移。`scheduleTimezone` 决定锚点、工作窗和幂等槽位键，`quotaTimezone` 决定日上限在当地午夜重置，两者可分别设置。台北排程的键例如 `taipei:YYYY-MM-DDTHH:MM`，其他排程时区用 `tz:<IANA>:YYYY-MM-DDTHH:MM`；历史 `taipei-new:` 槽只供审计。改工作/休息、锚点或窗口只影响未来尚未写入的槽；已完成槽只回放原结果，不重复执行。进程整段窗口不在线时不补跑。
+
+编译默认值是：账号1以台北为排程和日上限时区，关注/回关共用 09:00 锚定的 15 分钟工作 / 18 分钟休息、09:00–次日 05:00 窗口，每轮 13 人、每日合计 350（含在途名额），互斥开启；取关 05:00–09:00，:15/:45 开槽，每批 10、每日 80。账号2默认台北 00:00 锚定 15/15、全天关注，每轮 10、每日 380，日上限默认按伦敦午夜重置；取关同一默认窗口、每批 10、不设日上限，互斥关闭。过滤默认蓝 V 和受众语言开、近期活跃关。这些值不是不可改的运行时规则；保存后以该号设置为准，升级前的 `ops` 兼容值见[免费证据契约](free-evidence.md)。
+
+按上述默认值，账号1台北 14:35 属于 14:30 槽，09:00–09:14 为 `work`、09:15–09:32 为 `rest`、05:00–08:59 无关注槽；账号2台北每小时 00–14 分和 30–44 分为 `work`。这些仅用于核对默认配置，修改后应以设置和状态接口为准。外部例程若仍在暂停/恢复某号，会独立影响运行，不应把账号2的旧例程套到账号1。换容器时沿用原数据卷和原加密密钥，不要运行 `install.sh`，不要改待发帖。
+
+账号1的 `kind=followback` 和 `kind=new` 从永久池随机抽用，不按 `followed_by` 分池。未关注的人跨日保留，不按日期过期；已成功关注或已确认取关的人不再执行。成功取关写入永久黑名单，后续入池和关注前都排除。
+
+## 新关注持续授权与身份
+
+账号1的 `kind=new` 需要持续授权，或仍有效的旧当天授权。在自动化页可授权、暂停、恢复、撤销，并可选填到期时间（按当前排程时区输入）。`GET/POST/DELETE /api/follow/authorization` 读取、修改或撤销持续授权；`POST` 的 `action` 为 `authorize`、`pause`、`resume`、`revoke`，可带 `expiresAt` 和 `note`。持续授权跨午夜保留，暂停后可恢复，恢复沿用原到期时间；撤销或到期后不再放行。旧的 `POST /api/follow/new-approval` 只覆盖一个台北日。暂停或撤销持续授权也会使更早写入的当天授权不再放行。回关不需要这份授权，程序永不自动补写授权。授权本身不打开开关或恢复已暂停的通道。
+
+在「设置」页可核验或重新绑定当前账号槽的身份。普通 `POST /api/credentials/test` 在已有身份时返回已存身份，不重新访问 X；只有操作者明确要求重新核验时才带 `reverify: true`，重新读一次 `GET /2/users/me`。live 读取不可用时可在页面手动填 `userId`、`username`、可选 `displayName`，通过 `PUT /api/credentials/identity` 保存（显示名留空则使用用户名）。关注和取关只在身份为 `confirmed` 时执行，两槽不能共用同一个 `user_id`。详见[身份与证据契约](free-evidence.md#身份)。
 
 证据持续供给仍是父把免费插件结果 `POST /api/evidence`。程序不搜索、不调用 X 的 GET。信封字段见 `docs/free-evidence.md`。
 
-账号1的取关池由伦敦 00:00 的导入建立。进程之后在每个 `:15` 和 `:45` 槽自己取关，每槽最多 10 人，助手不在线也会继续。证据缺失或过期只跳过，候选保持 `candidate`。取关证据从 `observed_at` 起最长 25 小时。候选和剩余可执行数是 `GET /api/unfollow/candidates?accountId=1`。72 小时只认本账号 `follow_success.succeeded_at`。following 列表名次大于 1000 的没回关候选用 `followingPage: 41` 或 `followingRank` 导入，不再要求关注时间；名次 1000 以内仍要 72 小时。账号1的 `inactive_48h` 同样只在名次大于 1000 时可以不带关注时间：证据里要有最新公开帖时间，且执行时严格早于 48 小时，`activity_window_complete: false` 也可以。没有帖子时间仍然跳过，不编造 `followedAt`。名次 1000 及以内不取。账号2的不活跃规则不变。`unknown` 可以靠这次带位置的导入回到 `candidate`。
+账号1的取关池由外部导入建立，不要求伦敦 00:00 导入。进程之后按已保存的取关工作窗、节奏和批量自行执行，助手不在线也会继续；`:15` / `:45`、每槽 10 人仅是默认值。证据缺失或过期只跳过，候选保持 `candidate`。取关证据从 `observed_at` 起最长 25 小时。候选和剩余可执行数是 `GET /api/unfollow/candidates?accountId=1`。72 小时只认本账号 `follow_success.succeeded_at`。following 列表名次大于 1000 的没回关候选用 `followingPage: 41` 或 `followingRank` 导入，不再要求关注时间；名次 1000 以内仍要 72 小时。账号1的 `inactive_48h` 同样只在名次大于 1000 时可以不带关注时间：证据里要有最新公开帖时间，且执行时严格早于 48 小时，`activity_window_complete: false` 也可以。没有帖子时间仍然跳过，不编造 `followedAt`。名次 1000 及以内不取。账号2的不活跃规则不变。`unknown` 可以靠这次带位置的导入回到 `candidate`。
 
-平时只回关。账号1的批次只选 followback。账号2在回关之后仍可以用 new 补位。新关注要先进入活动储备才会被批次执行；把现有 `kind=new` 且 `status=reserved` 的人清出去用：
+账号1按上述授权规则执行永久池里的 followback 和 new；账号2在回关之后仍可以用 new 补位。新关注要先进入候选池才会被批次执行；把现有 `kind=new` 且 `status=reserved` 的人清出去用：
 
 ```json
 { "accountId": 2, "kinds": ["new"], "statuses": ["reserved"], "reason": "hold_new" }
@@ -45,11 +63,11 @@ X_API_MODE=live
 
 开启时，只对账号1执行白名单里的人跳过缺证据、非蓝V、非中文和资格过滤。不在白名单上的人，包括储备请求里自己带 `trusted` 之类字段的人，仍走原筛选。白名单只能由 `PUT /api/follow/allowlist` 写入。开启不制造证据，回执原因是 `approved_list`，不是 `new` 或 `followback`。
 
-开关两边都保留：永久取关黑名单、已经关注过的人、固定永不取关 id、执行白名单强制、`kind=new` 的当天授权、身份核对、暂停、`X_API_MODE`、429/403 即停、台北 15 分钟工作 / 18 分钟休息、05:00–09:00 不关注、每日 350、当前每轮 13 人。发帖、取关和账号2不改。
+开关两边都保留：永久取关黑名单、已经关注过的人、固定永不取关 id、执行白名单强制、`kind=new` 的授权（持续授权或当天授权）、身份核对、暂停、`X_API_MODE`、429/403 即停，以及 `automation_settings` 里保存的节奏、窗口和上限（默认台北 15 分钟工作 / 18 分钟休息、05:00–09:00 不关注、每日 350、每轮 13 人）。发帖、取关和账号2不改。
 
 管理页是「自动关注 / 取关」（`/automation`），先选账号1。账号1区块有复选框「已筛名单直接关注」和「保存已筛名单开关」。状态句来自接口，不是页面自己编的。保存不开始运行。
 
-已经在储备里的人不用重新导入。2026-11-24 现场的 21 个 `kind=new` 只要仍是 `reserved`、在执行白名单里、不在取关黑名单、也没有成功账，打开开关后的下一个工作槽就会执行，每轮最多 13 人。不要为了这 21 人补证据，也不要再 `POST /api/follow/reserve`。
+已经在储备里的人不用重新导入。2026-11-24 现场的 21 个 `kind=new` 只要仍是 `reserved`、在执行白名单里、不在取关黑名单、也没有成功账，且授权和运行门均满足，打开开关后的下一个工作槽就可执行；当时每轮最多 13 人，当前批量以保存的设置为准。不要为了这 21 人补证据，也不要再 `POST /api/follow/reserve`。
 
 打开：
 
@@ -59,7 +77,7 @@ curl -sS -X PUT http://127.0.0.1:3847/api/follow/config \
   -d '{"accountId":1,"approvedListFollow":true}'
 ```
 
-核对。`approvedListFollow` 为 true，`approvedListStatus` 以「开启」开头。`dailyCap` 仍是 350。`ops.followback.batchSize` 仍是当前批量（现场是 13），`workMinutes` 15，`restMinutes` 18。`savesDoNotStart` 仍是 true。
+核对。`approvedListFollow` 为 true，`approvedListStatus` 以「开启」开头；批量、日上限和工作/休息分钟应与切换前保存的设置一致。2026-11-24 现场值是每日 350、每轮 13、工作 15 / 休息 18，不是当前必须使用的数字。`savesDoNotStart` 仍是 true。
 
 ```bash
 curl -sS 'http://127.0.0.1:3847/api/follow/config?accountId=1'
@@ -67,7 +85,7 @@ curl -sS 'http://127.0.0.1:3847/api/follow?accountId=1'
 curl -sS 'http://127.0.0.1:3847/api/follow/allowlist?accountId=1'
 ```
 
-`GET /api/follow?accountId=1` 在台北 17:15–17:29 的 `schedule` 应为 `work`，槽 `taipei:当天T17:15`；05:00–08:59 为 `rest`。证据页可以继续是 `fresh: false`。下一次真实批次的成功行 `reason` 是 `approved_list`。同一槽再调用只回放，不第二次关注。
+若仍使用上述默认设置，`GET /api/follow?accountId=1` 在台北 17:15–17:29 的 `schedule` 为 `work`，槽例如 `taipei:当天T17:15`；05:00–08:59 为 `rest`。使用自定义设置时按当前排程时区和网格核对。证据页可以继续是 `fresh: false`。下一次真实批次的成功行 `reason` 是 `approved_list`。同一槽再调用只回放，不第二次关注。
 
 关闭并恢复原筛选：
 
