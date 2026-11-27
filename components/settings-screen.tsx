@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useAppState } from "@/components/app-state";
 import { useI18n } from "@/components/i18n-provider";
+import { IdentityPanel } from "@/components/identity-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -17,8 +18,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 import { explainError } from "@/lib/explain-error";
+import { credentialsTestBody } from "@/lib/identity-body";
 
 const empty = { apiKey: "", apiSecret: "", accessToken: "", accessTokenSecret: "" };
+
+type TestResult = { username: string; userId: string; saved: boolean; liveRead: boolean };
 type Fields = typeof empty;
 type Slot = 1 | 2;
 
@@ -31,6 +35,7 @@ export function SettingsScreen() {
   const [busySlot, setBusySlot] = useState<Slot | null>(null);
   const [messages, setMessages] = useState<Record<Slot, { ok: boolean; text: string } | null>>({ 1: null, 2: null });
   const [confirmClear, setConfirmClear] = useState(false);
+  const [identityVersion, setIdentityVersion] = useState(0);
   const slot = accountId;
   const form = forms[slot];
   const message = messages[slot];
@@ -51,9 +56,10 @@ export function SettingsScreen() {
     note(target, false, null);
     try {
       await api("/api/credentials", { method: "PUT", body: JSON.stringify({ ...payload, accountId: target }) });
-      const result = await api<{ username: string }>("/api/credentials/test", {
+      // New keys drop the stored identity, so this ordinary test reads it once (no reverify flag).
+      const result = await api<TestResult>("/api/credentials/test", {
         method: "POST",
-        body: JSON.stringify({ accountId: target }),
+        body: JSON.stringify(credentialsTestBody(target)),
       });
       note(target, true, t("testOk", { handle: result.username }));
       setForms((current) => ({ ...current, [target]: { ...empty } }));
@@ -62,6 +68,7 @@ export function SettingsScreen() {
       note(target, false, explainError(error, locale, t));
       await refresh();
     } finally {
+      setIdentityVersion((current) => current + 1);
       setBusySlot((current) => (current === target ? null : current));
     }
   }
@@ -71,15 +78,18 @@ export function SettingsScreen() {
     setBusySlot(target);
     note(target, false, null);
     try {
-      const result = await api<{ username: string }>("/api/credentials/test", {
+      // No reverify flag: a slot that already stores an identity is not read from X again.
+      const result = await api<TestResult>("/api/credentials/test", {
         method: "POST",
-        body: JSON.stringify({ accountId: target }),
+        body: JSON.stringify(credentialsTestBody(target)),
       });
-      note(target, true, t("testOk", { handle: result.username }));
+      const kept = result.saved === false && result.liveRead === false;
+      note(target, true, t(kept ? "testKept" : "testOk", { handle: result.username }));
       await refresh();
     } catch (error) {
       note(target, false, explainError(error, locale, t));
     } finally {
+      setIdentityVersion((current) => current + 1);
       setBusySlot((current) => (current === target ? null : current));
     }
   }
@@ -97,6 +107,7 @@ export function SettingsScreen() {
     } catch (error) {
       note(target, false, explainError(error, locale, t));
     } finally {
+      setIdentityVersion((current) => current + 1);
       setBusySlot((current) => (current === target ? null : current));
     }
   }
@@ -198,6 +209,13 @@ export function SettingsScreen() {
         </div>
         {message ? <p className={message.ok ? "text-sm text-emerald-800" : "text-sm text-destructive"}>{message.text}</p> : null}
       </form>
+
+      <IdentityPanel
+        accountId={slot}
+        mockMode={state?.mockMode === true}
+        version={identityVersion}
+        onChanged={refresh}
+      />
 
       <details className="rounded-xl bg-card px-4 py-3 ring-1 ring-foreground/10">
         <summary className="cursor-pointer text-sm font-medium">{t("howToTitle")}</summary>

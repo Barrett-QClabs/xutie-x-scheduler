@@ -1,9 +1,10 @@
 import type { AccountId } from "@/lib/account";
-import { unfollowDailyCap, unfollowLimits } from "@/lib/account-ops";
-import { ACCOUNT_USER_ID, unfollowEnabled, unfollowWhitelist } from "@/lib/automation-account";
-import { recordAccount1UnfollowBlock } from "@/lib/follow-blocklist";
-import { zonedClock } from "@/lib/london";
-import { getCredentialsRow, getDb } from "@/lib/db";
+import { accountIdentity, evidenceSourceUserId, executionUserId } from "@/lib/account-identity";
+import { unfollowBatchSize, unfollowDailyCap, unfollowPausesOnRisk } from "@/lib/account-ops";
+import { currentSettings, isLaneSlotKey, laneIsDefault, quotaDayRange } from "@/lib/automation-settings";
+import { unfollowEnabled, unfollowWhitelist } from "@/lib/automation-account";
+import { recordUnfollowBlock } from "@/lib/follow-blocklist";
+import { getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
 import { evidenceUnfollowProfile } from "@/lib/evidence";
@@ -144,7 +145,7 @@ export function setUnfollowPaused(accountId: AccountId, paused: boolean, reason:
   return { ok: true, accountId, paused };
 }
 
-export function getUnfollowStatus(accountId: AccountId) {
+export function getUnfollowStatus(accountId: AccountId, now = new Date()) {
   const control = one<{ paused: number; pause_reason: string | null }>(
     "SELECT paused, pause_reason FROM unfollow_control WHERE account_id = ?",
     accountId,
@@ -164,19 +165,32 @@ export function getUnfollowStatus(accountId: AccountId) {
     accountId,
   );
   const whitelist = unfollowWhitelist(accountId);
+  const identity = accountIdentity(accountId);
+  const settings = currentSettings(accountId);
+  const day = quotaDayRange(accountId, now);
+  const dailyCap = unfollowDailyCap(accountId);
+  const done = unfollowedOnQuotaDay(accountId, now);
   return {
     accountId,
     enabled: unfollowEnabled(accountId),
     paused: control?.paused !== 0,
     pauseReason: control?.pause_reason ?? null,
-    batchSize: UNFOLLOW_BATCH_LIMIT,
+    batchSize: unfollowBatchSize(accountId),
     inactiveAfterMs: INACTIVE_AFTER_MS,
     counts: Object.fromEntries(counts.map((row) => [row.status, row.n])),
     lastBatch: last,
     whitelistSize: whitelist.size,
     whitelistMode: accountId === 1 ? "fixed_seven" : "empty_until_configured",
     apiMode: apiMode(),
-    identityConfirmed: getCredentialsRow(accountId)?.user_id === ACCOUNT_USER_ID[accountId],
+    identityConfirmed: identity.state === "confirmed",
+    identityState: identity.state,
+    schedule: unfollowSlot(accountId, now) ? "work" : "rest",
+    scheduleTimezone: settings.scheduleTimezone,
+    quotaTimezone: settings.quotaTimezone,
+    quotaDay: day.day,
+    dailyCap,
+    unfollowedToday: done,
+    remainingQuota: dailyCap === null ? null : Math.max(0, dailyCap - done),
   };
 }
 
@@ -190,9 +204,11 @@ export type UnfollowAuditBatch = {
   results: UnfollowBatchResult["results"];
 };
 
+/** A slot start on this account's saved unfollow grid, the compiled Taipei grid, or a slot this account already wrote. */
 function validUnfollowCursor(accountId: AccountId, slot: string): boolean {
-  void accountId;
-  return /^taipei:\d{4}-\d{2}-\d{2}T0[5-8]:(15|45)$/.test(slot);
+  if (isLaneSlotKey(accountId, "unfollow", slot)) return true;
+  if (/^taipei:\d{4}-\d{2}-\d{2}T0[5-8]:(15|45)$/.test(slot)) return true;
+  return Boolean(one("SELECT 1 AS ok FROM unfollow_batches WHERE account_id = ? AND slot = ?", accountId, slot));
 }
 
 export function listUnfollowAudit(
@@ -207,7 +223,9 @@ export function listUnfollowAudit(
   if (before !== null && !validUnfollowCursor(accountId, before)) {
     throw new AppError(
       "invalid_cursor",
-      "取关审计 before 必须是台北 05:15 到 08:45 的 :15 或 :45 槽，例如 taipei:2026-11-12T05:15。",
+      laneIsDefault(accountId, "unfollow")
+        ? "取关审计 before 必须是台北 05:15 到 08:45 的 :15 或 :45 槽，例如 taipei:2026-11-12T05:15。"
+        : "取关审计 before 必须是这个账号已保存取关节奏里的槽起点，或这个账号已经写过的批次槽。",
     );
   }
   const rows = getDb()
@@ -274,12 +292,14 @@ export type UnfollowEvidenceState = "fresh" | "missing" | "expired";
 
 /** Fresh only while now is inside min(expires_at, observed_at + 25h). Longer claims are clamped. */
 export function unfollowEvidenceState(accountId: AccountId, targetUserId: string, now = new Date()): UnfollowEvidenceState {
+  const sourceUserId = evidenceSourceUserId(accountId);
+  if (!sourceUserId) return "missing";
   const rows = getDb()
     .prepare(
       `SELECT observed_at, expires_at FROM evidence_subjects
        WHERE account_id = ? AND source_user_id = ? AND target_user_id = ?`,
     )
-    .all(accountId, ACCOUNT_USER_ID[accountId], targetUserId) as Array<{ observed_at: string; expires_at: string }>;
+    .all(accountId, sourceUserId, targetUserId) as Array<{ observed_at: string; expires_at: string }>;
   if (!rows.length) return "missing";
   const fresh = rows.some((row) => {
     const observed = Date.parse(row.observed_at);
@@ -429,10 +449,10 @@ function selectable(accountId: AccountId, row: CandidateRow): boolean {
   return Boolean(normalizeTier(row.tier)) && !unfollowWhitelist(accountId).has(row.target_user_id);
 }
 
-function selectBatch(accountId: AccountId, now?: Date, evidenceBacked = false, limit = UNFOLLOW_BATCH_LIMIT): CandidateRow[] {
+function selectBatch(accountId: AccountId, directPool: boolean, now?: Date, evidenceBacked = false, limit = UNFOLLOW_BATCH_LIMIT): CandidateRow[] {
   return candidateRows(accountId)
     .filter((row) => selectable(accountId, row))
-    .filter((row) => !evidenceBacked || !now || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh")
+    .filter((row) => directPool || !evidenceBacked || !now || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh")
     .sort((left, right) => {
       const rank = TIER_RANK[normalizeTier(left.tier) ?? "inactive_48h"] - TIER_RANK[normalizeTier(right.tier) ?? "inactive_48h"];
       return rank || left.target_user_id.localeCompare(right.target_user_id);
@@ -440,18 +460,23 @@ function selectBatch(accountId: AccountId, now?: Date, evidenceBacked = false, l
     .slice(0, limit);
 }
 
-function unfollowedOnTaipeiDay(accountId: AccountId, now: Date): number {
-  const day = zonedClock(now, "Asia/Taipei").day;
+/**
+ * Unfollows completed in batches started on the current quota day (saved quota zone, midnight to midnight).
+ * Batches record their start instant, so a changed zone or slot grid does not re-key earlier batches.
+ */
+function unfollowedOnQuotaDay(accountId: AccountId, now: Date): number {
+  const range = quotaDayRange(accountId, now);
   const row = getDb()
     .prepare(
       `SELECT COALESCE(SUM(unfollowed), 0) AS n FROM unfollow_batches
-       WHERE account_id = ? AND status = 'completed' AND slot LIKE ?`,
+       WHERE account_id = ? AND status = 'completed' AND started_at >= ? AND started_at < ?`,
     )
-    .get(accountId, `taipei:${day}%`) as { n: number };
+    .get(accountId, range.start.toISOString(), range.end.toISOString()) as { n: number };
   return row.n;
 }
 
-function noteStaleEvidence(accountId: AccountId, now: Date) {
+function noteStaleEvidence(accountId: AccountId, now: Date, directPool: boolean) {
+  if (directPool) return;
   const stamp = now.toISOString();
   const update = getDb().prepare(
     `UPDATE unfollow_candidates SET result = 'skipped', reason = ?, updated_at = ?
@@ -470,8 +495,9 @@ function noteStaleEvidence(accountId: AccountId, now: Date) {
 }
 
 export function executableUnfollowCount(accountId: AccountId, now = new Date()): number {
+  const directPool = currentSettings(accountId).unfollow.directPool;
   return candidateRows(accountId).filter(
-    (row) => selectable(accountId, row) && unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh",
+    (row) => selectable(accountId, row) && (directPool || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh"),
   ).length;
 }
 
@@ -552,19 +578,19 @@ export async function submitUnfollowBatch(input: {
   if (!unfollowEnabled(accountId)) return emptyResult(accountId, slot, "disabled");
   if (apiMode() !== "live" && !input.hooks) return emptyResult(accountId, slot, "mock_mode");
   if (!slot) return emptyResult(accountId, null, "outside_window");
-  if (getCredentialsRow(accountId)?.user_id !== ACCOUNT_USER_ID[accountId]) {
-    return emptyResult(accountId, slot, "identity_unconfirmed");
-  }
+  // Runs as this slot's own stored identity. A missing, shared, or other-slot identity stops here.
+  const sourceUserId = executionUserId(accountId);
+  if (!sourceUserId) return emptyResult(accountId, slot, "identity_unconfirmed");
   if (controlPaused(accountId)) return emptyResult(accountId, slot, "paused");
-  const limits = unfollowLimits(accountId);
+  const directPool = currentSettings(accountId).unfollow.directPool;
+  const pauseOnRisk = directPool || unfollowPausesOnRisk(accountId);
   const cap = unfollowDailyCap(accountId);
-  let room = limits?.batchSize ?? UNFOLLOW_BATCH_LIMIT;
+  let room = unfollowBatchSize(accountId);
   if (cap !== null) {
-    const done = unfollowedOnTaipeiDay(accountId, now);
+    const done = unfollowedOnQuotaDay(accountId, now);
     if (done >= cap) return emptyResult(accountId, slot, "daily_cap");
     room = Math.min(room, cap - done);
   }
-  const sourceUserId = getCredentialsRow(accountId)?.user_id ?? "";
   const hooks = input.hooks ?? {
     inspect: async (targetUserId: string) => evidenceUnfollowProfile(accountId, targetUserId, now),
     unfollow: (targetUserId: string) => unfollowTarget(accountId, sourceUserId, targetUserId),
@@ -592,8 +618,8 @@ export async function submitUnfollowBatch(input: {
   if (running) return emptyResult(accountId, slot, "overlap");
 
   const evidenceBacked = !input.hooks;
-  if (evidenceBacked) noteStaleEvidence(accountId, now);
-  const picked = selectBatch(accountId, now, evidenceBacked, room);
+  if (evidenceBacked) noteStaleEvidence(accountId, now, directPool);
+  const picked = selectBatch(accountId, directPool, now, evidenceBacked, room);
   try {
     db.prepare(
       `INSERT INTO unfollow_batches (account_id, slot, status, submitted, unfollowed, results_json, started_at)
@@ -612,23 +638,32 @@ export async function submitUnfollowBatch(input: {
       ).run(slot, new Date().toISOString(), accountId, row.target_user_id);
       let outcome: { result: UnfollowOutcome; reason: string };
       try {
-        const fresh = await hooks.inspect(row.target_user_id);
-        const decision = classifyAction({
-          accountId,
-          followedAt: row.followed_at,
-          followingRank: row.following_rank,
-          fresh,
-          now,
-          whitelisted: unfollowWhitelist(accountId).has(row.target_user_id),
-        });
-        if (!decision.proceed) outcome = { result: decision.result, reason: decision.reason };
-        else {
-          await hooks.unfollow(row.target_user_id);
-          outcome = { result: "success", reason: decision.reason };
-          if (accountId === 1) recordAccount1UnfollowBlock(row.target_user_id, now);
+        if (directPool) {
+          if (unfollowWhitelist(accountId).has(row.target_user_id)) outcome = { result: "skipped", reason: "whitelist" };
+          else {
+            await hooks.unfollow(row.target_user_id);
+            outcome = { result: "success", reason: "direct_pool" };
+            recordUnfollowBlock(accountId, row.target_user_id, now);
+          }
+        } else {
+          const fresh = await hooks.inspect(row.target_user_id);
+          const decision = classifyAction({
+            accountId,
+            followedAt: row.followed_at,
+            followingRank: row.following_rank,
+            fresh,
+            now,
+            whitelisted: unfollowWhitelist(accountId).has(row.target_user_id),
+          });
+          if (!decision.proceed) outcome = { result: decision.result, reason: decision.reason };
+          else {
+            await hooks.unfollow(row.target_user_id);
+            outcome = { result: "success", reason: decision.reason };
+            recordUnfollowBlock(accountId, row.target_user_id, now);
+          }
         }
       } catch (error) {
-        const risk = limits && riskStop(error);
+        const risk = pauseOnRisk ? riskStop(error) : "";
         outcome = { result: "failed", reason: risk || "action_failed" };
         if (risk) {
           db.prepare(

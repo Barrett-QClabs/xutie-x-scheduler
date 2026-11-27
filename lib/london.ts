@@ -1,35 +1,14 @@
 /** Europe/London clock, including BST/GMT. Slots are derived from this, not from a fixed offset. */
 
+import type { AccountId } from "@/lib/account";
+import { laneSlotFor } from "@/lib/automation-settings";
+import { zonedClock, type ZonedClock } from "@/lib/zoned-clock";
+
+export { zonedClock };
+
 const ZONE = "Europe/London";
 
-export type LondonClock = {
-  day: string;
-  hour: number;
-  minute: number;
-  minutes: number;
-};
-
-export function zonedClock(now: Date, zone: string): LondonClock {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(now);
-  const read = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
-  let hour = Number(read("hour"));
-  if (hour === 24) hour = 0;
-  const minute = Number(read("minute"));
-  return {
-    day: `${read("year")}-${read("month")}-${read("day")}`,
-    hour,
-    minute,
-    minutes: hour * 60 + minute,
-  };
-}
+export type LondonClock = ZonedClock;
 
 export function londonClock(now: Date): LondonClock {
   return zonedClock(now, ZONE);
@@ -72,10 +51,13 @@ export function account1UnfollowSlot(now: Date): string | null {
   return `taipei:${clockNow.day}T${clock(start)}`;
 }
 
-/** Both accounts unfollow on the Taipei 05:15–08:45 slots. */
-export function unfollowSlot(accountId: 1 | 2, now: Date): string | null {
-  void accountId;
-  return account1UnfollowSlot(now);
+/**
+ * Unfollow slot on this account's saved unfollow lane. Default for both accounts: a 30-minute grid
+ * anchored at 00:15 inside 05:00–09:00 Taipei, i.e. the :15 and :45 slots from 05:15 through 08:45.
+ * `account1UnfollowSlot` above stays the compiled grid that historical cursors were written on.
+ */
+export function unfollowSlot(accountId: AccountId, now: Date): string | null {
+  return laneSlotFor(accountId, "unfollow", now);
 }
 
 /**

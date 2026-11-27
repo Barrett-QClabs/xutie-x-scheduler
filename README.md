@@ -8,7 +8,7 @@ Paste or upload a batch of posts, queue them on an interval, and let a local pro
 
 ## Features
 
-- Settings page for the four OAuth 1.0a user-context credentials, with a connection test (`GET /2/users/me`) that shows the connected @handle.
+- Settings page for each slot's four OAuth 1.0a user-context credentials and stored identity. A first live connection test reads `GET /2/users/me`; ordinary retests reuse an already stored identity.
 - Credentials stay on the server. They are encrypted at rest with AES-256-GCM using a key from the environment, and API responses never send them back to the browser.
 - Bulk import: one post per line, blank lines between posts, a line that is exactly `---`, or a `.txt` / `.csv` upload. One batch accepts at most 50 valid posts (`MAX_IMPORT_BATCH`). Extra valid posts are reported so you can split them; lines that fail the length check do not use a slot.
 - Length uses X's weighted count: Latin characters count as 1, CJK as 2, and each `http(s)` URL as 23. Posts over 280 are still queued, marked “Long post”, with a warning that they need X Premium. The hard limit is 25,000 (X's Premium long-post limit); anything longer is rejected. Each import takes up to 50 posts and up to 2,000,000 characters of source text.
@@ -17,6 +17,16 @@ Paste or upload a batch of posts, queue them on an interval, and let a local pro
 - Before each send, the scheduler reads the account's latest post on X, including posts made outside this app. If that post is newer than one interval, the due tweet moves to that post's time + interval + a random extra delay, and later pending tweets are pushed so each gap is again interval + random extra (posts are never moved earlier). A delay caused by a post this app did not send is labeled in the queue.
 - The same randomized spacing applies whenever the queue shifts: overdue posts after a restart, the wait after an X rate limit (resume at the reset time + random extra), and "reschedule pending posts".
 - State lives in SQLite, so a restart keeps unsent posts. HTTP 429 (rate limit) and HTTP 402 (credits or balance used up) are stored separately: 429 waits for `x-rate-limit-reset`, and 402 waits about 10 minutes. Neither marks the post failed. Duplicate content fails that one post, and later posts still go out. A 401, or a 403 about permissions, pauses the queue and shows the reason. A successful post stores the tweet id and a link to `https://x.com/{handle}/status/{id}`.
+
+## Automation and account identity
+
+On **Automation** (`/automation`), select account 1 or 2 to configure schedule and quota IANA time zones, follow and unfollow batch sizes, daily caps (unfollow can have no cap), work/rest minutes, anchor, windows, mutual exclusion, and Blue Verified, audience-language, and recent-activity filters. The UI saves only changed fields through `PUT /api/automation/settings` with `{ accountId, settings: { ...changedFields } }`; `GET/PUT/DELETE /api/automation/settings?accountId=1|2` read, partially update, or reset that account. Account 1's 15 work / 18 rest minutes, daily 350, and other compiled values are defaults; saved settings drive execution.
+
+Pick or type a valid IANA name such as `Asia/Taipei`, `Europe/London`, or `America/New_York`; offsets such as `+08:00` are rejected. The schedule zone drives slot keys, anchors, and work windows. The quota zone sets the daily-cap midnight reset. Cadence/window changes affect future unwritten slots. See [account automation](docs/account-automation.md).
+
+Account 1's **persistent self-running authorization** for `kind=new` follows is controlled in the Automation UI through `GET/POST/DELETE /api/follow/authorization`. It survives midnight, can be paused and resumed or revoked, and can have an optional `expiresAt`. It is separate from the older one-day `POST /api/follow/new-approval`. Follow-backs need no such authorization; the program never writes authorization automatically. Authorizing does not enable or resume the follow lane.
+
+On **Settings**, verify or rebind the selected slot's identity. `POST /api/credentials/test` reuses a stored identity; only an explicit fresh verification sends `reverify: true` to read `GET /2/users/me` again. If that live read is unavailable, the manual fallback uses `PUT /api/credentials/identity` with `userId`, `username`, and optional `displayName` (blank uses the username). Follows and unfollows require a confirmed identity, and the two slots cannot share a `user_id`. See the [evidence and identity contract](docs/free-evidence.md).
 
 ## Screenshots
 
@@ -168,7 +178,7 @@ The cipher is scrypt plus AES-256-GCM. The salt and IV are stored with the ciphe
 
 - Text only. No images, video, or polls.
 - Long posts (over 280, up to 25,000) need X Premium on the posting account. 序帖 does not check your subscription in advance.
-- One saved credential set, so one X account.
+- Two account slots, each with its own credentials, identity, queue, and automation settings.
 - Designed for a single process.
 - No built-in login. Do not expose it on the public internet.
 - OAuth 1.0a user context only. No OAuth 2.0 PKCE.
@@ -182,7 +192,7 @@ The cipher is scrypt plus AES-256-GCM. The salt and IV are stored with the ciphe
 These are not implemented. They are the directions that would make 序帖 usable for more than one person on one machine:
 
 - **Multi-user login.** Accounts on the app itself, so a shared install is not an open queue.
-- **Multiple X accounts.** More than one credential set, with a queue per account.
+- **More X account slots.** Expand beyond the two existing slots.
 - **Images and other media.** Attachments on a post, not only text.
 - **Threads.** A sequence posted as replies to the previous tweet in the thread.
 - **Cloud deploy.** A documented path for a hosted single-tenant install, still without leaving the port open to the world.

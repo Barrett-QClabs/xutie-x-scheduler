@@ -16,6 +16,8 @@ import {
 const SLOT = new Date("2026-11-09T00:20:00.000Z");
 const NEXT = new Date("2026-11-09T00:50:00.000Z");
 const LEDGER = "2026-11-06T00:00:00.000Z";
+/** Relative to the real clock: `assertStartAt` refuses a start more than 7 days before now. */
+const START_AT = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
 function enable(accountId: 1 | 2 = 1) {
   process.env[accountId === 1 ? "XUTIE_ACCOUNT1_UNFOLLOW" : "XUTIE_ACCOUNT2_UNFOLLOW"] = "on";
@@ -76,7 +78,7 @@ describe("account 1 daily unfollow pool", () => {
         accountId: 1,
         source: "approved chinese post",
         format: "text",
-        startAt: "2026-11-18T12:00:00.000Z",
+        startAt: START_AT,
         intervalMinutes: 15,
         randomMinSeconds: 0,
         randomMaxSeconds: 0,

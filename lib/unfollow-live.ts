@@ -1,6 +1,5 @@
 import type { AccountId } from "@/lib/account";
-import { ACCOUNT_USER_ID } from "@/lib/automation-account";
-import { getCredentialsRow } from "@/lib/db";
+import { executionUserId } from "@/lib/account-identity";
 import { apiMode } from "@/lib/deployment";
 import { readCredentials } from "@/lib/service";
 import { evidenceUnfollowProfile } from "@/lib/evidence";
@@ -49,8 +48,8 @@ const unknownProfile = (): FreshProfile => ({
 /** Live hooks only. Mock mode returns nothing, so the batch cannot call X. */
 export function liveUnfollowHooks(accountId: AccountId): UnfollowHooks | undefined {
   if (apiMode() !== "live") return undefined;
-  const sourceUserId = getCredentialsRow(accountId)?.user_id;
-  if (sourceUserId !== ACCOUNT_USER_ID[accountId]) return undefined;
+  const sourceUserId = executionUserId(accountId);
+  if (!sourceUserId) return undefined;
   return {
     inspect: async (targetUserId) => evidenceUnfollowProfile(accountId, targetUserId),
     unfollow: (targetUserId) => unfollowTarget(accountId, sourceUserId, targetUserId),

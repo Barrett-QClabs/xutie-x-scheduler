@@ -99,12 +99,14 @@ function migrate(db: DatabaseSync): void {
   ensureColumn(db, "queue_settings", "last_tick_at", "ALTER TABLE queue_settings ADD COLUMN last_tick_at TEXT");
   ensureColumn(db, "queue_settings", "last_tick_action", "ALTER TABLE queue_settings ADD COLUMN last_tick_action TEXT");
   widenAccountTables(db);
+  ensureIdentityColumns(db);
   ensureColumn(db, "tweets", "account_id", "ALTER TABLE tweets ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1");
   db.exec("CREATE INDEX IF NOT EXISTS idx_tweets_account_sched ON tweets(account_id, status, scheduled_at)");
   ensureAutomationTables(db);
   ensurePostDeleteLog(db);
   ensureFollowBlocklist(db);
   ensureFollowAllowlist(db);
+  ensureSettingsTables(db);
   const now = new Date().toISOString();
   for (const id of ACCOUNT_IDS) {
     db.prepare(
@@ -120,7 +122,12 @@ type CredentialRow = {
   username: string | null;
   display_name: string | null;
   user_id: string | null;
+  identity_source: string | null;
+  identity_verified_at: string | null;
 };
+
+/** How a slot's stored X identity was established. Rows saved before this column read as `legacy`. */
+export type IdentitySource = "verify" | "manual" | "evidence" | "legacy";
 
 type TweetRow = {
   id: string;
@@ -472,9 +479,9 @@ function ensureNewAdmissionTables(db: DatabaseSync): void {
 }
 
 /**
- * Account 1 only. Copies unfollow rows already stored as success.
+ * Copies unfollow rows already stored as success for both accounts.
  * Does not scan X, evidence, or anything dated before the baseline that was not confirmed.
- * Repeat runs insert nothing new for the same person.
+ * Repeat runs insert nothing new for the same account and person.
  */
 function ensureFollowBlocklist(db: DatabaseSync): void {
   db.exec(`
@@ -497,27 +504,102 @@ function ensureFollowBlocklist(db: DatabaseSync): void {
     `INSERT OR IGNORE INTO follow_blocklist (account_id, target_user_id, source, blocked_at)
      SELECT account_id, target_user_id, 'unfollow_confirmed', COALESCE(updated_at, created_at)
      FROM unfollow_candidates
-     WHERE account_id = 1 AND result = 'success'`,
+     WHERE account_id IN (1, 2) AND result = 'success'`,
   ).run();
 }
 
-/** Account 1 execution allowlist. Empty and enforced means nobody is followed. History tables are not changed. */
+/** Identity provenance on each slot's own credentials row. Existing verified rows are marked `legacy`. */
+function ensureIdentityColumns(db: DatabaseSync): void {
+  ensureColumn(db, "credentials", "identity_source", "ALTER TABLE credentials ADD COLUMN identity_source TEXT");
+  ensureColumn(db, "credentials", "identity_verified_at", "ALTER TABLE credentials ADD COLUMN identity_verified_at TEXT");
+  db.exec("UPDATE credentials SET identity_source = 'legacy' WHERE user_id IS NOT NULL AND identity_source IS NULL");
+}
+
+/**
+ * Per-account automation settings (absent row = compiled defaults) and the account 1 persistent
+ * new-follow run authorization. Legacy one-day `follow_new_approval` rows are left untouched.
+ */
+function ensureSettingsTables(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_settings (
+      account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
+      settings_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS follow_run_authorization (
+      account_id INTEGER PRIMARY KEY CHECK (account_id = 1),
+      status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'revoked')),
+      authorized_at TEXT,
+      expires_at TEXT,
+      note TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+/** Per-account execution allowlists. Empty and enforced means nobody is followed. History stays intact. */
 function ensureFollowAllowlist(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS follow_allowlist_control (
-      account_id INTEGER PRIMARY KEY CHECK (account_id = 1),
+      account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
       enforced INTEGER NOT NULL,
       updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS follow_execution_allowlist (
-      account_id INTEGER NOT NULL CHECK (account_id = 1),
+      account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
       target_user_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
       PRIMARY KEY (account_id, target_user_id)
     );
   `);
+  if (
+    !/IN \(1,\s*2\)/i.test(tableSql(db, "follow_allowlist_control"))
+    || !/IN \(1,\s*2\)/i.test(tableSql(db, "follow_execution_allowlist"))
+  ) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!/IN \(1,\s*2\)/i.test(tableSql(db, "follow_allowlist_control"))) {
+        db.exec(`
+          CREATE TABLE follow_allowlist_control_new (
+            account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
+            enforced INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO follow_allowlist_control_new (account_id, enforced, updated_at)
+          SELECT account_id, enforced, updated_at FROM follow_allowlist_control;
+          DROP TABLE follow_allowlist_control;
+          ALTER TABLE follow_allowlist_control_new RENAME TO follow_allowlist_control;
+        `);
+      }
+      if (!/IN \(1,\s*2\)/i.test(tableSql(db, "follow_execution_allowlist"))) {
+        db.exec(`
+          CREATE TABLE follow_execution_allowlist_new (
+            account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+            target_user_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (account_id, target_user_id)
+          );
+          INSERT INTO follow_execution_allowlist_new (account_id, target_user_id, created_at)
+          SELECT account_id, target_user_id, created_at FROM follow_execution_allowlist;
+          DROP TABLE follow_execution_allowlist;
+          ALTER TABLE follow_execution_allowlist_new RENAME TO follow_execution_allowlist;
+        `);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* The allowlist migration transaction is already closed. */
+      }
+      throw error;
+    }
+  }
   db.prepare(
     `INSERT OR IGNORE INTO follow_allowlist_control (account_id, enforced, updated_at) VALUES (1, 1, ?)`,
+  ).run(new Date().toISOString());
+  db.prepare(
+    `INSERT OR IGNORE INTO follow_allowlist_control (account_id, enforced, updated_at) VALUES (2, 0, ?)`,
   ).run(new Date().toISOString());
 }
 
@@ -546,22 +628,26 @@ function one<T>(sql: string, ...params: unknown[]): T | null {
 
 export function getCredentialsRow(accountId: AccountId = 1): CredentialRow | null {
   return one<CredentialRow>(
-    "SELECT ciphertext, username, display_name, user_id FROM credentials WHERE id = ?",
+    `SELECT ciphertext, username, display_name, user_id, identity_source, identity_verified_at
+     FROM credentials WHERE id = ?`,
     accountId,
   );
 }
 
+/** New keys always drop the old identity. It must be verified (or entered) again for this slot. */
 export function upsertCredentials(accountId: AccountId, ciphertext: string): void {
   const updatedAt = new Date().toISOString();
   getDb()
     .prepare(
-      `INSERT INTO credentials (id, ciphertext, username, display_name, user_id, updated_at)
-       VALUES (?, ?, NULL, NULL, NULL, ?)
+      `INSERT INTO credentials (id, ciphertext, username, display_name, user_id, identity_source, identity_verified_at, updated_at)
+       VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, ?)
        ON CONFLICT(id) DO UPDATE SET
          ciphertext = excluded.ciphertext,
          username = NULL,
          display_name = NULL,
          user_id = NULL,
+         identity_source = NULL,
+         identity_verified_at = NULL,
          updated_at = excluded.updated_at`,
     )
     .run(accountId, ciphertext, updatedAt);
@@ -570,14 +656,16 @@ export function upsertCredentials(accountId: AccountId, ciphertext: string): voi
 export function updateAccount(
   accountId: AccountId,
   account: { username: string; displayName: string; userId: string },
+  source: IdentitySource = "verify",
+  at: Date = new Date(),
 ): void {
   getDb()
     .prepare(
       `UPDATE credentials
-       SET username = ?, display_name = ?, user_id = ?, updated_at = ?
+       SET username = ?, display_name = ?, user_id = ?, identity_source = ?, identity_verified_at = ?, updated_at = ?
        WHERE id = ?`,
     )
-    .run(account.username, account.displayName, account.userId, new Date().toISOString(), accountId);
+    .run(account.username, account.displayName, account.userId, source, at.toISOString(), new Date().toISOString(), accountId);
 }
 
 export function deleteCredentials(accountId: AccountId): void {
@@ -960,12 +1048,18 @@ export function resetAllData(): void {
     DELETE FROM follow_new_admission;
     DELETE FROM follow_new_approval;
     DELETE FROM follow_execution_allowlist;
+    DELETE FROM follow_run_authorization;
+    DELETE FROM automation_settings;
     DELETE FROM evidence_subjects;
     DELETE FROM evidence_pages;
   `);
   db.prepare(`UPDATE unfollow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
   db.prepare(`UPDATE follow_control SET paused = 1, pause_reason = 'safe_start', updated_at = ?`).run(now);
   db.prepare(`UPDATE follow_allowlist_control SET enforced = 0, updated_at = ? WHERE account_id = 1`).run(now);
+  db.prepare(
+    `INSERT INTO follow_allowlist_control (account_id, enforced, updated_at) VALUES (2, 0, ?)
+     ON CONFLICT(account_id) DO UPDATE SET enforced = 0, updated_at = excluded.updated_at`,
+  ).run(now);
   const reset = (accountId: AccountId, paused: number, reason: string | null) => {
     db.prepare(
       `UPDATE queue_settings SET

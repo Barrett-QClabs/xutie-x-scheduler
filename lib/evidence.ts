@@ -1,5 +1,5 @@
 import type { AccountId } from "@/lib/account";
-import { ACCOUNT_USER_ID } from "@/lib/automation-account";
+import { evidenceSourceUserId, identityBlocker } from "@/lib/account-identity";
 import { getCredentialsRow, getDb } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import type { FollowProfile } from "@/lib/follow-queue";
@@ -79,9 +79,10 @@ function blueFrom(verified: unknown, verifiedType: unknown): { known: boolean; b
   return { known: true, blue, verifiedFlag: flag ? 1 : 0, verifiedType: type };
 }
 
-function namespaceFitsAccount(namespace: string, sourceUserId: string): boolean {
-  if (namespace === "user-X") return sourceUserId === ACCOUNT_USER_ID[1];
-  if (namespace === "user-X--english") return sourceUserId === ACCOUNT_USER_ID[2];
+/** The Chinese plugin namespace belongs to 账号1 and the English one to 账号2. Public reads fit either. */
+function namespaceFitsSlot(namespace: string, slot: AccountId): boolean {
+  if (namespace === "user-X") return slot === 1;
+  if (namespace === "user-X--english") return slot === 2;
   return namespace === "x" || namespace === "x-public";
 }
 
@@ -113,7 +114,8 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
     throw new AppError("invalid_evidence", "证据来源必须是 user-X、user-X--english、x 或 x-public，工具名必须原样匹配已支持的免费读取。");
   }
   const sourceUserId = text(envelope.account_id);
-  if (sourceUserId !== ACCOUNT_USER_ID[slot] || !namespaceFitsAccount(namespace, sourceUserId)) {
+  const expectedSource = evidenceSourceUserId(slot);
+  if (!sourceUserId || sourceUserId !== expectedSource || !namespaceFitsSlot(namespace, slot)) {
     throw new AppError("evidence_account_mismatch", "证据里的账号 id 或来源命名空间不属于这个槽。", 403);
   }
   const normalizedSource = namespace === "x" || namespace === "x-public" ? "public" : "user-plugin";
@@ -208,11 +210,20 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
       JSON.stringify(subject),
     );
     accepted.push(id);
-    if (tool === "get_users_me" && id === sourceUserId && text(subject.username) && (!stored || stored.user_id === sourceUserId || !stored.user_id)) {
-      db.prepare(
-        `UPDATE credentials SET username = ?, display_name = ?, user_id = ?, updated_at = ? WHERE id = ? AND (user_id IS NULL OR user_id = ?)`,
-      ).run(text(subject.username), text(subject.name) ?? text(subject.username), id, now.toISOString(), slot, id);
-      identityUpdated = true;
+    if (
+      tool === "get_users_me"
+      && id === sourceUserId
+      && text(subject.username)
+      && stored
+      && (stored.user_id === sourceUserId || !stored.user_id)
+      && !identityBlocker(slot, id)
+    ) {
+      const written = db.prepare(
+        `UPDATE credentials
+         SET username = ?, display_name = ?, user_id = ?, identity_source = 'evidence', identity_verified_at = ?, updated_at = ?
+         WHERE id = ? AND (user_id IS NULL OR user_id = ?)`,
+      ).run(text(subject.username), text(subject.name) ?? text(subject.username), id, now.toISOString(), now.toISOString(), slot, id);
+      identityUpdated = identityUpdated || written.changes > 0;
     }
   }
   insertPage.run(
@@ -250,6 +261,8 @@ export function importEvidence(slot: AccountId, envelope: Record<string, unknown
 }
 
 function latestRows(slot: AccountId, targetUserId: string, now: Date): SubjectRow[] {
+  const sourceUserId = evidenceSourceUserId(slot);
+  if (!sourceUserId) return [];
   return getDb()
     .prepare(
       `SELECT target_user_id, observed_at, expires_at, source_tool, pagination_complete, activity_window_complete, verified, verified_type, connection_explicit, connection_omission_empty, connection_status_json, followers_count, last_post_at, tweet_lang, name, bio, username, tweet_text
@@ -257,7 +270,7 @@ function latestRows(slot: AccountId, targetUserId: string, now: Date): SubjectRo
        WHERE account_id = ? AND source_user_id = ? AND target_user_id = ? AND expires_at > ?
        ORDER BY observed_at DESC`,
     )
-    .all(slot, ACCOUNT_USER_ID[slot], targetUserId, now.toISOString()) as SubjectRow[];
+    .all(slot, sourceUserId, targetUserId, now.toISOString()) as SubjectRow[];
 }
 
 function interpret(rows: SubjectRow[], now: Date): EvidenceSubjectView | null {
@@ -370,12 +383,13 @@ export function evidenceUnfollowProfile(slot: AccountId, targetUserId: string, n
 }
 
 export function evidenceCoverage(slot: AccountId, now = new Date()) {
+  const sourceUserId = evidenceSourceUserId(slot);
   const rows = getDb()
     .prepare(
       `SELECT source_tool, source_namespace, actual_source_namespace, normalized_source, observed_at, expires_at, pagination_complete, next_token, activity_window_complete, claimed_activity_window_complete, subject_count, errors_json
        FROM evidence_pages WHERE account_id = ? AND source_user_id = ? ORDER BY observed_at DESC LIMIT 20`,
     )
-    .all(slot, ACCOUNT_USER_ID[slot]) as Array<{
+    .all(slot, sourceUserId ?? "") as Array<{
     source_tool: string;
     source_namespace: string;
     actual_source_namespace: string | null;
@@ -391,7 +405,7 @@ export function evidenceCoverage(slot: AccountId, now = new Date()) {
   }>;
   return {
     accountId: slot,
-    sourceUserId: ACCOUNT_USER_ID[slot],
+    sourceUserId,
     userDeveloperGets: 0,
     supply: "external_free_evidence_only",
     supplierLimits: { perMinute: 30, perDay: 1000, enforcedHere: false },

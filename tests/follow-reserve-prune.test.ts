@@ -13,6 +13,8 @@ import { importTweets } from "@/lib/service";
 const NOW = new Date("2026-11-09T12:00:00.000Z");
 const STALE = "2026-11-09T08:00:00.000Z";
 const CREATED = "2026-11-09T07:00:00.000Z";
+/** Relative to the real clock: `assertStartAt` refuses a start more than 7 days before now. */
+const START_AT = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
 function insertReserved(accountId: 1 | 2, id: string, kind: "new" | "followback", checkedAt = STALE) {
   getDb().prepare(
@@ -66,7 +68,7 @@ describe("follow reserve prune", () => {
         accountId: 2,
         source: "approved english post",
         format: "text",
-        startAt: "2026-11-18T12:00:00.000Z",
+        startAt: START_AT,
         intervalMinutes: 15,
         randomMinSeconds: 0,
         randomMaxSeconds: 0,

@@ -31,8 +31,9 @@ import {
 import type { Credentials, ImportMode, InvalidTweet, PublicState, PublicTweet, Tweet } from "@/lib/types";
 import { inspectTweet, MAX_LONG_POST_LENGTH, MAX_WEIGHTED_LENGTH } from "@/lib/weighted-length";
 import { ACCOUNT_IDS, ACCOUNT_LABEL, parseAccountId, type AccountId } from "@/lib/account";
+import { assertIdentityAvailable } from "@/lib/account-identity";
 import { deploymentPosture } from "@/lib/deployment";
-import { createXClient, isMockMode, XApiError } from "@/lib/x-client";
+import { createXClient, isMockMode, verifyIdentityExplicitly, XApiError } from "@/lib/x-client";
 
 export function readCredentials(accountId: AccountId): Credentials | null {
   const row = getCredentialsRow(accountId);
@@ -86,12 +87,25 @@ export function clearCredentials(accountId: AccountId): { ok: true } {
   return { ok: true };
 }
 
-export async function testCredentials(accountId: AccountId, input?: Partial<Credentials>): Promise<{
+const MANUAL_IDENTITY_HINT = "读不到身份时，可以用 PUT /api/credentials/identity 手动填写这个槽的 userId 和 username。";
+
+/**
+ * Operator-triggered credential test. Live mode spends at most one GET /2/users/me, and only here:
+ * a slot that already stores an identity returns it without any read unless `reverify` is set.
+ * A verified id that belongs to the other slot is refused, so the two slots never share an identity.
+ */
+export async function testCredentials(
+  accountId: AccountId,
+  input?: Partial<Credentials>,
+  options: { reverify?: boolean } = {},
+): Promise<{
   ok: true;
   username: string;
   displayName: string;
   userId: string;
   saved: boolean;
+  liveRead: boolean;
+  identitySource: string | null;
 }> {
   const provided = [input?.apiKey, input?.apiSecret, input?.accessToken, input?.accessTokenSecret].map(cleanCredential);
   const usingStored = provided.every((value) => value.length === 0);
@@ -99,27 +113,26 @@ export async function testCredentials(accountId: AccountId, input?: Partial<Cred
   if (!credentials) {
     throw new AppError("credentials_missing", "还没有保存凭据。");
   }
-  if (!isMockMode()) {
+  const live = !isMockMode();
+  if (live && usingStored && options.reverify !== true) {
     const stored = getCredentialsRow(accountId);
-    if (usingStored && stored?.user_id && stored.username) {
+    if (stored?.user_id && stored.username) {
       return {
         ok: true,
         username: stored.username,
         displayName: stored.display_name || stored.username,
         userId: stored.user_id,
         saved: false,
+        liveRead: false,
+        identitySource: stored.identity_source ?? "legacy",
       };
     }
-    throw new AppError(
-      "identity_reconfirm_blocked",
-      "不能用用户自己的 X 读额度重新确认身份。请由免费供给写入身份证据；本次不会改已保存的身份。",
-      409,
-    );
   }
   try {
-    const user = await createXClient(credentials).verify();
+    const user = live ? await verifyIdentityExplicitly(credentials) : await createXClient(credentials).verify();
     if (usingStored) {
-      updateAccount(accountId, { username: user.username, displayName: user.name, userId: user.id });
+      assertIdentityAvailable(accountId, user.id);
+      updateAccount(accountId, { username: user.username, displayName: user.name, userId: user.id }, "verify");
     }
     return {
       ok: true,
@@ -127,14 +140,17 @@ export async function testCredentials(accountId: AccountId, input?: Partial<Cred
       displayName: user.name,
       userId: user.id,
       saved: usingStored,
+      liveRead: live,
+      identitySource: usingStored ? "verify" : null,
     };
   } catch (error) {
     if (error instanceof XApiError) {
       const prefix = error.kind === "auth" ? "凭据被 X 拒绝。" : "X 接口返回错误。";
-      throw new AppError(error.kind === "auth" ? "x_auth" : "x_error", `${prefix}${error.message}`, 400);
+      const hint = live && error.kind !== "auth" ? MANUAL_IDENTITY_HINT : "";
+      throw new AppError(error.kind === "auth" ? "x_auth" : "x_error", `${prefix}${error.message}${hint}`, 400);
     }
     if (error instanceof AppError) throw error;
-    throw new AppError("x_network", "连不上 X 的服务器。请检查这台机器的网络。", 502);
+    throw new AppError("x_network", `连不上 X 的服务器。请检查这台机器的网络。${MANUAL_IDENTITY_HINT}`, 502);
   }
 }
 

@@ -72,6 +72,13 @@ export function setMockLatestTweet(tweet: XTimelineTweet | null): void {
   mockLatest = tweet;
 }
 
+/** Stable per-key mock user id, so two slots with different mock keys never verify as one identity. */
+function mockUserId(apiKey: string): string {
+  let hash = 0;
+  for (const char of apiKey) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return String(100_000_001 + (hash % 800_000_000));
+}
+
 export function createMockXClient(credentials: Credentials): XClient {
   return {
     async latestTweet() {
@@ -87,7 +94,7 @@ export function createMockXClient(credentials: Credentials): XClient {
       }
       const slug = credentials.apiKey.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8);
       return {
-        id: "100000001",
+        id: mockUserId(credentials.apiKey),
         username: slug ? `mock_${slug}` : "mock_user",
         name: "模拟账号",
       };
@@ -130,9 +137,23 @@ export function createMockXClient(credentials: Credentials): XClient {
   };
 }
 
-async function verifyCredentials(credentials: Credentials): Promise<XUser> {
+/** The one read path that can be unlocked, and only by `verifyIdentityExplicitly`. */
+const USERS_ME_PATH = "/2/users/me";
+const IDENTITY_READ_GRANT = Symbol("explicit-identity-read");
+
+/**
+ * Operator-triggered credential check (POST /api/credentials/test). Spends exactly one
+ * GET /2/users/me with the given keys. Every other live GET, including `XClient.verify()` from
+ * background paths, `xGet`, and timeline reads, stays refused before any socket is opened.
+ */
+export async function verifyIdentityExplicitly(credentials: Credentials): Promise<XUser> {
+  assertLiveNetwork();
+  return verifyCredentials(credentials, IDENTITY_READ_GRANT);
+}
+
+async function verifyCredentials(credentials: Credentials, grant?: typeof IDENTITY_READ_GRANT): Promise<XUser> {
   const query = { "user.fields": "id,name,username" };
-  const payload = await xRequest(credentials, "GET", "/2/users/me", query);
+  const payload = await xRequest(credentials, "GET", USERS_ME_PATH, query, undefined, X_REQUEST_TIMEOUT_MS, grant);
   const data = payload.data;
   if (!data || typeof data !== "object") {
     throw new XApiError("X 没有返回账号信息。", "rejected", 200);
@@ -523,8 +544,9 @@ async function xRequest(
   query?: Record<string, string>,
   body?: unknown,
   timeoutMs: number = X_REQUEST_TIMEOUT_MS,
+  grant?: typeof IDENTITY_READ_GRANT,
 ): Promise<{ data?: unknown }> {
-  if (method === "GET") {
+  if (method === "GET" && !(grant === IDENTITY_READ_GRANT && path === USERS_ME_PATH)) {
     throw new XApiError("用户 X 的读额度已关闭。关注、取关和发帖只允许写入。", "rejected", 0);
   }
   const url = `${API_BASE}${path}`;

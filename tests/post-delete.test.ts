@@ -11,6 +11,8 @@ import { XApiError } from "@/lib/x-client";
 
 const secret = "account-1-secret";
 const token = "account-1-token";
+/** Relative to the real clock: `assertStartAt` refuses a start more than 7 days before now. */
+const START_AT = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
 function creds(account: AccountId) {
   return {
@@ -293,7 +295,7 @@ describe("post delete batch", () => {
       accountId: 1,
       source: "队列里的草稿",
       format: "text",
-      startAt: "2026-11-18T12:00:00.000Z",
+      startAt: START_AT,
       intervalMinutes: 15,
       randomMinSeconds: 0,
       randomMaxSeconds: 0,
@@ -371,7 +373,7 @@ describe("post delete routes", () => {
         accountId: 2,
         source: "账号2的队列",
         format: "text",
-        startAt: "2026-11-18T12:00:00.000Z",
+        startAt: START_AT,
         intervalMinutes: 15,
         randomMinSeconds: 0,
         randomMaxSeconds: 0,

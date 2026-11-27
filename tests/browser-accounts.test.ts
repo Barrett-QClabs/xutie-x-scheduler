@@ -67,7 +67,9 @@ describe.skipIf(!chrome)("settings account switch in the browser", () => {
     page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     page.on("request", (request) => {
-      if (!request.url().includes("/api/credentials")) return;
+      // Writes only. The settings page also reads the visible slot's identity with
+      // GET /api/credentials/identity, which writes nothing and is not part of these assertions.
+      if (!request.url().includes("/api/credentials") || request.method() === "GET") return;
       const raw = request.postData() ?? "";
       let accountId: unknown;
       try {
@@ -147,8 +149,10 @@ describe.skipIf(!chrome)("settings account switch in the browser", () => {
 
     await page.click('[data-testid="nav-slot-2"]');
     await page.waitForFunction(() => document.body.innerText.includes("伦敦每日关注加回关上限 380"));
-    expect(await page.evaluate(() => document.body.innerText.includes("账号2没有已筛名单开关"))).toBe(true);
-    expect(await page.evaluate(() => document.body.innerText.includes("已筛名单直接关注"))).toBe(false);
+    expect(await page.evaluate(() => document.body.innerText.includes("已筛名单直接关注"))).toBe(true);
+    expect(await page.evaluate(() => document.body.innerText.includes("关闭：账号2仍按原资格筛选"))).toBe(true);
+    expect(await page.evaluate(() => document.body.innerText.includes("账号2没有已筛名单开关"))).toBe(false);
+    expect(await page.evaluate(() => document.body.innerText.includes("关闭：账号1仍按原资格筛选"))).toBe(false);
     expect(await page.evaluate(() => document.body.innerText.includes("台北日历日关注加回关上限"))).toBe(false);
 
     await page.evaluate(() => {

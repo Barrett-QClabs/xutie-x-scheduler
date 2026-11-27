@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PUT as saveConfig, GET as readConfig } from "@/app/api/follow/config/route";
 import { getDb, updateAccount } from "@/lib/db";
 import { UNFOLLOW_WHITELIST } from "@/lib/automation-account";
-import { account1FollowbackDeadline, account1NewFollowDeadline } from "@/lib/follow-cadence";
+import { account1FollowbackDeadline, account1NewFollowDeadline, followSlot } from "@/lib/follow-cadence";
 import { admitAccount1NewFollows, approveAccount1NewFollow } from "@/lib/follow-new-admission";
 import { getFollowStatus, stockFollowReserve, submitFollowBatch, type FollowProfile } from "@/lib/follow-queue";
 import { importEvidence } from "@/lib/evidence";
@@ -52,10 +52,12 @@ afterEach(() => {
 });
 
 describe("account ops", () => {
-  it("persists account 1 defaults and rejects account 2 or an illegal batch", async () => {
+  it("persists account 1 defaults, saves real work/rest minutes, and rejects account 2 or out-of-range values", async () => {
     const first = await (await readConfig(new Request("http://local/api/follow/config?accountId=1"))).json();
     expect(first.ops.dailyPool).toBe(true);
-    expect(first.ops.slotClock).toBe("compiled");
+    expect(first.ops.slotClock).toBe("settings");
+    expect(first.ops.timezone).toBe("Asia/Taipei");
+    expect(first.ops.followback).toMatchObject({ batchSize: 13, workMinutes: 15, restMinutes: 18, windowStartMinute: 540, windowEndMinute: 300 });
     expect(first.ops.unfollow.dailyCap).toBe(80);
     const second = await (await readConfig(new Request("http://local/api/follow/config?accountId=2"))).json();
     expect(second.ops).toEqual({ dailyPool: false, locked: true });
@@ -74,21 +76,41 @@ describe("account ops", () => {
       body: JSON.stringify({ accountId: 1, ops: opsBody({ followback: { batchSize: 0, workMinutes: 15, restMinutes: 18 } }) }),
     }));
     expect(bad.status).toBe(400);
+    const day = "2026-11-15";
+    expect(followSlot(1, taipei(9, 12, day))).toBe(`taipei:${day}T09:00`);
     const clock = await saveConfig(new Request("http://local/api/follow/config", {
       method: "PUT",
       body: JSON.stringify({ accountId: 1, ops: opsBody({ followback: { batchSize: 13, workMinutes: 10, restMinutes: 18 } }) }),
     }));
-    expect(clock.status).toBe(400);
+    expect(clock.status).toBe(200);
+    const clockBody = await clock.json();
+    expect(clockBody.ops.slotClock).toBe("settings");
+    expect(clockBody.ops.followback).toMatchObject({ workMinutes: 10, restMinutes: 18 });
+    expect(followSlot(1, taipei(9, 12, day))).toBeNull();
+    expect(followSlot(1, taipei(9, 28, day))).toBe(`taipei:${day}T09:28`);
     const overCap = await saveConfig(new Request("http://local/api/follow/config", {
+      method: "PUT",
+      body: JSON.stringify({ accountId: 1, ops: opsBody({ unfollow: { batchSize: 10, dailyCap: 401 } }) }),
+    }));
+    expect(overCap.status).toBe(400);
+    const overBatch = await saveConfig(new Request("http://local/api/follow/config", {
+      method: "PUT",
+      body: JSON.stringify({ accountId: 1, ops: opsBody({ unfollow: { batchSize: 51, dailyCap: 80 } }) }),
+    }));
+    expect(overBatch.status).toBe(400);
+    const badRest = await saveConfig(new Request("http://local/api/follow/config", {
+      method: "PUT",
+      body: JSON.stringify({ accountId: 1, ops: opsBody({ followback: { batchSize: 13, workMinutes: 15, restMinutes: -1 } }) }),
+    }));
+    expect(badRest.status).toBe(400);
+    expect((await badRest.json()).code).toBe("invalid_settings");
+    const raised = await saveConfig(new Request("http://local/api/follow/config", {
       method: "PUT",
       body: JSON.stringify({ accountId: 1, ops: opsBody({ unfollow: { batchSize: 10, dailyCap: 81 } }) }),
     }));
-    expect(overCap.status).toBe(400);
-    const oldCap = await saveConfig(new Request("http://local/api/follow/config", {
-      method: "PUT",
-      body: JSON.stringify({ accountId: 1, ops: opsBody({ unfollow: { batchSize: 10, dailyCap: 380 } }) }),
-    }));
-    expect(oldCap.status).toBe(400);
+    expect(raised.status).toBe(200);
+    expect((await raised.json()).ops.unfollow.dailyCap).toBe(81);
+    expect(followSlot(1, taipei(9, 12, day))).toBe(`taipei:${day}T09:00`);
     const ok = await saveConfig(new Request("http://local/api/follow/config", {
       method: "PUT",
       body: JSON.stringify({ accountId: 1, ops: opsBody({ dailyPool: false, unfollow: { batchSize: 10, dailyCap: 40 } }) }),
