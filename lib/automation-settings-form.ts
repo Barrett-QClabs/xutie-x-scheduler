@@ -24,6 +24,8 @@ export type LaneDraft = {
   dailyCap: string;
   /** Unfollow only: no daily cap, saved as `dailyCap: null`. Always false for follow. */
   noCap: boolean;
+  /** Unfollow only: skip evidence checks. Always false for follow. */
+  directPool: boolean;
   workMinutes: string;
   restMinutes: string;
   /** `HH:MM`, or a whole number of minutes after midnight. */
@@ -43,6 +45,7 @@ export type SettingsDraft = {
 export type LanePatch = {
   batchSize?: number;
   dailyCap?: number | null;
+  directPool?: boolean;
   workMinutes?: number;
   restMinutes?: number;
   anchorMinute?: number;
@@ -106,11 +109,12 @@ export function parseClockMinute(text: string, endOfDay: boolean): number | null
   return hour * 60 + minute;
 }
 
-function laneDraft(lane: { batchSize: number; dailyCap: number | null; workMinutes: number; restMinutes: number; anchorMinute: number; windows: TimeWindow[] }): LaneDraft {
+function laneDraft(lane: { batchSize: number; dailyCap: number | null; workMinutes: number; restMinutes: number; anchorMinute: number; windows: TimeWindow[] }, directPool = false): LaneDraft {
   return {
     batchSize: String(lane.batchSize),
     dailyCap: lane.dailyCap === null ? "" : String(lane.dailyCap),
     noCap: lane.dailyCap === null,
+    directPool,
     workMinutes: String(lane.workMinutes),
     restMinutes: String(lane.restMinutes),
     anchorMinute: minuteToClock(lane.anchorMinute),
@@ -125,7 +129,7 @@ export function draftFromSettings(settings: AutomationSettings): SettingsDraft {
     quotaTimezone: settings.quotaTimezone,
     mutualExclusion: settings.mutualExclusion,
     follow: laneDraft(settings.follow),
-    unfollow: laneDraft(settings.unfollow),
+    unfollow: laneDraft(settings.unfollow, settings.unfollow.directPool),
     filters: { ...settings.filters },
   };
 }
@@ -150,6 +154,7 @@ function integerIn(text: string, limit: { min: number; max: number }): number | 
 type ParsedLane = {
   batchSize?: number;
   dailyCap?: number | null;
+  directPool?: boolean;
   workMinutes?: number;
   restMinutes?: number;
   anchorMinute?: number;
@@ -167,6 +172,7 @@ function rangeIssue(field: string, zh: string, en: string, limit: { min: number;
 function parseLane(lane: SettingsLane, draft: LaneDraft, issues: FormIssue[]): ParsedLane {
   const name = LANE_NAME[lane];
   const parsed: ParsedLane = {};
+  if (lane === "unfollow") parsed.directPool = draft.directPool;
 
   const batch = integerIn(draft.batchSize, SETTINGS_LIMITS.batchSize);
   if (batch === null) issues.push(rangeIssue(`${lane}.batchSize`, `${name.zh}每轮人数`, `${name.en} batch size`, SETTINGS_LIMITS.batchSize));
@@ -275,7 +281,7 @@ function sameWindows(a: TimeWindow[], b: TimeWindow[]): boolean {
 
 function diffLane(
   lane: SettingsLane,
-  base: { batchSize: number; dailyCap: number | null; workMinutes: number; restMinutes: number; anchorMinute: number; windows: TimeWindow[] },
+  base: { batchSize: number; dailyCap: number | null; directPool?: boolean; workMinutes: number; restMinutes: number; anchorMinute: number; windows: TimeWindow[] },
   parsed: ParsedLane,
   changes: SettingsChange[],
 ): LanePatch | null {
@@ -286,6 +292,10 @@ function diffLane(
     if (key === "dailyCap") out.dailyCap = value;
     else out[key] = value as number;
     changes.push({ field: `${lane}.${key}`, from: base[key], to: value });
+  }
+  if (lane === "unfollow" && parsed.directPool !== undefined && parsed.directPool !== base.directPool) {
+    out.directPool = parsed.directPool;
+    changes.push({ field: "unfollow.directPool", from: base.directPool, to: parsed.directPool });
   }
   if (parsed.windows && !sameWindows(parsed.windows, base.windows)) {
     out.windows = parsed.windows.map((range) => ({ ...range }));
@@ -401,6 +411,7 @@ const FIELD_LABELS: Record<string, { zh: string; en: string }> = {
   settings: { zh: "设置", en: "Settings" },
   batchSize: { zh: "每轮人数", en: "batch size" },
   dailyCap: { zh: "日上限", en: "daily cap" },
+  directPool: { zh: "入池直接取关", en: "direct pool unfollow" },
   workMinutes: { zh: "工作分钟", en: "work minutes" },
   restMinutes: { zh: "休息分钟", en: "rest minutes" },
   anchorMinute: { zh: "锚点", en: "anchor" },

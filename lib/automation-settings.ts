@@ -29,7 +29,7 @@ export type LaneCadence = {
 export type FollowLaneSettings = LaneCadence & { dailyCap: number };
 
 /** `dailyCap: null` means the lane has no daily unfollow cap. */
-export type UnfollowLaneSettings = LaneCadence & { dailyCap: number | null };
+export type UnfollowLaneSettings = LaneCadence & { dailyCap: number | null; directPool: boolean };
 
 export type FollowFilters = {
   /** Require Blue Verified before any follow. */
@@ -62,7 +62,7 @@ function defaults(accountId: AccountId): AutomationSettings {
       quotaTimezone: "Asia/Taipei",
       mutualExclusion: true,
       follow: { batchSize: 13, dailyCap: 350, workMinutes: 15, restMinutes: 18, anchorMinute: 540, windows: [{ start: 540, end: 300 }] },
-      unfollow: { batchSize: 10, dailyCap: 80, workMinutes: 30, restMinutes: 0, anchorMinute: 15, windows: [{ start: 300, end: 540 }] },
+      unfollow: { batchSize: 10, dailyCap: 80, directPool: false, workMinutes: 30, restMinutes: 0, anchorMinute: 15, windows: [{ start: 300, end: 540 }] },
       filters: { blueVerified: true, language: true, activity: false },
     };
   }
@@ -71,7 +71,7 @@ function defaults(accountId: AccountId): AutomationSettings {
     quotaTimezone: "Europe/London",
     mutualExclusion: false,
     follow: { batchSize: 10, dailyCap: 380, workMinutes: 15, restMinutes: 15, anchorMinute: 0, windows: [{ start: 0, end: DAY_MINUTES }] },
-    unfollow: { batchSize: 10, dailyCap: null, workMinutes: 30, restMinutes: 0, anchorMinute: 15, windows: [{ start: 300, end: 540 }] },
+    unfollow: { batchSize: 10, dailyCap: null, directPool: false, workMinutes: 30, restMinutes: 0, anchorMinute: 15, windows: [{ start: 300, end: 540 }] },
     filters: { blueVerified: true, language: true, activity: false },
   };
 }
@@ -83,7 +83,7 @@ export function defaultAutomationSettings(accountId: AccountId): AutomationSetti
 type Issue = { field: string; message: string };
 
 const TOP_KEYS = new Set(["timezone", "scheduleTimezone", "quotaTimezone", "mutualExclusion", "follow", "unfollow", "filters"]);
-const LANE_KEYS = new Set(["batchSize", "dailyCap", "workMinutes", "restMinutes", "anchorMinute", "windows"]);
+const LANE_KEYS = new Set(["batchSize", "dailyCap", "directPool", "workMinutes", "restMinutes", "anchorMinute", "windows"]);
 const FILTER_KEYS = new Set(["blueVerified", "language", "activity"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -130,12 +130,12 @@ function cloneSettings(settings: AutomationSettings): AutomationSettings {
   };
 }
 
-function patchLane(
+function patchLane<T extends LaneCadence & { dailyCap: number | null; directPool?: boolean }>(
   lane: AutomationLane,
-  base: LaneCadence & { dailyCap: number | null },
+  base: T,
   input: unknown,
   issues: Issue[],
-): LaneCadence & { dailyCap: number | null } {
+): T {
   const next = cloneLane(base);
   if (input === undefined) return next;
   if (!isRecord(input)) {
@@ -143,7 +143,11 @@ function patchLane(
     return next;
   }
   for (const key of Object.keys(input)) {
-    if (!LANE_KEYS.has(key)) issues.push({ field: `${lane}.${key}`, message: "不是可保存的字段。" });
+    if (!LANE_KEYS.has(key) || (lane === "follow" && key === "directPool")) issues.push({ field: `${lane}.${key}`, message: "不是可保存的字段。" });
+  }
+  if (lane === "unfollow" && "directPool" in input) {
+    if (typeof input.directPool !== "boolean") issues.push({ field: "unfollow.directPool", message: "必须是布尔值。" });
+    else next.directPool = input.directPool;
   }
   if ("batchSize" in input) {
     const value = intIn(input.batchSize, SETTINGS_LIMITS.batchSize.min, SETTINGS_LIMITS.batchSize.max);

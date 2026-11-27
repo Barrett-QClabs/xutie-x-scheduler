@@ -115,6 +115,7 @@ describe("persisted automation settings", () => {
     expect(one.settings.unfollow).toMatchObject({
       batchSize: UNFOLLOW_BATCH_LIMIT,
       dailyCap: ACCOUNT1_UNFOLLOW_CAP,
+      directPool: false,
       windows: [{ start: ACCOUNT1_UNFOLLOW_START_MINUTES, end: ACCOUNT1_UNFOLLOW_END_MINUTES }],
     });
     expect(two.settings).toMatchObject({ scheduleTimezone: "Asia/Taipei", quotaTimezone: "Europe/London", mutualExclusion: false });
@@ -126,7 +127,7 @@ describe("persisted automation settings", () => {
       anchorMinute: 0,
       windows: [{ start: 0, end: 1440 }],
     });
-    expect(two.settings.unfollow).toMatchObject({ batchSize: UNFOLLOW_BATCH_LIMIT, dailyCap: null });
+    expect(two.settings.unfollow).toMatchObject({ batchSize: UNFOLLOW_BATCH_LIMIT, dailyCap: null, directPool: false });
     expect(two.settings.filters).toEqual({ blueVerified: true, language: true, activity: false });
     expect(one.limits.batchSize).toEqual({ min: 1, max: 50 });
 
@@ -140,6 +141,52 @@ describe("persisted automation settings", () => {
     }
     expect(followCapDay(1, new Date("2026-11-10T16:00:00.000Z"))).toBe("2026-11-11");
     expect(followCapDay(2, new Date("2026-11-10T16:00:00.000Z"))).toBe("2026-11-10");
+  });
+
+  it.each([1, 2] as const)("loads saved account %s JSON without directPool as false without reporting an issue", async (accountId) => {
+    const legacy = JSON.parse(JSON.stringify(defaultAutomationSettings(accountId)));
+    delete legacy.unfollow.directPool;
+    getDb().prepare(
+      "INSERT INTO automation_settings (account_id, settings_json, updated_at) VALUES (?, ?, ?)",
+    ).run(accountId, JSON.stringify(legacy), taipei(5, 0).toISOString());
+    reopenDatabase();
+    expect(readAutomationSettings(accountId).unfollow.directPool).toBe(false);
+    const view = await get(accountId);
+    expect(view.settings.unfollow.directPool).toBe(false);
+    expect(view.invalidStoredFields).toEqual([]);
+  });
+
+  it.each(["true", "false", 1, 0, null, "yes", [], {}])("rejects non-boolean unfollow.directPool %j without saving any fields", async (directPool) => {
+    const response = await put(1, { unfollow: { directPool, batchSize: 3 } });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "invalid_settings", message: expect.stringContaining("unfollow.directPool 必须是布尔值。") });
+    expect(getDb().prepare("SELECT COUNT(*) AS n FROM automation_settings").get()).toEqual({ n: 0 });
+    expect(readAutomationSettings(1).unfollow).toMatchObject({ directPool: false, batchSize: 10 });
+  });
+
+  it("rejects follow.directPool and unknown unfollow fields without saving", async () => {
+    for (const settings of [{ follow: { directPool: true } }, { unfollow: { directPool: true, unknown: true } }]) {
+      const response = await put(1, settings);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ code: "invalid_settings", message: expect.stringContaining("不是可保存的字段。") });
+    }
+    expect(getDb().prepare("SELECT COUNT(*) AS n FROM automation_settings").get()).toEqual({ n: 0 });
+  });
+
+  it("persists directPool independently for both accounts and resets only the selected account", async () => {
+    const saved = await put(1, { unfollow: { directPool: true } });
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).settings.unfollow.directPool).toBe(true);
+    reopenDatabase();
+    expect((await get(1)).settings.unfollow.directPool).toBe(true);
+    expect((await get(2)).settings.unfollow.directPool).toBe(false);
+    expect((await put(2, { unfollow: { directPool: true } })).status).toBe(200);
+    reopenDatabase();
+    expect((await get(2)).settings.unfollow.directPool).toBe(true);
+    const reset = await resetSettings(new Request("http://local/api/automation/settings?accountId=1", { method: "DELETE" }));
+    expect(reset.status).toBe(200);
+    expect((await reset.json()).settings.unfollow.directPool).toBe(false);
+    expect((await get(2)).settings.unfollow.directPool).toBe(true);
   });
 
   it("saves through the API, survives a reopened database, and drives slots, batch, cap, and window", async () => {

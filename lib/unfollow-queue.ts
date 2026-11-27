@@ -450,9 +450,10 @@ function selectable(accountId: AccountId, row: CandidateRow): boolean {
 }
 
 function selectBatch(accountId: AccountId, now?: Date, evidenceBacked = false, limit = UNFOLLOW_BATCH_LIMIT): CandidateRow[] {
+  const directPool = currentSettings(accountId).unfollow.directPool;
   return candidateRows(accountId)
     .filter((row) => selectable(accountId, row))
-    .filter((row) => !evidenceBacked || !now || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh")
+    .filter((row) => directPool || !evidenceBacked || !now || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh")
     .sort((left, right) => {
       const rank = TIER_RANK[normalizeTier(left.tier) ?? "inactive_48h"] - TIER_RANK[normalizeTier(right.tier) ?? "inactive_48h"];
       return rank || left.target_user_id.localeCompare(right.target_user_id);
@@ -476,6 +477,7 @@ function unfollowedOnQuotaDay(accountId: AccountId, now: Date): number {
 }
 
 function noteStaleEvidence(accountId: AccountId, now: Date) {
+  if (currentSettings(accountId).unfollow.directPool) return;
   const stamp = now.toISOString();
   const update = getDb().prepare(
     `UPDATE unfollow_candidates SET result = 'skipped', reason = ?, updated_at = ?
@@ -494,8 +496,9 @@ function noteStaleEvidence(accountId: AccountId, now: Date) {
 }
 
 export function executableUnfollowCount(accountId: AccountId, now = new Date()): number {
+  const directPool = currentSettings(accountId).unfollow.directPool;
   return candidateRows(accountId).filter(
-    (row) => selectable(accountId, row) && unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh",
+    (row) => selectable(accountId, row) && (directPool || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh"),
   ).length;
 }
 
@@ -635,20 +638,29 @@ export async function submitUnfollowBatch(input: {
       ).run(slot, new Date().toISOString(), accountId, row.target_user_id);
       let outcome: { result: UnfollowOutcome; reason: string };
       try {
-        const fresh = await hooks.inspect(row.target_user_id);
-        const decision = classifyAction({
-          accountId,
-          followedAt: row.followed_at,
-          followingRank: row.following_rank,
-          fresh,
-          now,
-          whitelisted: unfollowWhitelist(accountId).has(row.target_user_id),
-        });
-        if (!decision.proceed) outcome = { result: decision.result, reason: decision.reason };
-        else {
-          await hooks.unfollow(row.target_user_id);
-          outcome = { result: "success", reason: decision.reason };
-          if (accountId === 1) recordAccount1UnfollowBlock(row.target_user_id, now);
+        if (currentSettings(accountId).unfollow.directPool) {
+          if (unfollowWhitelist(accountId).has(row.target_user_id)) outcome = { result: "skipped", reason: "whitelisted" };
+          else {
+            await hooks.unfollow(row.target_user_id);
+            outcome = { result: "success", reason: "direct_pool" };
+            if (accountId === 1) recordAccount1UnfollowBlock(row.target_user_id, now);
+          }
+        } else {
+          const fresh = await hooks.inspect(row.target_user_id);
+          const decision = classifyAction({
+            accountId,
+            followedAt: row.followed_at,
+            followingRank: row.following_rank,
+            fresh,
+            now,
+            whitelisted: unfollowWhitelist(accountId).has(row.target_user_id),
+          });
+          if (!decision.proceed) outcome = { result: decision.result, reason: decision.reason };
+          else {
+            await hooks.unfollow(row.target_user_id);
+            outcome = { result: "success", reason: decision.reason };
+            if (accountId === 1) recordAccount1UnfollowBlock(row.target_user_id, now);
+          }
         }
       } catch (error) {
         const risk = pauseOnRisk ? riskStop(error) : "";

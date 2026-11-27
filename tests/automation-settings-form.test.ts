@@ -33,7 +33,7 @@ function settings(): AutomationSettings {
     quotaTimezone: "Asia/Taipei",
     mutualExclusion: true,
     follow: { batchSize: 13, dailyCap: 350, workMinutes: 15, restMinutes: 18, anchorMinute: 540, windows: [{ start: 540, end: 300 }] },
-    unfollow: { batchSize: 10, dailyCap: 80, workMinutes: 30, restMinutes: 0, anchorMinute: 15, windows: [{ start: 300, end: 540 }] },
+    unfollow: { batchSize: 10, dailyCap: 80, directPool: false, workMinutes: 30, restMinutes: 0, anchorMinute: 15, windows: [{ start: 300, end: 540 }] },
     filters: { blueVerified: true, language: true, activity: false },
   };
 }
@@ -72,8 +72,8 @@ describe("settings drafts and window overlap", () => {
     const draft = draftFromSettings(base);
     expect(draft).toEqual({
       scheduleTimezone: "Asia/Taipei", quotaTimezone: "Asia/Taipei", mutualExclusion: true,
-      follow: { batchSize: "13", dailyCap: "350", noCap: false, workMinutes: "15", restMinutes: "18", anchorMinute: "09:00", windows: [{ start: "09:00", end: "05:00" }] },
-      unfollow: { batchSize: "10", dailyCap: "", noCap: true, workMinutes: "30", restMinutes: "0", anchorMinute: "00:15", windows: [{ start: "05:00", end: "09:00" }] },
+      follow: { batchSize: "13", dailyCap: "350", noCap: false, directPool: false, workMinutes: "15", restMinutes: "18", anchorMinute: "09:00", windows: [{ start: "09:00", end: "05:00" }] },
+      unfollow: { batchSize: "10", dailyCap: "", noCap: true, directPool: false, workMinutes: "30", restMinutes: "0", anchorMinute: "00:15", windows: [{ start: "05:00", end: "09:00" }] },
       filters: { blueVerified: true, language: true, activity: false },
     });
     expect(draftMatches(draft, base)).toBe(true);
@@ -113,6 +113,25 @@ describe("settings drafts and window overlap", () => {
 });
 
 describe("partial settings patches", () => {
+  it.each([false, true])("changes only unfollow.directPool from %s and never sends it for follow", (directPool) => {
+    const base = settings();
+    base.unfollow.directPool = directPool;
+    base.unfollow.workMinutes = 11;
+    base.unfollow.restMinutes = 49;
+    const draft = draftFromSettings(base);
+    expect(draft.unfollow.directPool).toBe(directPool);
+    expect(draft.follow.directPool).toBe(false);
+    draft.unfollow.directPool = !directPool;
+    draft.follow.directPool = true;
+    expect(draftMatches(draft, base)).toBe(false);
+    expect(buildSettingsPatch(base, draft)).toEqual({
+      patch: { unfollow: { directPool: !directPool } },
+      changes: [{ field: "unfollow.directPool", from: directPool, to: !directPool }],
+      issues: [],
+    });
+    expect(base.unfollow.directPool).toBe(directPool);
+  });
+
   it("sends nothing when an ordinary saved draft is unchanged", () => {
     const base = settings();
     expect(buildSettingsPatch(base, draftFromSettings(base))).toEqual({ patch: {}, changes: [], issues: [] });
@@ -366,6 +385,7 @@ describe("bilingual settings descriptions", () => {
     ["", "设置", "Settings"], ["scheduleTimezone", "排程时区", "Schedule time zone"],
     ["quotaTimezone", "日上限时区", "Quota time zone"], ["mutualExclusion", "关注与取关互斥", "Mutual exclusion"],
     ["follow.workMinutes", "关注·工作分钟", "Follow·work minutes"],
+    ["unfollow.directPool", "取关·入池直接取关", "Unfollow·direct pool unfollow"],
     ["unfollow.windows[1]", "取关·时间窗 2", "Unfollow·windows 2"],
     ["filters.activity", "过滤·近期活跃", "Filter·recent activity"],
     ["unknown", "unknown", "unknown"], ["custom.field", "custom·field", "custom·field"],

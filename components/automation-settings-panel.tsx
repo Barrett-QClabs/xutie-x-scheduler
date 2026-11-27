@@ -59,6 +59,8 @@ const ZH = {
   batchUnfollow: "每批人数",
   dailyCap: "日上限",
   noCap: "不设日上限",
+  directPool: "入池直接取关（跳过 25 小时证据校验）",
+  directPoolHelp: "默认关闭。开启后，已进入取关候选池的账号直接按批次取关；仍保留永不取关白名单、429/403 即停、时间窗与上限护栏。",
   workMinutes: "工作分钟",
   restMinutes: "休息分钟",
   anchor: "锚点",
@@ -127,6 +129,8 @@ const EN: PanelText = {
   batchUnfollow: "Per batch",
   dailyCap: "Daily cap",
   noCap: "No daily cap",
+  directPool: "Direct pool unfollow (skip 25-hour evidence check)",
+  directPoolHelp: "Off by default. Unfollow candidates directly in batches; the never-unfollow whitelist, 429/403 stops, time windows, and caps still apply.",
   workMinutes: "Work minutes",
   restMinutes: "Rest minutes",
   anchor: "Anchor",
@@ -700,6 +704,24 @@ function LaneSection(props: {
           onChange={(value) => set({ anchorMinute: value })}
         />
       </div>
+      {lane === "unfollow" ? (
+        <div className="space-y-1.5">
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={draft.directPool}
+              data-testid="settings-unfollow-direct-pool"
+              aria-describedby={id("direct-pool-help")}
+              onChange={(event) => set({ directPool: event.target.checked })}
+            />
+            {text.directPool}
+          </label>
+          <p id={id("direct-pool-help")} className="text-xs leading-5 text-muted-foreground">{text.directPoolHelp}</p>
+          {props.issues("unfollow.directPool").map((issue) => (
+            <p key={issue} className="text-xs leading-5 text-destructive">{issue}</p>
+          ))}
+        </div>
+      ) : null}
       <div className="space-y-2">
         <p className="text-sm font-medium">{text.windows}</p>
         {draft.windows.map((range, index) => (
