@@ -55,17 +55,17 @@ X_API_MODE=live
 
 `POST /api/follow/reserve/prune` 只处理正文里的 `accountId`。匹配的 reserved 行从活动储备删掉，原字段、`checkedAt`、`createdAt`、`updatedAt` 和原先的 result/reason 写入 `follow_reserve_audit`。`follow_success`、失败和 unknown 行不改。`kinds` 省略时，只移走过期、关系未知或其他当前不能执行的 reserved；写了 `kinds:["new"]` 时，该号全部 reserved new 都移走，回关行留下。`reason` 不能写成 `spam` 或 `not_blue`。审计是 `GET /api/follow/reserve/audit?accountId=2&limit=50`。之后用新鲜且证据合格的 `POST /api/follow/reserve` 可以重新入库；成功、失败和 unknown 不会因此变回可执行。读接口不会自己清理。`13f378e` 还没有这个接口。
 
-## 账号1已筛名单开关
+## 分账号已筛名单开关
 
-这是账号1的持久配置，存在 `follow_account_config.approved_list_follow`。进程启动时若列不存在会补上，默认 `0`。已有储备、成功账、黑名单和证据行都不会被改写。重复启动不会把开关打开。账号2没有这个开关，`PUT` 账号2会得到 400 `approved_list_locked`。
+账号1和账号2各有独立的 `approvedListFollow` 开关，按 `account_id` 存在 `follow_account_config.approved_list_follow`，默认关闭（`0`）。进程启动时若列不存在会补上，重复启动不会把开关打开。`PUT /api/follow/config` 带 `approvedListFollow` 只更新请求账号的开关，账号2也可保存，不再锁定。已有储备、成功账、黑名单和证据行都不会被开关保存改写。
 
-关闭（默认）时，账号1仍要新鲜证据，并继续做蓝V、垃圾内容、是否已关注、中文和资格判断。证据页 `fresh: false` 时，批次可以提交，但结果是 `evidence_pending`，人留在 `reserved`，不会假装已经查过资料。
+关闭（默认）时，各账号继续原有证据和资格筛选。账号1仍要新鲜证据，并继续做蓝V、垃圾内容、是否已关注、中文和资格判断。账号1证据页 `fresh: false` 时，批次可以提交，但结果是 `evidence_pending`，人留在 `reserved`，不会假装已经查过资料。
 
-开启时，只对账号1执行白名单里的人跳过缺证据、非蓝V、非中文和资格过滤。不在白名单上的人，包括储备请求里自己带 `trusted` 之类字段的人，仍走原筛选。白名单只能由 `PUT /api/follow/allowlist` 写入。开启不制造证据，回执原因是 `approved_list`，不是 `new` 或 `followback`。
+开启时，只对该账号执行白名单里的人跳过缺证据、非蓝V、受众语言和资格过滤。不在该账号白名单上的人，包括储备请求里自己带 `trusted` 之类字段的人，仍走原筛选。每个账号的执行白名单分别存在 `follow_allowlist_control` 和 `follow_execution_allowlist`，通过 `GET/PUT /api/follow/allowlist?accountId=1|2` 读取和保存，也可在 `/automation` 编辑。两个账号的开关、强制标记和名单完全独立，不共享数据。开启不制造证据，回执原因是 `approved_list`，不是 `new` 或 `followback`。
 
-开关两边都保留：永久取关黑名单、已经关注过的人、固定永不取关 id、执行白名单强制、`kind=new` 的授权（持续授权或当天授权）、身份核对、暂停、`X_API_MODE`、429/403 即停，以及 `automation_settings` 里保存的节奏、窗口和上限（默认台北 15 分钟工作 / 18 分钟休息、05:00–09:00 不关注、每日 350、每轮 13 人）。发帖、取关和账号2不改。
+两个账号开关开启或关闭都保留：本账号永久取关黑名单（账号1和账号2取关成功都会写入各自黑名单）、已经关注过的人、执行白名单强制、身份核对、暂停、`X_API_MODE=live`、429/403 即停，以及 `automation_settings` 里保存的节奏、窗口和上限。账号1还保留固定永不取关 id 和 `kind=new` 的授权（持续授权或当天授权）；其默认设置为台北 15 分钟工作 / 18 分钟休息、05:00–09:00 不关注、每日 350、每轮 13 人。保存开关不改发帖、取关设置或另一账号。
 
-管理页是「自动关注 / 取关」（`/automation`），先选账号1。账号1区块有复选框「已筛名单直接关注」和「保存已筛名单开关」。状态句来自接口，不是页面自己编的。保存不开始运行。
+管理页是「自动关注 / 取关」（`/automation`），先选要管理的账号。两个账号区块各有复选框「已筛名单直接关注」、「保存已筛名单开关」和执行白名单编辑器，只保存所选账号。状态句来自接口，不是页面自己编的。保存不开始运行。下面命令和现场记录以账号1为例；管理账号2时使用 `accountId: 2` 或 `?accountId=2`。
 
 已经在储备里的人不用重新导入。2026-11-24 现场的 21 个 `kind=new` 只要仍是 `reserved`、在执行白名单里、不在取关黑名单、也没有成功账，且授权和运行门均满足，打开开关后的下一个工作槽就可执行；当时每轮最多 13 人，当前批量以保存的设置为准。不要为了这 21 人补证据，也不要再 `POST /api/follow/reserve`。
 
@@ -95,4 +95,4 @@ curl -sS -X PUT http://127.0.0.1:3847/api/follow/config \
   -d '{"accountId":1,"approvedListFollow":false}'
 ```
 
-不必删列，不必重导名单。已经写成 `followed` 的人保持已关注。还是 `reserved` 的人恢复证据和资格筛选。账号2的配置请求不要带这个字段。
+不必删列，不必重导名单。已经写成 `followed` 的人保持已关注。还是 `reserved` 的人恢复证据和资格筛选。账号2可用同一字段独立开关，不影响账号1。

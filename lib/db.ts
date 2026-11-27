@@ -479,9 +479,9 @@ function ensureNewAdmissionTables(db: DatabaseSync): void {
 }
 
 /**
- * Account 1 only. Copies unfollow rows already stored as success.
+ * Copies unfollow rows already stored as success for both accounts.
  * Does not scan X, evidence, or anything dated before the baseline that was not confirmed.
- * Repeat runs insert nothing new for the same person.
+ * Repeat runs insert nothing new for the same account and person.
  */
 function ensureFollowBlocklist(db: DatabaseSync): void {
   db.exec(`
@@ -504,7 +504,7 @@ function ensureFollowBlocklist(db: DatabaseSync): void {
     `INSERT OR IGNORE INTO follow_blocklist (account_id, target_user_id, source, blocked_at)
      SELECT account_id, target_user_id, 'unfollow_confirmed', COALESCE(updated_at, created_at)
      FROM unfollow_candidates
-     WHERE account_id = 1 AND result = 'success'`,
+     WHERE account_id IN (1, 2) AND result = 'success'`,
   ).run();
 }
 
@@ -552,39 +552,48 @@ function ensureFollowAllowlist(db: DatabaseSync): void {
       PRIMARY KEY (account_id, target_user_id)
     );
   `);
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    if (!/IN \(1,\s*2\)/i.test(tableSql(db, "follow_allowlist_control"))) {
-      db.exec(`
-        CREATE TABLE follow_allowlist_control_new (
-          account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
-          enforced INTEGER NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        INSERT INTO follow_allowlist_control_new (account_id, enforced, updated_at)
-        SELECT account_id, enforced, updated_at FROM follow_allowlist_control;
-        DROP TABLE follow_allowlist_control;
-        ALTER TABLE follow_allowlist_control_new RENAME TO follow_allowlist_control;
-      `);
+  if (
+    !/IN \(1,\s*2\)/i.test(tableSql(db, "follow_allowlist_control"))
+    || !/IN \(1,\s*2\)/i.test(tableSql(db, "follow_execution_allowlist"))
+  ) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!/IN \(1,\s*2\)/i.test(tableSql(db, "follow_allowlist_control"))) {
+        db.exec(`
+          CREATE TABLE follow_allowlist_control_new (
+            account_id INTEGER PRIMARY KEY CHECK (account_id IN (1, 2)),
+            enforced INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO follow_allowlist_control_new (account_id, enforced, updated_at)
+          SELECT account_id, enforced, updated_at FROM follow_allowlist_control;
+          DROP TABLE follow_allowlist_control;
+          ALTER TABLE follow_allowlist_control_new RENAME TO follow_allowlist_control;
+        `);
+      }
+      if (!/IN \(1,\s*2\)/i.test(tableSql(db, "follow_execution_allowlist"))) {
+        db.exec(`
+          CREATE TABLE follow_execution_allowlist_new (
+            account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
+            target_user_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (account_id, target_user_id)
+          );
+          INSERT INTO follow_execution_allowlist_new (account_id, target_user_id, created_at)
+          SELECT account_id, target_user_id, created_at FROM follow_execution_allowlist;
+          DROP TABLE follow_execution_allowlist;
+          ALTER TABLE follow_execution_allowlist_new RENAME TO follow_execution_allowlist;
+        `);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* The allowlist migration transaction is already closed. */
+      }
+      throw error;
     }
-    if (!/IN \(1,\s*2\)/i.test(tableSql(db, "follow_execution_allowlist"))) {
-      db.exec(`
-        CREATE TABLE follow_execution_allowlist_new (
-          account_id INTEGER NOT NULL CHECK (account_id IN (1, 2)),
-          target_user_id TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          PRIMARY KEY (account_id, target_user_id)
-        );
-        INSERT INTO follow_execution_allowlist_new (account_id, target_user_id, created_at)
-        SELECT account_id, target_user_id, created_at FROM follow_execution_allowlist;
-        DROP TABLE follow_execution_allowlist;
-        ALTER TABLE follow_execution_allowlist_new RENAME TO follow_execution_allowlist;
-      `);
-    }
-    db.exec("COMMIT");
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
   }
   db.prepare(
     `INSERT OR IGNORE INTO follow_allowlist_control (account_id, enforced, updated_at) VALUES (1, 1, ?)`,

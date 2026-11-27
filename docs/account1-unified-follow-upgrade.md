@@ -97,7 +97,7 @@ curl -sS 'http://127.0.0.1:3847/api/follow?accountId=1'
 
 `POST /api/follow/reserve/prune` 会把匹配的 `follow_reserve` 行移到 `follow_reserve_audit` 并从活动表删除。它不处理 `follow_new_admission`，也不能只留下截图名单。不要用它来隔离这 22 条回关和 18 条旧 `admitted`。
 
-账号1另有执行白名单。升级这个补丁后，新库和已有库都会把账号1 `enforced` 写成 true、名单为空，因此在写入名单之前，approval 和 resume 都不会关注旧候选。旧的 reserve 和 admission 行保持原状态，不写入取关黑名单。
+账号1另有执行白名单。升级这个补丁后，账号1缺少控制行时用 `INSERT OR IGNORE` 初始化为 `enforced=true`、名单为空，因此在写入名单之前，approval 和 resume 都不会关注旧候选；已有控制行、名单和时间戳保留。账号2默认 `enforced=false`、名单为空。旧的 reserve 和 admission 行保持原状态，不写入取关黑名单。
 
 ```bash
 curl -sS 'http://127.0.0.1:3847/api/follow/allowlist?accountId=1'
@@ -106,7 +106,7 @@ curl -sS -X PUT http://127.0.0.1:3847/api/follow/allowlist \
   -d '{"accountId":1,"enforced":true,"targetUserIds":["1076751441748873216","1670271066","2110667651429384192"]}'
 ```
 
-`GET` 返回 `accountId`、`enforced`、`count`、`targetUserIds`、`preservesHistory: true`、`touchesBlocklist: false`。`PUT` 替换整份账号1名单。`accountId: 2` 返回 400 `allowlist_locked`。先写白名单，再导入这三个人，然后再 approval，最后才 resume。
+`GET` 返回 `accountId`、`enforced`、`count`、`targetUserIds`、`preservesHistory: true`、`touchesBlocklist: false`。`PUT /api/follow/allowlist` 按请求的 `accountId` 替换该账号的整份名单和 `enforced` 标记，账号2不再锁定。保存一个账号不会修改另一个账号的强制标记或 ids。账号1仍先写白名单，再导入这三个人，然后再 approval，最后才 resume。
 
 ## 回滚
 
@@ -118,4 +118,4 @@ curl -sS -X PUT http://127.0.0.1:3847/api/follow/allowlist \
 
 ## 已筛名单开关
 
-后续补丁给账号1加了默认关闭的 `approvedListFollow`。升级本文时不要把它打开。打开、核对和关掉的命令在 `docs/account-automation.md` 的「账号1已筛名单开关」。它不改本文的槽钟、350 上限、白名单或授权，也不补写证据。已经在储备里的人不用重新导入。
+后续补丁给两个账号各加了默认关闭的 `approvedListFollow`。升级本文时不要把账号1的开关打开。打开、核对和关掉的命令在 `docs/account-automation.md` 的「分账号已筛名单开关」。它不改本文的槽钟、350 上限、白名单或授权，也不补写证据。已经在储备里的人不用重新导入。

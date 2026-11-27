@@ -1108,8 +1108,8 @@ export async function submitFollowBatch(input: {
       let outcome: { result: FollowOutcome; reason: string };
       let stop = false;
       try {
-        if (!followExecutionAllowed(accountId, row.target_user_id)) outcome = { result: "skipped", reason: "allowlist" };
-        else if (followBlocked(accountId, row.target_user_id)) outcome = { result: "skipped", reason: "unfollowed" };
+        if (!followExecutionAllowed(accountId, row.target_user_id)) continue;
+        if (followBlocked(accountId, row.target_user_id)) outcome = { result: "skipped", reason: "unfollowed" };
         else if (one("SELECT 1 AS ok FROM follow_success WHERE account_id = ? AND target_user_id = ?", accountId, row.target_user_id)) {
           outcome = { result: "skipped", reason: "already_followed" };
         } else {

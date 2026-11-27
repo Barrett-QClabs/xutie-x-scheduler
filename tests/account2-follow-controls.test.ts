@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,9 +11,11 @@ import { readAutomationSettings, saveAutomationSettings } from "@/lib/automation
 import { getDb, reopenDatabase, resetAllData, updateAccount } from "@/lib/db";
 import { importEvidence } from "@/lib/evidence";
 import { getFollowAllowlist, saveFollowAllowlist } from "@/lib/follow-allowlist";
+import { followBlocked } from "@/lib/follow-blocklist";
 import { saveApprovedListFollowSetting } from "@/lib/follow-config";
 import { stockFollowReserve, submitFollowBatch, type FollowProfile } from "@/lib/follow-queue";
 import { saveCredentials } from "@/lib/service";
+import { importUnfollowCandidates, setUnfollowPaused, submitUnfollowBatch, unfollowEvidenceState } from "@/lib/unfollow-queue";
 
 const NOW = new Date("2026-11-24T09:05:00.000Z");
 const NEXT = new Date("2026-11-24T09:35:00.000Z");
@@ -72,14 +75,14 @@ function reserve(id: string) {
   return getDb().prepare("SELECT status, result, reason FROM follow_reserve WHERE account_id = 2 AND target_user_id = ?").get(id);
 }
 
-function knownFollowing(id: string) {
+function knownFollowing(id: string, now = NOW) {
   importEvidence(2, {
     schema_version: 1, account_id: SOURCE, source_namespace: "user-X--english", source_tool: "get_users_me_following",
-    observed_at: NOW.toISOString(), expires_at: LATER.toISOString(),
+    observed_at: now.toISOString(), expires_at: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
     request_fields: ["verified", "verified_type", "connection_status"],
     coverage: { pagination_complete: true, next_token: null, activity_window_complete: false, excluded: [] },
     errors: [], subjects: [{ id, verified: false, verified_type: "none", connection_status: ["following"] }],
-  }, NOW);
+  }, now);
 }
 
 afterEach(() => {
@@ -182,6 +185,14 @@ describe("independent approved-list switches and execution allowlists", () => {
     expect(getFollowAllowlist(2)).toMatchObject({ enforced: true, targetUserIds: ["92001"] });
   });
 
+  it("does not begin a write transaction when the allowlist tables already support both accounts", () => {
+    const exec = vi.spyOn(DatabaseSync.prototype, "exec");
+    reopenDatabase();
+    expect(exec.mock.calls.some(([sql]) => /BEGIN IMMEDIATE/i.test(sql))).toBe(false);
+    expect(getFollowAllowlist(1).enforced).toBe(false);
+    expect(getFollowAllowlist(2).enforced).toBe(false);
+  });
+
   it("resets account 2 to off and empty, and restores its missing control without changing account 1 bootstrap semantics", () => {
     saveApprovedListFollowSetting(2, true);
     saveFollowAllowlist(2, { enforced: true, targetUserIds: ["92001"] });
@@ -265,6 +276,27 @@ describe("account 2 approved-list execution", () => {
     expect(action.follow.mock.calls).toEqual([["92002"]]);
     expect(reserve("92001")).toMatchObject({ status: "reserved" });
     expect(action.inspect).not.toHaveBeenCalled();
+  });
+
+  it("leaves a target reserved when account 2's allowlist excludes it mid-batch", async () => {
+    enable();
+    stock(["92001", "92002"]);
+    saveApprovedListFollowSetting(2, true);
+    saveFollowAllowlist(2, { enforced: true, targetUserIds: ["92001", "92002"] });
+    const before = reserve("92002");
+    const action = hooks();
+    action.follow.mockImplementationOnce(async () => {
+      saveFollowAllowlist(2, { enforced: true, targetUserIds: ["92001"] });
+    });
+    const result = await submitFollowBatch({ accountId: 2, now: NOW, hooks: action });
+    expect(result).toMatchObject({ submitted: 1, followed: 1, results: [{ targetUserId: "92001", result: "success" }] });
+    expect(action.follow.mock.calls).toEqual([["92001"]]);
+    expect(reserve("92002")).toEqual(before);
+    expect(reserve("92002")).toMatchObject({ status: "reserved", result: null, reason: null });
+
+    saveFollowAllowlist(2, { enforced: true, targetUserIds: ["92002"] });
+    expect((await submitFollowBatch({ accountId: 2, now: NEXT, hooks: action })).followed).toBe(1);
+    expect(action.follow.mock.calls).toEqual([["92001"], ["92002"]]);
   });
 
   it.each([false, true])("skips blocklisted, already-followed and known already-following users with approvedList=%s", async (approvedList) => {
@@ -361,5 +393,98 @@ describe("account 2 approved-list execution", () => {
     const result = await submitFollowBatch({ accountId: 2, now: NOW });
     expect(result.results).toMatchObject([{ targetUserId: "92001", result: "success", reason: "approved_list" }]);
     expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([`https://api.x.com/2/users/${SOURCE}/following`]);
+  });
+});
+
+describe("per-account permanent unfollow blocklist", () => {
+  it.each([true, false])("blocks account 2 approved-list refollows after a real unfollow with directPool=%s", async (directPool) => {
+    const unfollowAt = new Date("2026-11-24T00:20:00.000Z");
+    const followAt = new Date("2026-11-24T00:35:00.000Z");
+    const id = directPool ? "92011" : "92012";
+    enable(1);
+    saveApprovedListFollowSetting(1, true);
+    saveFollowAllowlist(1, { enforced: true, targetUserIds: [id] });
+    saveAutomationSettings(1, { follow: { batchSize: 3 } });
+    const account1Before = accountRows(1);
+    const settings1Before = readAutomationSettings(1);
+
+    enable();
+    vi.stubEnv("XUTIE_ACCOUNT2_UNFOLLOW", "on");
+    vi.stubEnv("X_API_MODE", "live");
+    setUnfollowPaused(2, false, "test");
+    if (directPool) saveAutomationSettings(2, { unfollow: { directPool: true } });
+    expect(readAutomationSettings(2).unfollow.directPool).toBe(directPool);
+    importUnfollowCandidates(2, { candidates: [{ targetUserId: id, tier: "non_blue" }] });
+    knownFollowing(id, directPool ? new Date("2026-11-22T00:20:00.000Z") : unfollowAt);
+    expect(unfollowEvidenceState(2, id, unfollowAt)).toBe(directPool ? "expired" : "fresh");
+    if (directPool) {
+      getDb().prepare("UPDATE unfollow_candidates SET result = 'skipped', reason = 'evidence_expired' WHERE account_id = 2 AND target_user_id = ?").run(id);
+    }
+    // An existing reserve row must also remain blocked when the approved-list batch executes.
+    expect(stockFollowReserve(2, {
+      checkedAt: unfollowAt.toISOString(), candidates: [{ targetUserId: id, kind: "followback" }],
+    }, unfollowAt).accepted).toEqual([id]);
+    expect(getDb().prepare("SELECT * FROM follow_blocklist").all()).toEqual([]);
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe("DELETE");
+      expect(String(input)).toBe(`https://api.x.com/2/users/${SOURCE}/following/${id}`);
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    const unfollowed = await submitUnfollowBatch({ accountId: 2, now: unfollowAt });
+    expect(unfollowed).toMatchObject({ submitted: 1, unfollowed: 1, results: [{
+      targetUserId: id, result: "success", reason: directPool ? "direct_pool" : "non_blue",
+    }] });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(followBlocked(2, id)).toBe(true);
+    expect(getDb().prepare("SELECT * FROM follow_blocklist").all()).toEqual([{
+      account_id: 2, target_user_id: id, source: "unfollow_success", blocked_at: unfollowAt.toISOString(),
+    }]);
+    expect(followBlocked(1, id)).toBe(false);
+    expect(getDb().prepare("SELECT * FROM follow_blocklist WHERE account_id = 1 AND target_user_id = ?").get(id)).toBeUndefined();
+    expect(accountRows(1)).toEqual(account1Before);
+    expect(readAutomationSettings(1)).toEqual(settings1Before);
+
+    const restocked = stockFollowReserve(2, {
+      checkedAt: followAt.toISOString(),
+      candidates: [id, "92020"].map((targetUserId) => ({ targetUserId, kind: "followback" })),
+    }, followAt);
+    expect(restocked.rejected).toEqual([{ targetUserId: id, reason: "unfollowed" }]);
+    expect(restocked.accepted).toEqual(["92020"]);
+    saveFollowAllowlist(2, { enforced: true, targetUserIds: [id, "92020"] });
+    saveApprovedListFollowSetting(2, true);
+    const action = hooks();
+    const followed = await submitFollowBatch({ accountId: 2, now: followAt, hooks: action });
+    expect(followed).toMatchObject({ submitted: 2, followed: 1 });
+    expect(followed.results.find((row) => row.targetUserId === id)).toMatchObject({ result: "skipped", reason: "unfollowed" });
+    expect(action.follow).not.toHaveBeenCalledWith(id);
+    expect(action.follow.mock.calls).toEqual([["92020"]]);
+    expect(action.inspect).not.toHaveBeenCalled();
+    expect(accountRows(1)).toEqual(account1Before);
+    expect(readAutomationSettings(1)).toEqual(settings1Before);
+    expect(followBlocked(1, id)).toBe(false);
+  });
+
+  it("backfills confirmed successes for both accounts idempotently on reopen", () => {
+    const createdAt = "2026-11-23T00:00:00.000Z";
+    const updatedAt = "2026-11-24T00:20:00.000Z";
+    const insert = getDb().prepare(
+      `INSERT INTO unfollow_candidates (account_id, target_user_id, tier, status, result, created_at, updated_at)
+       VALUES (?, ?, 'non_blue', ?, ?, ?, ?)`,
+    );
+    for (const accountId of [1, 2]) {
+      insert.run(accountId, "92011", "success", "success", createdAt, updatedAt);
+      insert.run(accountId, "92012", "failed", "failed", createdAt, updatedAt);
+    }
+    expect(getDb().prepare("SELECT * FROM follow_blocklist").all()).toEqual([]);
+    reopenDatabase();
+    const rows = getDb().prepare("SELECT * FROM follow_blocklist ORDER BY account_id, target_user_id").all();
+    expect(rows).toEqual([1, 2].map((accountId) => ({
+      account_id: accountId, target_user_id: "92011", source: "unfollow_confirmed", blocked_at: updatedAt,
+    })));
+    expect(followBlocked(1, "92011")).toBe(true);
+    expect(followBlocked(2, "92011")).toBe(true);
+    reopenDatabase();
+    expect(getDb().prepare("SELECT * FROM follow_blocklist ORDER BY account_id, target_user_id").all()).toEqual(rows);
   });
 });

@@ -104,7 +104,7 @@
 
 ## 账号1日池开关
 
-账号1的日池开关存在 `follow_account_config.ops_json`，节奏、窗口和上限存在 `automation_settings`（见下）。都没有时，账号1使用编译默认的日池配置；账号2读到 `{ "dailyPool": false, "locked": true }`，保存 `ops` 会得到 400。`GET /api/follow/config?accountId=1` 返回当前值。`PUT` 带 `ops` 时更新兼容配置；带 `keywords` 时只保存关键词；带 `approvedListFollow` 时只改账号1的已筛名单开关。这三个字段可以单独提交。自动化页的「每天一次候选池」只改日池开关：先读保存的设置，原样带回关注/取关批量与取关日上限，不发送这些通道的工作/休息、锚点或窗口；旧晚间 `newFollow` 数字只为兼容原样保留，不驱动运行。取关不设日上限时旧接口无法表示，页面不会保存日池开关。保存配置不开始运行，也不写新关注授权。
+账号1的日池开关存在 `follow_account_config.ops_json`，节奏、窗口和上限存在 `automation_settings`（见下）。都没有时，账号1使用编译默认的日池配置；账号2读到 `{ "dailyPool": false, "locked": true }`，保存 `ops` 会得到 400。`GET /api/follow/config?accountId=1` 返回当前值。`PUT` 带 `ops` 时更新兼容配置；带 `keywords` 时只保存关键词；带 `approvedListFollow` 时只改请求账号（账号1或账号2）的已筛名单开关，不影响另一账号，也不解除账号2的 `ops` 锁定。这三个字段可以单独提交。自动化页的「每天一次候选池」只改日池开关：先读保存的设置，原样带回关注/取关批量与取关日上限，不发送这些通道的工作/休息、锚点或窗口；旧晚间 `newFollow` 数字只为兼容原样保留，不驱动运行。取关不设日上限时旧接口无法表示，页面不会保存日池开关。保存配置不开始运行，也不写新关注授权。
 
 在「自动关注 / 取关」（`/automation`）选账号后，可以配置关注和取关每轮人数、日上限（取关可不设上限）、工作/休息分钟、锚点、时间窗、互斥，以及蓝 V、受众语言、近期活跃过滤。节奏、窗口、时区、批量、日上限和过滤开关存在 `automation_settings`（每个账号一行），执行读保存的值；没有保存过的账号使用编译默认值及兼容的旧 `ops` 值。`GET/PUT/DELETE /api/automation/settings?accountId=1|2` 读取、部分更新、恢复默认。页面用 `PUT /api/automation/settings`，正文 `{ accountId, settings: { ...改动字段 } }` 只发送改动，不重写未编辑的自定义节奏。
 

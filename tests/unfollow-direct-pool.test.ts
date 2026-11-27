@@ -295,7 +295,11 @@ describe("direct pool unfollow", () => {
     expect(action.unfollow.mock.calls.map(([id]) => id)).toEqual(IDS);
     expect(readAutomationSettings(1)).toEqual(settings);
     expect(getDb().prepare("SELECT * FROM unfollow_candidates WHERE account_id = 1").all()).toEqual(rows);
-    expect(getDb().prepare("SELECT COUNT(*) AS n FROM follow_blocklist").get()).toEqual({ n: 0 });
+    expect(getDb().prepare("SELECT COUNT(*) AS n FROM follow_blocklist WHERE account_id = 1").get()).toEqual({ n: 0 });
+    for (const id of IDS) {
+      expect(followBlocked(2, id)).toBe(true);
+      expect(followBlocked(1, id)).toBe(false);
+    }
   });
 
   it.each([1, 2] as const)("executes DELETE via POST /api/unfollow/batches for account %s with live hooks", async (accountId) => {
@@ -318,7 +322,7 @@ describe("direct pool unfollow", () => {
     expect(result.results.map((row: { reason: string }) => row.reason)).toEqual(["direct_pool", "direct_pool"]);
     const source = accountId === 1 ? "1933586991612080128" : "1468479269701820422";
     expect(fetch.mock.calls.map(([url]) => String(url))).toEqual(IDS.map((id) => `https://api.x.com/2/users/${source}/following/${id}`));
-    for (const id of IDS) expect(followBlocked(accountId, id)).toBe(accountId === 1);
+    for (const id of IDS) expect(followBlocked(accountId, id)).toBe(true);
     vi.stubGlobal("__xutiNow", NEXT);
     const capped = await postUnfollowBatch(new Request("http://local/api/unfollow/batches", {
       method: "POST", body: JSON.stringify({ accountId }),

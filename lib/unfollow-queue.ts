@@ -3,7 +3,7 @@ import { accountIdentity, evidenceSourceUserId, executionUserId } from "@/lib/ac
 import { unfollowBatchSize, unfollowDailyCap, unfollowPausesOnRisk } from "@/lib/account-ops";
 import { currentSettings, isLaneSlotKey, laneIsDefault, quotaDayRange } from "@/lib/automation-settings";
 import { unfollowEnabled, unfollowWhitelist } from "@/lib/automation-account";
-import { recordAccount1UnfollowBlock } from "@/lib/follow-blocklist";
+import { recordUnfollowBlock } from "@/lib/follow-blocklist";
 import { getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
@@ -643,7 +643,7 @@ export async function submitUnfollowBatch(input: {
           else {
             await hooks.unfollow(row.target_user_id);
             outcome = { result: "success", reason: "direct_pool" };
-            if (accountId === 1) recordAccount1UnfollowBlock(row.target_user_id, now);
+            recordUnfollowBlock(accountId, row.target_user_id, now);
           }
         } else {
           const fresh = await hooks.inspect(row.target_user_id);
@@ -659,7 +659,7 @@ export async function submitUnfollowBatch(input: {
           else {
             await hooks.unfollow(row.target_user_id);
             outcome = { result: "success", reason: decision.reason };
-            if (accountId === 1) recordAccount1UnfollowBlock(row.target_user_id, now);
+            recordUnfollowBlock(accountId, row.target_user_id, now);
           }
         }
       } catch (error) {
