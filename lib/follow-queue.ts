@@ -14,8 +14,8 @@ import { currentSettings, followFilters, laneIsDefault, quotaDayRange, type Foll
 import { getDb } from "@/lib/db";
 import { apiMode } from "@/lib/deployment";
 import { AppError } from "@/lib/errors";
-import { account1ApprovedListWaivesScreening, approvedListFollowView } from "@/lib/approved-list-follow";
-import { account1ExecutionAllowed } from "@/lib/follow-allowlist";
+import { approvedListWaivesScreening, approvedListFollowView } from "@/lib/approved-list-follow";
+import { followExecutionAllowed } from "@/lib/follow-allowlist";
 import { followBlocked } from "@/lib/follow-blocklist";
 import { account1PoolInUse, followBatchLimit, followCapDay, followDailyCap, followPhase, followSlot, isFollowAuditCursor } from "@/lib/follow-cadence";
 import { MAX_FOLLOWERS, RECENT_ACTIVITY_MS, RESERVE_FRESH_MS } from "@/lib/unfollow-policy";
@@ -661,6 +661,7 @@ function selectReserve(accountId: AccountId, now: Date, limit: number): ReserveR
       `SELECT target_user_id, username, kind, checked_at, followers_count, last_post_at, prefer_flb
        FROM follow_reserve
        WHERE account_id = ? AND status = 'reserved' AND checked_at >= ?
+         ${executionAllowlistSql("follow_reserve")}
          AND NOT EXISTS (
            SELECT 1 FROM follow_success s
            WHERE s.account_id = follow_reserve.account_id AND s.target_user_id = follow_reserve.target_user_id
@@ -683,15 +684,17 @@ function shuffleRows<T>(rows: T[], random: () => number): T[] {
   return copy;
 }
 
-const ACCOUNT1_ALLOWLIST_SQL = `
-  AND (
-    COALESCE((SELECT enforced FROM follow_allowlist_control WHERE account_id = 1), 0) = 0
-    OR EXISTS (
-      SELECT 1 FROM follow_execution_allowlist a
-      WHERE a.account_id = 1 AND a.target_user_id = __TARGET__
+function executionAllowlistSql(table: "follow_reserve" | "follow_new_admission"): string {
+  return `
+    AND (
+      COALESCE((SELECT enforced FROM follow_allowlist_control WHERE account_id = ${table}.account_id), 0) = 0
+      OR EXISTS (
+        SELECT 1 FROM follow_execution_allowlist a
+        WHERE a.account_id = ${table}.account_id AND a.target_user_id = ${table}.target_user_id
+      )
     )
-  )
-`;
+  `;
+}
 
 function account1NewWaiting(): boolean {
   const reserved = one(
@@ -701,7 +704,7 @@ function account1NewWaiting(): boolean {
          SELECT 1 FROM follow_blocklist b
          WHERE b.account_id = 1 AND b.target_user_id = follow_reserve.target_user_id
        )
-       ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_reserve.target_user_id")}`,
+       ${executionAllowlistSql("follow_reserve")}`,
   );
   if (reserved) return true;
   return Boolean(one(
@@ -711,7 +714,7 @@ function account1NewWaiting(): boolean {
          SELECT 1 FROM follow_blocklist b
          WHERE b.account_id = 1 AND b.target_user_id = follow_new_admission.target_user_id
        )
-       ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_new_admission.target_user_id")}`,
+       ${executionAllowlistSql("follow_new_admission")}`,
   ));
 }
 
@@ -730,7 +733,7 @@ function selectAccount1Picks(now: Date, limit: number, random: () => number, app
            SELECT 1 FROM follow_blocklist b
            WHERE b.account_id = 1 AND b.target_user_id = follow_reserve.target_user_id
          )
-         ${ACCOUNT1_ALLOWLIST_SQL.replace("__TARGET__", "follow_reserve.target_user_id")}
+         ${executionAllowlistSql("follow_reserve")}
        ORDER BY target_user_id ASC`,
     )
     .all() as ReserveRow[];
@@ -754,7 +757,7 @@ function selectAccount1Picks(now: Date, limit: number, random: () => number, app
   if (approved) {
     for (const row of pendingNewAdmissions(100_000)) {
       if (seen.has(row.targetUserId) || followBlocked(1, row.targetUserId)) continue;
-      if (!account1ExecutionAllowed(row.targetUserId)) continue;
+      if (!followExecutionAllowed(1, row.targetUserId)) continue;
       if (!account1PoolInUse("new", row.qualificationCheckedAt, now)) continue;
       seen.add(row.targetUserId);
       picks.push({
@@ -1003,7 +1006,7 @@ export async function submitFollowBatch(input: {
       : view.constraint === "stale_reserve" ? "stale_reserve" : "insufficient_candidates";
     return emptyFollow(accountId, now, slot, reason);
   }
-  if (accountId !== 1 && view.available === 0) {
+  if (accountId !== 1 && picked.length === 0) {
     return emptyFollow(accountId, now, slot, view.constraint === "stale_reserve" ? "stale_reserve" : "insufficient_candidates");
   }
 
@@ -1026,7 +1029,7 @@ export async function submitFollowBatch(input: {
     if (accountId === 1) {
       for (const pick of account1Picks) {
         if (one<{ paused: number }>("SELECT paused FROM follow_control WHERE account_id = ?", accountId)?.paused !== 0) break;
-        if (!account1ExecutionAllowed(pick.targetUserId)) continue;
+        if (!followExecutionAllowed(accountId, pick.targetUserId)) continue;
         if (followBlocked(1, pick.targetUserId)) {
           if (pick.reserve) reserveStatus(pick.targetUserId, "skipped", "skipped", "unfollowed");
           markNewAdmission(pick.targetUserId, "failed", "unfollowed", slot, now);
@@ -1050,7 +1053,7 @@ export async function submitFollowBatch(input: {
           continue;
         }
         try {
-          if (account1ApprovedListWaivesScreening(pick.targetUserId)) {
+          if (approvedListWaivesScreening(accountId, pick.targetUserId)) {
             await hooks.follow(pick.targetUserId);
             finishAccount1Success(pick, "approved_list", slot, now);
             results.push({ targetUserId: pick.targetUserId, kind: pick.kind, result: "success", reason: "approved_list" });
@@ -1103,25 +1106,46 @@ export async function submitFollowBatch(input: {
       if (capUsed(accountId, now) >= followDailyCap(accountId)) break;
       const kind: FollowKind = row.kind === "followback" ? "followback" : "new";
       let outcome: { result: FollowOutcome; reason: string };
+      let stop = false;
       try {
-        const profile = await hooks.inspect(row.target_user_id);
-        const decision = classifyFollow({ accountId, kind, profile, now });
-        if (!decision.proceed) outcome = { result: decision.result, reason: decision.reason };
-        else {
-          await hooks.follow(row.target_user_id);
-          const succeeded = new Date().toISOString();
-          db.prepare(
-            `INSERT INTO follow_success (account_id, target_user_id, username, kind, succeeded_at, slot, london_day)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          ).run(accountId, row.target_user_id, profile.username ?? row.username, kind, succeeded, slot, followCapDay(accountId, now));
-          outcome = { result: "success", reason: decision.reason };
+        if (!followExecutionAllowed(accountId, row.target_user_id)) outcome = { result: "skipped", reason: "allowlist" };
+        else if (followBlocked(accountId, row.target_user_id)) outcome = { result: "skipped", reason: "unfollowed" };
+        else if (one("SELECT 1 AS ok FROM follow_success WHERE account_id = ? AND target_user_id = ?", accountId, row.target_user_id)) {
+          outcome = { result: "skipped", reason: "already_followed" };
+        } else {
+          const approvedList = approvedListWaivesScreening(accountId, row.target_user_id);
+          // Approved-list execution needs no inspection, but known relationships still protect existing follows.
+          const profile = approvedList
+            ? evidenceFollowProfile(accountId, row.target_user_id, now)
+            : await hooks.inspect(row.target_user_id);
+          const decision = profile.following === true
+            ? { proceed: false, result: "skipped" as const, reason: "already_following" }
+            : approvedList
+              ? { proceed: true, result: "success" as const, reason: "approved_list" }
+              : classifyFollow({ accountId, kind, profile, now });
+          if (!decision.proceed) outcome = { result: decision.result, reason: decision.reason };
+          else {
+            await hooks.follow(row.target_user_id);
+            const succeeded = new Date().toISOString();
+            db.prepare(
+              `INSERT INTO follow_success (account_id, target_user_id, username, kind, succeeded_at, slot, london_day)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            ).run(accountId, row.target_user_id, profile.username ?? row.username, kind, succeeded, slot, followCapDay(accountId, now));
+            outcome = { result: "success", reason: decision.reason };
+          }
         }
-      } catch {
-        outcome = { result: "failed", reason: "action_failed" };
+      } catch (error) {
+        const risk = riskStop(error);
+        outcome = { result: "failed", reason: risk ?? "action_failed" };
+        if (risk) {
+          setFollowPaused(accountId, true, risk);
+          stop = true;
+        }
       }
       const status = outcome.result === "success" ? "followed" : outcome.result;
       reserveStatus(row.target_user_id, status, outcome.result, outcome.reason);
       results.push({ targetUserId: row.target_user_id, kind, result: outcome.result, reason: outcome.reason });
+      if (stop) break;
     }
   } finally {
     const followed = results.filter((item) => item.result === "success").length;

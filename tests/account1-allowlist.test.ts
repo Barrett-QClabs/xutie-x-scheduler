@@ -94,11 +94,15 @@ describe("account 1 execution allowlist", () => {
     const body = await saved.json();
     expect(body.count).toBe(3);
     expect(body.targetUserIds).toEqual([...SCREENSHOT_IDS].slice().sort());
-    const locked = await saveAllowlist(new Request("http://local/api/follow/allowlist", {
+    const otherInitial = await (await readAllowlist(new Request("http://local/api/follow/allowlist?accountId=2"))).json();
+    expect(otherInitial).toMatchObject({ enforced: false, targetUserIds: [] });
+    const saved2 = await saveAllowlist(new Request("http://local/api/follow/allowlist", {
       method: "PUT",
-      body: JSON.stringify({ accountId: 2, enforced: true, targetUserIds: [...SCREENSHOT_IDS] }),
+      body: JSON.stringify({ accountId: 2, enforced: false, targetUserIds: ["92099"] }),
     }));
-    expect(locked.status).toBe(400);
+    expect(saved2.status).toBe(200);
+    expect(await saved2.json()).toMatchObject({ accountId: 2, enforced: false, targetUserIds: ["92099"] });
+    expect((await (await readAllowlist(new Request("http://local/api/follow/allowlist?accountId=1"))).json()).targetUserIds).toEqual([...SCREENSHOT_IDS].sort());
 
     const ran = await submitFollowBatch({
       accountId: 1,

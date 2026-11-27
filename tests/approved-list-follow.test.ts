@@ -73,7 +73,7 @@ afterEach(() => {
 });
 
 describe("approved list follow switch", () => {
-  it("defaults off, persists across a reopened database, and rejects account 2", async () => {
+  it("defaults off, persists across a reopened database, independently for both accounts", async () => {
     const first = await (await readConfig(new Request("http://local/api/follow/config?accountId=1"))).json();
     expect(first.approvedListFollow).toBe(false);
     expect(first.approvedListFollowLocked).toBe(false);
@@ -83,11 +83,16 @@ describe("approved list follow switch", () => {
     expect(first.ops.followback).toMatchObject({ batchSize: 13, workMinutes: 15, restMinutes: 18 });
     const second = await (await readConfig(new Request("http://local/api/follow/config?accountId=2"))).json();
     expect(second.approvedListFollow).toBe(false);
-    expect(second.approvedListFollowLocked).toBe(true);
-    expect(second.approvedListStatus.startsWith("账号2")).toBe(true);
-    const locked = await put({ accountId: 2, approvedListFollow: true });
-    expect(locked.status).toBe(400);
-    expect((await locked.json()).code).toBe("approved_list_locked");
+    expect(second.approvedListFollowLocked).toBe(false);
+    expect(second.approvedListStatus).toContain("关闭：账号2仍按原资格筛选");
+    expect(second.approvedListStatus).toContain("非英文");
+    const account1Before = getDb().prepare("SELECT * FROM follow_account_config WHERE account_id = 1").get();
+    const saved2 = await put({ accountId: 2, approvedListFollow: true });
+    expect(saved2.status).toBe(200);
+    expect(await saved2.json()).toMatchObject({ accountId: 2, approvedListFollow: true, approvedListFollowLocked: false });
+    expect(getDb().prepare("SELECT * FROM follow_account_config WHERE account_id = 1").get()).toEqual(account1Before);
+    reopenDatabase();
+    expect((await (await readConfig(new Request("http://local/api/follow/config?accountId=2"))).json()).approvedListFollow).toBe(true);
     const bad = await put({ accountId: 1, approvedListFollow: "yes" });
     expect(bad.status).toBe(400);
     const saved = await put({ accountId: 1, approvedListFollow: true, keywords: ["商业"] });
@@ -380,7 +385,7 @@ describe("approved list follow switch", () => {
     expect(getDb().prepare("SELECT COUNT(*) AS n FROM follow_success WHERE target_user_id = '91051'").get()).toEqual({ n: 0 });
   });
 
-  it("renders the Chinese switch for both states and keeps account 2 locked", () => {
+  it("renders the Chinese switch for both states and unlocks account 2", () => {
     const off = renderToStaticMarkup(createElement(ApprovedListFollowControl, {
       accountId: 1,
       checked: false,
@@ -406,18 +411,22 @@ describe("approved list follow switch", () => {
     }));
     expect(on).toContain("checked");
     expect(on).toContain("开启：账号1执行白名单上的已筛名单");
-    const locked = renderToStaticMarkup(createElement(ApprovedListFollowControl, {
+    const account2 = renderToStaticMarkup(createElement(ApprovedListFollowControl, {
       accountId: 2,
       checked: false,
-      locked: true,
+      locked: false,
       status: approvedListFollowView(2).approvedListStatus,
       busy: false,
       onChecked: () => undefined,
       onSave: () => undefined,
     }));
-    expect(locked).toContain("账号2没有已筛名单开关");
-    expect(locked).not.toContain("已筛名单直接关注");
-    expect(approvedListFollowPutBody(true)).toEqual({ accountId: 1, approvedListFollow: true });
-    expect(approvedListFollowPutBody(false)).toEqual({ accountId: 1, approvedListFollow: false });
+    expect(account2).toContain("关闭：账号2仍按原资格筛选");
+    expect(account2).toContain('aria-label="已筛名单直接关注"');
+    expect(account2).toContain("保存已筛名单开关");
+    expect(account2).not.toMatch(/<button[^>]* disabled=/);
+    expect(approvedListFollowPutBody(1, true)).toEqual({ accountId: 1, approvedListFollow: true });
+    expect(approvedListFollowPutBody(1, false)).toEqual({ accountId: 1, approvedListFollow: false });
+    expect(approvedListFollowPutBody(2, true)).toEqual({ accountId: 2, approvedListFollow: true });
+    expect(approvedListFollowPutBody(2, false)).toEqual({ accountId: 2, approvedListFollow: false });
   });
 });

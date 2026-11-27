@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { POST as postUnfollowBatch } from "@/app/api/unfollow/batches/route";
+import { PUT as saveConfig } from "@/app/api/follow/config/route";
+import { unfollowPausesOnRisk } from "@/lib/account-ops";
 import * as automationAccount from "@/lib/automation-account";
 import { readAutomationSettings, saveAutomationSettings } from "@/lib/automation-settings";
 import { getDb, updateAccount } from "@/lib/db";
@@ -69,7 +72,7 @@ function candidate(accountId: 1 | 2, id: string) {
 function hooks() {
   return {
     inspect: vi.fn(async () => { throw new Error("direct pool must not inspect"); }),
-    unfollow: vi.fn(async (_id: string) => undefined),
+    unfollow: vi.fn<(id: string) => Promise<void>>(async () => undefined),
   };
 }
 
@@ -180,7 +183,7 @@ describe("direct pool unfollow", () => {
     expect(action.unfollow).not.toHaveBeenCalled();
   });
 
-  it("rechecks the whitelist immediately before each delete and records whitelisted for a newly protected target", async () => {
+  it("rechecks the whitelist immediately before each delete and records whitelist for a newly protected target", async () => {
     enable();
     const whitelist = new Set(automationAccount.UNFOLLOW_WHITELIST);
     vi.spyOn(automationAccount, "unfollowWhitelist").mockImplementation((accountId) =>
@@ -191,29 +194,137 @@ describe("direct pool unfollow", () => {
     const result = await submitUnfollowBatch({ accountId: 1, now: SLOT, hooks: action });
     expect(action.inspect).not.toHaveBeenCalled();
     expect(action.unfollow.mock.calls.map(([id]) => id)).toEqual([IDS[0]]);
-    expect(result.results[1]).toMatchObject({ targetUserId: IDS[1], result: "skipped", reason: "whitelisted" });
-    expect(candidate(1, IDS[1])).toEqual({ status: "skipped", result: "skipped", reason: "whitelisted" });
+    expect(result.results[1]).toMatchObject({ targetUserId: IDS[1], result: "skipped", reason: "whitelist" });
+    expect(candidate(1, IDS[1])).toEqual({ status: "skipped", result: "skipped", reason: "whitelist" });
     expect(followBlocked(1, IDS[1])).toBe(false);
   });
 
   it.each([
-    { status: 429, kind: "rate_limit", reason: "rate_limit" },
-    { status: 403, reason: "auth" },
-  ])("pauses immediately and breaks the batch on $status", async ({ status, reason, ...extra }) => {
-    enable();
-    staleCandidates();
+    { accountId: 1 as const, status: 429, kind: "rate_limit", reason: "rate_limit" },
+    { accountId: 1 as const, status: 403, reason: "auth" },
+    { accountId: 2 as const, status: 429, kind: "rate_limit", reason: "rate_limit" },
+    { accountId: 2 as const, status: 403, reason: "auth" },
+  ])("pauses account $accountId immediately and breaks the batch on $status", async ({ accountId, status, reason, ...extra }) => {
+    enable(accountId);
+    staleCandidates(accountId);
     const action = hooks();
     action.unfollow.mockRejectedValue(Object.assign(new Error("risk stop"), { status, ...extra }));
-    const result = await submitUnfollowBatch({ accountId: 1, now: SLOT, hooks: action });
+    const result = await submitUnfollowBatch({ accountId, now: SLOT, hooks: action });
     expect(action.inspect).not.toHaveBeenCalled();
     expect(action.unfollow.mock.calls.map(([id]) => id)).toEqual([IDS[0]]);
     expect(result).toMatchObject({ submitted: 1, unfollowed: 0, results: [{ targetUserId: IDS[0], result: "failed", reason }] });
-    expect(getDb().prepare("SELECT paused, pause_reason FROM unfollow_control WHERE account_id = 1").get())
+    expect(getDb().prepare("SELECT paused, pause_reason FROM unfollow_control WHERE account_id = ?").get(accountId))
       .toEqual({ paused: 1, pause_reason: reason });
-    expect(candidate(1, IDS[1])).toMatchObject({ status: "candidate" });
-    expect(followBlocked(1, IDS[0])).toBe(false);
-    expect((await submitUnfollowBatch({ accountId: 1, now: NEXT, hooks: action })).reason).toBe("paused");
+    expect(candidate(accountId, IDS[1])).toMatchObject({ status: "candidate" });
+    expect(followBlocked(accountId, IDS[0])).toBe(false);
+    expect((await submitUnfollowBatch({ accountId, now: NEXT, hooks: action })).reason).toBe("paused");
     expect(action.unfollow).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses direct-pool account 1 on 429 even with dailyPool disabled through the ops API", async () => {
+    enable();
+    staleCandidates();
+    const saved = await saveConfig(new Request("http://local/api/follow/config", {
+      method: "PUT",
+      body: JSON.stringify({ accountId: 1, ops: {
+        dailyPool: false,
+        followback: { batchSize: 13, workMinutes: 15, restMinutes: 18 },
+        newFollow: { batchSize: 9, workMinutes: 15, restMinutes: 20 },
+        unfollow: { batchSize: 10, dailyCap: 80 },
+      } }),
+    }));
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).ops.dailyPool).toBe(false);
+    expect(unfollowPausesOnRisk(1)).toBe(false);
+    const action = hooks();
+    action.unfollow.mockRejectedValue({ status: 429, kind: "rate_limit" });
+    const result = await submitUnfollowBatch({ accountId: 1, now: SLOT, hooks: action });
+    expect(result).toMatchObject({ submitted: 1, unfollowed: 0, results: [{ reason: "rate_limit" }] });
+    expect(action.unfollow).toHaveBeenCalledTimes(1);
+    expect(getDb().prepare("SELECT paused, pause_reason FROM unfollow_control WHERE account_id = 1").get())
+      .toEqual({ paused: 1, pause_reason: "rate_limit" });
+    expect(candidate(1, IDS[1])).toMatchObject({ status: "candidate" });
+    expect((await submitUnfollowBatch({ accountId: 1, now: NEXT, hooks: action })).reason).toBe("paused");
+  });
+
+  it("keeps the direct-pool snapshot when the operator disables it after the first success", async () => {
+    enable();
+    staleCandidates();
+    const action = hooks();
+    action.unfollow.mockImplementation(async () => {
+      saveAutomationSettings(1, { unfollow: { directPool: false } });
+    });
+    const result = await submitUnfollowBatch({ accountId: 1, now: SLOT, hooks: action });
+    expect(readAutomationSettings(1).unfollow.directPool).toBe(false);
+    expect(result).toMatchObject({ submitted: 2, unfollowed: 2 });
+    expect(result.results.map((row) => row.reason)).toEqual(["direct_pool", "direct_pool"]);
+    expect(action.inspect).not.toHaveBeenCalled();
+    expect(action.unfollow.mock.calls.map(([id]) => id)).toEqual(IDS);
+    expect(candidate(1, IDS[1])).toEqual({ status: "success", result: "success", reason: "direct_pool" });
+  });
+
+  it("keeps stale scheduler picks in direct-pool mode when the switch is turned off during DELETE", async () => {
+    vi.stubEnv("X_API_MODE", "live");
+    enable();
+    staleCandidates();
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe("DELETE");
+      saveAutomationSettings(1, { unfollow: { directPool: false } });
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    const result = await submitUnfollowBatch({ accountId: 1, now: SLOT });
+    expect(result).toMatchObject({ submitted: 2, unfollowed: 2 });
+    expect(result.results.map((row) => row.reason)).toEqual(["direct_pool", "direct_pool"]);
+    expect(candidate(1, IDS[1])).toEqual({ status: "success", result: "success", reason: "direct_pool" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("executes account 2 expired/missing candidates without inspecting or changing account 1", async () => {
+    enable(1, false);
+    staleCandidates(1);
+    const settings = readAutomationSettings(1);
+    const rows = getDb().prepare("SELECT * FROM unfollow_candidates WHERE account_id = 1").all();
+    enable(2);
+    staleCandidates(2);
+    const action = hooks();
+    const result = await submitUnfollowBatch({ accountId: 2, now: SLOT, hooks: action });
+    expect(result).toMatchObject({ submitted: 2, unfollowed: 2 });
+    expect(result.results.every((row) => row.result === "success" && row.reason === "direct_pool")).toBe(true);
+    expect(action.inspect).not.toHaveBeenCalled();
+    expect(action.unfollow.mock.calls.map(([id]) => id)).toEqual(IDS);
+    expect(readAutomationSettings(1)).toEqual(settings);
+    expect(getDb().prepare("SELECT * FROM unfollow_candidates WHERE account_id = 1").all()).toEqual(rows);
+    expect(getDb().prepare("SELECT COUNT(*) AS n FROM follow_blocklist").get()).toEqual({ n: 0 });
+  });
+
+  it.each([1, 2] as const)("executes DELETE via POST /api/unfollow/batches for account %s with live hooks", async (accountId) => {
+    vi.stubEnv("X_API_MODE", "live");
+    vi.stubGlobal("__xutiNow", SLOT);
+    enable(accountId);
+    staleCandidates(accountId);
+    saveAutomationSettings(accountId, { unfollow: { dailyCap: 2 } });
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe("DELETE");
+      return new Response(JSON.stringify({ data: { following: false } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    const response = await postUnfollowBatch(new Request("http://local/api/unfollow/batches", {
+      method: "POST", body: JSON.stringify({ accountId }),
+    }));
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result).toMatchObject({ accountId, submitted: 2, unfollowed: 2 });
+    expect(result.results.map((row: { reason: string }) => row.reason)).toEqual(["direct_pool", "direct_pool"]);
+    const source = accountId === 1 ? "1933586991612080128" : "1468479269701820422";
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual(IDS.map((id) => `https://api.x.com/2/users/${source}/following/${id}`));
+    for (const id of IDS) expect(followBlocked(accountId, id)).toBe(accountId === 1);
+    vi.stubGlobal("__xutiNow", NEXT);
+    const capped = await postUnfollowBatch(new Request("http://local/api/unfollow/batches", {
+      method: "POST", body: JSON.stringify({ accountId }),
+    }));
+    expect((await capped.json()).reason).toBe("daily_cap");
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("respects batch size and the remaining daily cap across slots", async () => {

@@ -10,17 +10,15 @@ export function ApprovedListFollowControl(props: {
   status: string;
   busy: boolean;
   onChecked: (value: boolean) => void;
-  onSave: (body: { accountId: 1; approvedListFollow: boolean }) => void;
+  onSave: (body: { accountId: 1 | 2; approvedListFollow: boolean }) => void;
 }) {
-  if (props.accountId !== 1 || props.locked) {
-    return <p className="text-sm leading-6">{props.status || "账号2没有已筛名单开关，仍按原资格筛选。发现来的人不能把自己标成已筛名单。"}</p>;
-  }
   return (
     <div className="space-y-2 text-sm">
       <label className="flex items-center gap-2">
         <input
           type="checkbox"
           checked={props.checked}
+          disabled={props.busy || props.locked}
           aria-label="已筛名单直接关注"
           onChange={(event) => props.onChecked(event.target.checked)}
         />
@@ -28,13 +26,13 @@ export function ApprovedListFollowControl(props: {
       </label>
       <p data-approved-list-status="">{props.status}</p>
       <p className="text-xs leading-5 text-muted-foreground">
-        只作用于账号1执行白名单里、已经在关注储备中的人。永久取关黑名单、已经关注过的人，以及固定永不取关名单仍然跳过。不在白名单上的人和账号2仍按原筛选。保存不会开始运行，也不改「自动化设置」里保存的时区、时间窗、工作/休息分钟、日上限或每轮人数。
+        只作用于当前账号{props.accountId}自己的执行白名单里、已经在关注储备中的人。永久取关黑名单、已经关注过的人，以及适用的固定永不取关名单仍然跳过。不在本账号白名单上的人仍按原筛选。两个账号的开关与名单互不影响。保存不会开始运行，也不改「自动化设置」里保存的时区、时间窗、工作/休息分钟、日上限或每轮人数。
       </p>
       <Button
         type="button"
-        disabled={props.busy}
+        disabled={props.busy || props.locked}
         variant="outline"
-        onClick={() => props.onSave(approvedListFollowPutBody(props.checked))}
+        onClick={() => props.onSave(approvedListFollowPutBody(props.accountId, props.checked))}
       >
         保存已筛名单开关
       </Button>

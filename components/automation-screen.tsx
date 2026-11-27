@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApprovedListFollowControl } from "@/components/approved-list-follow-control";
 import { AutomationSettingsPanel } from "@/components/automation-settings-panel";
+import { FollowAllowlistControl } from "@/components/follow-allowlist-control";
 import { DailyPoolControl } from "@/components/daily-pool-control";
 import { useI18n } from "@/components/i18n-provider";
 import { RunAuthorizationPanel } from "@/components/run-authorization-panel";
@@ -106,9 +107,9 @@ export function AutomationScreen() {
   const [views, setViews] = useState<Record<AccountId, AutomationSettingsView | null>>({ 1: null, 2: null });
   const [actionNotes, setActionNotes] = useState<Record<AccountId, string>>({ 1: "", 2: "" });
   const [settingsReload, setSettingsReload] = useState(0);
-  const [approvedListFollow, setApprovedListFollow] = useState(false);
-  const [approvedListLocked, setApprovedListLocked] = useState(accountId !== 1);
-  const [approvedListStatus, setApprovedListStatus] = useState("");
+  const [approvedListFollow, setApprovedListFollow] = useState<Record<AccountId, boolean>>({ 1: false, 2: false });
+  const [approvedListLocked, setApprovedListLocked] = useState<Record<AccountId, boolean>>({ 1: false, 2: false });
+  const [approvedListStatus, setApprovedListStatus] = useState<Record<AccountId, string>>({ 1: "", 2: "" });
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -135,9 +136,9 @@ export function AutomationScreen() {
         if (cancel || config.accountId !== accountId) return;
         rememberConfig(config);
         setKw(config.keywords.join(", "));
-        setApprovedListFollow(config.approvedListFollow === true);
-        setApprovedListLocked(config.approvedListFollowLocked !== false);
-        setApprovedListStatus(config.approvedListStatus ?? "");
+        setApprovedListFollow((current) => ({ ...current, [config.accountId]: config.approvedListFollow === true }));
+        setApprovedListLocked((current) => ({ ...current, [config.accountId]: config.approvedListFollowLocked !== false }));
+        setApprovedListStatus((current) => ({ ...current, [config.accountId]: config.approvedListStatus ?? "" }));
       })
       .catch((error) => { if (!cancel) setErr(error instanceof Error ? error.message : String(error)); });
     return () => { cancel = true; };
@@ -285,24 +286,25 @@ export function AutomationScreen() {
           </div>
           <ApprovedListFollowControl
             accountId={accountId}
-            checked={approvedListFollow}
-            locked={approvedListLocked}
-            status={approvedListStatus}
-            busy={busy}
-            onChecked={setApprovedListFollow}
+            checked={approvedListFollow[accountId]}
+            locked={approvedListLocked[accountId]}
+            status={approvedListStatus[accountId]}
+            busy={busy || !config}
+            onChecked={(checked) => setApprovedListFollow((current) => ({ ...current, [accountId]: checked }))}
             onSave={async (body) => {
               setBusy(true);
               try {
                 const saved = await api<FollowConfig>("/api/follow/config", { method: "PUT", body: JSON.stringify(body) });
-                if (saved.accountId === 1) rememberConfig(saved);
-                setApprovedListFollow(saved.approvedListFollow === true);
-                setApprovedListLocked(saved.approvedListFollowLocked !== false);
-                setApprovedListStatus(saved.approvedListStatus ?? "");
-                noteFor(1, saved.approvedListStatus ?? "");
+                rememberConfig(saved);
+                setApprovedListFollow((current) => ({ ...current, [saved.accountId]: saved.approvedListFollow === true }));
+                setApprovedListLocked((current) => ({ ...current, [saved.accountId]: saved.approvedListFollowLocked !== false }));
+                setApprovedListStatus((current) => ({ ...current, [saved.accountId]: saved.approvedListStatus ?? "" }));
+                noteFor(saved.accountId, saved.approvedListStatus ?? "");
               } catch (error) { setErr(error instanceof Error ? error.message : String(error)); }
               finally { setBusy(false); }
             }}
           />
+          <FollowAllowlistControl key={accountId} accountId={accountId} locale={locale} />
           {accountId === 1 && config?.ops && "followback" in config.ops ? (
             <DailyPoolControl
               locale={locale}

@@ -449,8 +449,7 @@ function selectable(accountId: AccountId, row: CandidateRow): boolean {
   return Boolean(normalizeTier(row.tier)) && !unfollowWhitelist(accountId).has(row.target_user_id);
 }
 
-function selectBatch(accountId: AccountId, now?: Date, evidenceBacked = false, limit = UNFOLLOW_BATCH_LIMIT): CandidateRow[] {
-  const directPool = currentSettings(accountId).unfollow.directPool;
+function selectBatch(accountId: AccountId, directPool: boolean, now?: Date, evidenceBacked = false, limit = UNFOLLOW_BATCH_LIMIT): CandidateRow[] {
   return candidateRows(accountId)
     .filter((row) => selectable(accountId, row))
     .filter((row) => directPool || !evidenceBacked || !now || unfollowEvidenceState(accountId, row.target_user_id, now) === "fresh")
@@ -476,8 +475,8 @@ function unfollowedOnQuotaDay(accountId: AccountId, now: Date): number {
   return row.n;
 }
 
-function noteStaleEvidence(accountId: AccountId, now: Date) {
-  if (currentSettings(accountId).unfollow.directPool) return;
+function noteStaleEvidence(accountId: AccountId, now: Date, directPool: boolean) {
+  if (directPool) return;
   const stamp = now.toISOString();
   const update = getDb().prepare(
     `UPDATE unfollow_candidates SET result = 'skipped', reason = ?, updated_at = ?
@@ -583,7 +582,8 @@ export async function submitUnfollowBatch(input: {
   const sourceUserId = executionUserId(accountId);
   if (!sourceUserId) return emptyResult(accountId, slot, "identity_unconfirmed");
   if (controlPaused(accountId)) return emptyResult(accountId, slot, "paused");
-  const pauseOnRisk = unfollowPausesOnRisk(accountId);
+  const directPool = currentSettings(accountId).unfollow.directPool;
+  const pauseOnRisk = directPool || unfollowPausesOnRisk(accountId);
   const cap = unfollowDailyCap(accountId);
   let room = unfollowBatchSize(accountId);
   if (cap !== null) {
@@ -618,8 +618,8 @@ export async function submitUnfollowBatch(input: {
   if (running) return emptyResult(accountId, slot, "overlap");
 
   const evidenceBacked = !input.hooks;
-  if (evidenceBacked) noteStaleEvidence(accountId, now);
-  const picked = selectBatch(accountId, now, evidenceBacked, room);
+  if (evidenceBacked) noteStaleEvidence(accountId, now, directPool);
+  const picked = selectBatch(accountId, directPool, now, evidenceBacked, room);
   try {
     db.prepare(
       `INSERT INTO unfollow_batches (account_id, slot, status, submitted, unfollowed, results_json, started_at)
@@ -638,8 +638,8 @@ export async function submitUnfollowBatch(input: {
       ).run(slot, new Date().toISOString(), accountId, row.target_user_id);
       let outcome: { result: UnfollowOutcome; reason: string };
       try {
-        if (currentSettings(accountId).unfollow.directPool) {
-          if (unfollowWhitelist(accountId).has(row.target_user_id)) outcome = { result: "skipped", reason: "whitelisted" };
+        if (directPool) {
+          if (unfollowWhitelist(accountId).has(row.target_user_id)) outcome = { result: "skipped", reason: "whitelist" };
           else {
             await hooks.unfollow(row.target_user_id);
             outcome = { result: "success", reason: "direct_pool" };

@@ -53,12 +53,11 @@ export function getFollowConfig(accountId: AccountId, now = new Date()) {
   };
 }
 
-/** Saves only the account 1 approved-list switch. Keywords, ops, reserve, and evidence stay as they are. */
+/** Saves only this account's approved-list switch. Keywords, ops, reserve, and evidence stay as they are. */
 export function saveApprovedListFollowSetting(accountId: AccountId, value: unknown) {
-  if (accountId !== 1) persistApprovedListFollow(accountId, value);
-  ensureFollowConfig(1);
-  persistApprovedListFollow(1, value);
-  return getFollowConfig(1);
+  ensureFollowConfig(accountId);
+  persistApprovedListFollow(accountId, value);
+  return getFollowConfig(accountId);
 }
 
 export function saveFollowOps(accountId: AccountId, ops: unknown) {
